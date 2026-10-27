@@ -38,6 +38,11 @@ primary_region = "lhr"
   method = "GET"
   path = "/health"
 
+# Agents run a coding subprocess with tests; 1 GB was not enough and the machine died.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1gb"
+  memory = "2gb"
+
+# If the process crashes, bring the machine back rather than leaving it stopped.
+[[restart]]
+  policy = "always"
