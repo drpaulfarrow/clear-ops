@@ -18,6 +18,13 @@ export interface Job {
   status: JobStatus;
   /** Set when a restart interrupted the job and it was re-queued. */
   resumed?: number;
+  /**
+   * Set while the job waits for the per-target engineering lock: the id of the job holding it.
+   * A queued job with this set has never started; one without it is about to start.
+   */
+  waitingFor?: string;
+  /** Position in its target's queue, increasing. Persisted so FIFO order survives a restart. */
+  queuePos?: number;
   createdAt: string;
   finishedAt?: string;
   summary?: string;
@@ -129,6 +136,10 @@ export class Store {
   /** Jobs a previous process left running. Called once on boot so they can be resumed. */
   interruptedJobs(): Job[] {
     return Object.values(this.state.jobs).filter((j) => j.status === "running" || j.status === "queued");
+  }
+  /** Every job, in no particular order. */
+  allJobs(): Job[] {
+    return Object.values(this.state.jobs);
   }
   listJobs(limit = 10): Job[] {
     return Object.values(this.state.jobs)
