@@ -6,8 +6,11 @@ function req(name: string): string {
   return v;
 }
 
+export type Channel = "telegram" | "whatsapp";
+
 export const config = {
   port: Number(process.env.PORT ?? 8080),
+  channel: (process.env.CHANNEL ?? "telegram") as Channel,
   dataDir: path.resolve(process.env.DATA_DIR ?? "./data"),
   repoDir: path.resolve(process.env.REPO_DIR ?? "./workspace"),
   /** A clone of this service's own repository, so the engineer can improve the workforce itself. */
@@ -16,6 +19,14 @@ export const config = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
+  allowedTelegramIds: (process.env.ALLOWED_TELEGRAM_IDS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((id) => `tg:${id}`),
+  telegram: {
+    token: process.env.TELEGRAM_BOT_TOKEN ?? "",
+  },
   whatsapp: {
     token: process.env.WHATSAPP_TOKEN ?? "",
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? "",
@@ -34,13 +45,21 @@ export const config = {
   maxMessageChars: 3900,
 };
 
+/** Everyone the workforce will answer, across channels. */
+export function isAllowed(from: string): boolean {
+  return config.allowedNumbers.includes(from) || config.allowedTelegramIds.includes(from);
+}
+
 /** Validate what production needs. Tests and the simulator skip this. */
 export function assertProductionConfig(): void {
   req("ANTHROPIC_API_KEY");
-  req("WHATSAPP_TOKEN");
-  req("WHATSAPP_PHONE_NUMBER_ID");
-  req("WHATSAPP_VERIFY_TOKEN");
-  if (config.allowedNumbers.length === 0) {
-    throw new Error("ALLOWED_NUMBERS must list at least one phone number");
+  if (config.channel === "telegram") {
+    req("TELEGRAM_BOT_TOKEN");
+    if (config.allowedTelegramIds.length === 0) throw new Error("ALLOWED_TELEGRAM_IDS must list at least one Telegram id");
+  } else {
+    req("WHATSAPP_TOKEN");
+    req("WHATSAPP_PHONE_NUMBER_ID");
+    req("WHATSAPP_VERIFY_TOKEN");
+    if (config.allowedNumbers.length === 0) throw new Error("ALLOWED_NUMBERS must list at least one phone number");
   }
 }

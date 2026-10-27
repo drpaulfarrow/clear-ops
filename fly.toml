@@ -1,7 +1,7 @@
 # Fly.io deployment. One small machine in London, a persistent volume for state and the repo.
 #   fly launch --no-deploy --copy-config
 #   fly volumes create clear_ops_data --region lhr --size 3
-#   fly secrets set ANTHROPIC_API_KEY=... WHATSAPP_TOKEN=... WHATSAPP_PHONE_NUMBER_ID=... WHATSAPP_VERIFY_TOKEN=... WHATSAPP_APP_SECRET=... ALLOWED_NUMBERS=447...
+#   fly secrets set ANTHROPIC_API_KEY=... GH_TOKEN=... TELEGRAM_BOT_TOKEN=... ALLOWED_TELEGRAM_IDS=...
 #   fly deploy
 app = "clear-ops"
 primary_region = "lhr"
@@ -11,6 +11,7 @@ primary_region = "lhr"
 
 [env]
   PORT = "8080"
+  CHANNEL = "telegram"
   DATA_DIR = "/data"
   REPO_DIR = "/data/workspace"
   SELF_REPO_DIR = "/data/self"

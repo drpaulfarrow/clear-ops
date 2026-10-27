@@ -6,6 +6,8 @@ import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
 import { Store } from "./store.js";
 import { CloudApiMessenger, parseInbound, verifySignature, type Messenger } from "./whatsapp.js";
+import { TelegramMessenger, TelegramPoller } from "./telegram.js";
+import { isAllowed } from "./config.js";
 import type { AgentRunner } from "./agents.js";
 
 export interface AppDeps {
@@ -56,6 +58,10 @@ const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].repla
 if (isMain) {
   assertProductionConfig();
   const store = new Store(config.dataDir);
-  const { app } = buildApp({ messenger: new CloudApiMessenger(), runner: sdkRunner, store });
-  app.listen(config.port, () => console.log(`clear-ops listening on :${config.port}`));
+  const messenger: Messenger = config.channel === "telegram" ? new TelegramMessenger() : new CloudApiMessenger();
+  const { app, orchestrator } = buildApp({ messenger, runner: sdkRunner, store });
+  app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channel})`));
+  if (config.channel === "telegram") {
+    void new TelegramPoller((from, text) => orchestrator.handle(from, text), messenger, isAllowed).start();
+  }
 }

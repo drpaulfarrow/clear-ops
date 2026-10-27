@@ -1,6 +1,6 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { config } from "./config.js";
+import { config, isAllowed } from "./config.js";
 import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
 import { ACTION_KINDS, actionExecutors, type JobRunner } from "./jobs.js";
@@ -10,7 +10,7 @@ import type { Messenger } from "./whatsapp.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
 
-You talk to Paul over WhatsApp, so keep replies short: a few sentences, or a compact list when he is choosing between things. No em dashes. British English. Direct and honest; no flattery.
+You talk to Paul over a chat app on his phone, so keep replies short: a few sentences, or a compact list when he is choosing between things. No em dashes. British English. Direct and honest; no flattery.
 
 You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data). Every agent can read both repositories. Give the engineer a clear outcome, not instructions on how; it decides the approach. If the maintainer requests changes, start a new engineer job whose brief is to address the review comments on that pull request. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
 
@@ -40,8 +40,8 @@ export class Orchestrator {
   }
 
   private async handleOne(from: string, text: string): Promise<void> {
-    if (!config.allowedNumbers.includes(from)) {
-      console.warn(`Ignored message from unlisted number ${from}`);
+    if (!isAllowed(from)) {
+      console.warn(`Ignored message from unlisted sender ${from}`);
       return;
     }
     const trimmed = text.trim();
@@ -55,7 +55,7 @@ export class Orchestrator {
     }
     if (/^\/jobs$/i.test(trimmed)) return this.messenger.send(from, this.jobsText());
     if (/^\/pending$/i.test(trimmed)) return this.messenger.send(from, this.pendingText());
-    if (/^\/help$/i.test(trimmed)) return this.messenger.send(from, HELP);
+    if (/^\/(help|start)$/i.test(trimmed)) return this.messenger.send(from, HELP);
     const show = trimmed.match(/^show job ([a-f0-9]{6})$/i);
     if (show) {
       const out = this.store.readOutput(show[1].toLowerCase());
@@ -232,8 +232,8 @@ export class Orchestrator {
 const HELP = `Talk to me normally. I answer quick things myself and delegate the rest.
 
 Commands:
-/jobs – recent jobs
-/pending – actions waiting for your approval
-show job <id> – full output of a job
-YES <id> / NO <id> – approve or reject an action
-/reset – start a fresh conversation (jobs and notes are kept)`;
+/jobs: recent jobs
+/pending: actions waiting for your approval
+show job <id>: full output of a job
+YES <id> or NO <id>: approve or reject an action
+/reset: start a fresh conversation (jobs and notes are kept)`;

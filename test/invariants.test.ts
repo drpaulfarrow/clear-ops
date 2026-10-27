@@ -10,7 +10,11 @@ const src = (f: string) => fs.readFileSync(new URL(`../src/${f}`, import.meta.ur
 
 test("only allowlisted numbers are answered", () => {
   const orch = src("orchestrator.ts");
-  assert.match(orch, /config\.allowedNumbers\.includes\(from\)/, "the allowlist check must stay in the orchestrator");
+  assert.match(orch, /if \(!isAllowed\(from\)\)/, "the allowlist check must stay in the orchestrator");
+  const cfg = src("config.ts");
+  assert.match(cfg, /allowedNumbers\.includes\(from\) \|\| config\.allowedTelegramIds\.includes\(from\)/);
+  const tg = src("telegram.ts");
+  assert.match(tg, /if \(this\.isAllowed\(m\.from\)\) void this\.handle/, "the Telegram poller must check the allowlist before handling");
 });
 
 test("webhook signatures are verified before any message is processed", () => {

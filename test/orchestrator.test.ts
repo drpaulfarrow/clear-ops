@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 process.env.ALLOWED_NUMBERS = "447700900123";
+process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.WHATSAPP_VERIFY_TOKEN = "verify-me";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-"));
 
@@ -156,6 +157,33 @@ test("/reset clears the session and /jobs lists jobs", async () => {
   assert.equal(store.getSession("447700900123"), undefined);
   await post(inbound("447700900123", "/jobs"));
   await waitFor(() => messenger.sent.some((m) => /research done/.test(m.text)));
+});
+
+test("Telegram: private text messages are parsed, allowlisted ids reach the chief, others get the id hint once", async () => {
+  const { parseUpdates, TelegramPoller, tgId } = await import("../src/telegram.js");
+  const { isAllowed } = await import("../src/config.js");
+  const updates = [
+    { update_id: 1, message: { message_id: 1, text: "hello", chat: { id: 99887766, type: "private" } } },
+    { update_id: 2, message: { message_id: 2, text: "group noise", chat: { id: -100, type: "supergroup" } } },
+    { update_id: 3, message: { message_id: 3, chat: { id: 99887766, type: "private" } } },
+  ];
+  assert.deepEqual(parseUpdates(updates as any), [{ from: "tg:99887766", text: "hello" }]);
+  assert.equal(isAllowed(tgId(99887766)), true);
+  assert.equal(isAllowed(tgId(1)), false);
+
+  const handled: string[] = [];
+  const tgMessenger = new ConsoleMessenger();
+  const poller = new TelegramPoller(async (from, text) => void handled.push(`${from}:${text}`), tgMessenger, isAllowed);
+  assert.ok(poller, "poller constructs without touching the network");
+  const { Orchestrator } = await import("../src/orchestrator.js");
+  const { JobRunner } = await import("../src/jobs.js");
+  const { Scheduler } = await import("../src/scheduler.js");
+  const jobs = new JobRunner(store, tgMessenger, fakeRunner);
+  const orch = new Orchestrator(store, tgMessenger, jobs, new Scheduler(store, jobs), fakeRunner);
+  await orch.handle("tg:99887766", "/start");
+  assert.ok(tgMessenger.sent.some((m) => m.to === "tg:99887766" && m.text.startsWith("Talk to me normally")));
+  await orch.handle("tg:1", "hello");
+  assert.ok(!tgMessenger.sent.some((m) => m.to === "tg:1"), "unlisted Telegram ids are ignored by the orchestrator");
 });
 
 test("chunk splits long text on paragraph boundaries within the limit", () => {
