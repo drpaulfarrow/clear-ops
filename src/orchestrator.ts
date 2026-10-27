@@ -12,7 +12,7 @@ const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company b
 
 You talk to Paul over a chat app on his phone, so keep replies short: a few sentences, or a compact list when he is choosing between things. No em dashes. British English. Direct and honest; no flattery.
 
-You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data). Every agent can read both repositories. Give the engineer a clear outcome, not instructions on how; it decides the approach. If the maintainer requests changes, start a new engineer job whose brief is to address the review comments on that pull request. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
+You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data), create_agent (the agent-creator, see below). Every agent can read both repositories. Give the engineer a clear outcome, not instructions on how; it decides the approach. If the maintainer requests changes, start a new engineer job whose brief is to address the review comments on that pull request. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. When Paul asks for a new kind of agent in plain language ("I want an agent that monitors IAB Tech Lab announcements weekly", "an agent that drafts publisher outreach"), start a create_agent job and pass his request on in his words, plus any context from the conversation; do not design it yourself or tell him how it will be built. The agent-creator decides whether it is a scheduled job on an existing kind (it then recommends a brief and cron and writes no code) or a new worker kind (it opens a pull request on this workforce, which the maintainer reviews and merges like any other). When it recommends a schedule and Paul agrees, read the job with get_output and call schedule_job with the kind, cron and brief it gave. Use engineer with target "self" for other changes to the workforce, and create_agent only for adding an agent. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
 
 You never send email, post publicly, sign anything or move money. Side effects outside the workers' remit (a deploy or migration command, for example) go through propose_action, which asks Paul to reply YES <id>; only run_command exists. Recurring work goes through schedule_job with a cron expression in Europe/London time. If Paul tells you something to apply from now on, store it with remember.
 
@@ -148,6 +148,7 @@ export class Orchestrator {
     const jobs = this.jobs;
     const scheduler = this.scheduler;
     const kind = z.enum(JOB_KINDS as [JobKind, ...JobKind[]]);
+    const scheduleKind = z.enum(JOB_KINDS.filter((k) => k !== "create_agent") as [JobKind, ...JobKind[]]);
 
     return createSdkMcpServer({
       name: "ops",
@@ -155,13 +156,14 @@ export class Orchestrator {
       tools: [
         tool(
           "start_job",
-          "Delegate a task to a worker agent. Returns a job id. The worker messages the founder when it finishes.",
+          "Delegate a task to a worker agent. Returns a job id. The worker messages the founder when it finishes. Use kind create_agent when the founder asks for a new kind of agent; its brief is his request in plain language.",
           {
             kind,
             brief: z.string().describe("A complete, self-contained brief. The worker has no other context."),
-            target: z.enum(["product", "self"]).default("product").describe('Engineer only. "product" is the Clear Exchange repository; "self" is this workforce\'s own code.'),
+            target: z.enum(["product", "self"]).default("product").describe('Engineer only. "product" is the Clear Exchange repository; "self" is this workforce\'s own code. create_agent always works on "self".'),
           },
           async ({ kind, brief, target }) => {
+            if (kind === "create_agent") target = "self";
             // On channels with threads, give the job its own thread so its reports and the maintainer's review stay together.
             let replyTo = from;
             if (this.messenger.openThread && messageId) {
@@ -212,7 +214,8 @@ export class Orchestrator {
         tool(
           "schedule_job",
           "Create a recurring job. cron is a 5-field expression evaluated in Europe/London.",
-          { cron: z.string(), kind, brief: z.string() },
+          // Adding agents on a timer makes no sense and would open pull requests unattended.
+          { cron: z.string(), kind: scheduleKind, brief: z.string() },
           async ({ cron, kind, brief }) => {
             const s = scheduler.add({ cron, timezone: "Europe/London", kind, brief, requestedBy: sender, replyTo: from });
             return { content: [{ type: "text", text: `Scheduled ${s.id}: ${s.cron} (${kind}).` }] };

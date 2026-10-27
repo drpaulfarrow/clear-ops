@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 
-export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse";
+export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent";
 /** Which codebase an engineering job works in: the product, or this workforce itself. */
 export type JobTarget = "product" | "self";
 export type JobStatus = "queued" | "running" | "done" | "failed";
