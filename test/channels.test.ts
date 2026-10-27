@@ -39,8 +39,16 @@ const waitFor = async (pred: () => boolean, ms = 2000) => {
   }
 };
 
-test("config runs both channels and the allowlist spans them", () => {
+test("config runs both channels and the allowlist spans them; a channel without a token is dropped, not fatal", async () => {
   assert.deepEqual(config.channels, ["telegram", "discord"]);
+  const { assertProductionConfig } = await import("../src/config.js");
+  process.env.ANTHROPIC_API_KEY = "x";
+  config.telegram.token = "t";
+  config.discord.token = "";
+  assertProductionConfig();
+  assert.deepEqual(config.channels, ["telegram"], "Discord without a token is switched off, Telegram keeps running");
+  config.channels = ["telegram", "discord"];
+  config.discord.token = "d";
   assert.equal(isAllowed(dcUser("424242")), true);
   assert.equal(isAllowed("tg:99887766"), true);
   assert.equal(isAllowed(dcUser("1")), false);

@@ -73,22 +73,25 @@ export function isAllowed(from: string): boolean {
 /** Validate what production needs. Tests and the simulator skip this. */
 export function assertProductionConfig(): void {
   req("ANTHROPIC_API_KEY");
-  if (config.channels.length === 0) throw new Error("CHANNELS must name at least one of telegram, discord, whatsapp");
+  // A channel whose token is missing is dropped with a warning rather than stopping the service,
+  // so adding Discord to the list before its token exists cannot take Telegram down.
+  const usable: Channel[] = [];
   for (const c of config.channels) {
     if (c === "telegram") {
-      req("TELEGRAM_BOT_TOKEN");
-      // An empty allowlist is not fatal: the bot starts, answers nobody, and tells whoever messages it their id.
+      if (!config.telegram.token) { console.warn("TELEGRAM_BOT_TOKEN is not set; Telegram is off."); continue; }
       if (config.allowedTelegramIds.length === 0) console.warn("ALLOWED_TELEGRAM_IDS is empty. Message the bot to learn your id, then set it and redeploy.");
     } else if (c === "discord") {
-      req("DISCORD_BOT_TOKEN");
+      if (!config.discord.token) { console.warn("DISCORD_BOT_TOKEN is not set; Discord is off."); continue; }
       if (config.allowedDiscordIds.length === 0) console.warn("ALLOWED_DISCORD_IDS is empty. Message the bot to learn your id, then set it and redeploy.");
     } else if (c === "whatsapp") {
-      req("WHATSAPP_TOKEN");
-      req("WHATSAPP_PHONE_NUMBER_ID");
-      req("WHATSAPP_VERIFY_TOKEN");
-      if (config.allowedNumbers.length === 0) throw new Error("ALLOWED_NUMBERS must list at least one phone number");
+      if (!config.whatsapp.token || !config.whatsapp.phoneNumberId || !config.whatsapp.verifyToken) { console.warn("WhatsApp settings are incomplete; WhatsApp is off."); continue; }
+      if (config.allowedNumbers.length === 0) console.warn("ALLOWED_NUMBERS is empty; WhatsApp will answer nobody.");
     } else {
-      throw new Error(`Unknown channel "${c}"`);
+      console.warn(`Unknown channel "${c}" ignored.`);
+      continue;
     }
+    usable.push(c);
   }
+  if (usable.length === 0) throw new Error("No channel is configured: set TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN or the WhatsApp settings.");
+  config.channels = usable;
 }
