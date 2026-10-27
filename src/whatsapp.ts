@@ -83,11 +83,12 @@ export class CloudApiMessenger implements Messenger {
   }
 }
 
-/** Prints instead of sending. Used by tests and the local simulator. */
+/** Records instead of sending. The simulator prints; tests stay quiet so the test runner's output stream is untouched. */
 export class ConsoleMessenger implements Messenger {
   readonly sent: Array<{ to: string; text: string }> = [];
+  constructor(private readonly print = false) {}
   async send(to: string, text: string): Promise<void> {
     this.sent.push({ to, text });
-    console.log(`\n→ ${to}\n${text}\n`);
+    if (this.print) console.log(`\n> ${to}\n${text}\n`);
   }
 }
