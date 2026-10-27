@@ -48,12 +48,27 @@ git -C workspace config user.email "engineer@clear.exchange"
 The engineer only works here. It must not be, or contain, anything from previous employer repositories. Protect `main` in the repo settings: require a pull request and the CI check before merging. That makes the maintainer's role a rule GitHub enforces, not only a prompt. Add a workflow that runs the tests on pull requests so the maintainer has a green check to look for.
 
 ### 4. Run it
+Needs Node 22 or later (`node --version`) and git. The engineer and maintainer also need the GitHub CLI (`gh`).
+
+macOS or Linux:
 ```bash
-cp .env.example .env            # fill in the values
+git clone https://github.com/drpaulfarrow/clear-ops
+cd clear-ops
+cp .env.example .env             # fill in the values
 npm install
-npm run simulate                 # optional: chat in the terminal, no bot needed
-npm run dev                      # the real thing; message your Telegram bot
+npm run dev                      # message your Telegram bot
 ```
+
+Windows PowerShell (one command per line; `&&` only works in PowerShell 7):
+```powershell
+git clone https://github.com/drpaulfarrow/clear-ops
+cd clear-ops
+Copy-Item .env.example .env      # then edit .env in Notepad or VS Code
+npm install
+npm run dev
+```
+
+`npm run simulate` chats in the terminal instead of Telegram, for trying things without a bot. The `.env` file is read automatically.
 
 ### 5. Deploy (Fly.io, London)
 ```bash
