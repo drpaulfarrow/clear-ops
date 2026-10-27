@@ -77,7 +77,7 @@ test("a plain message goes to the chief and the reply comes back, session is sto
   assert.equal(store.getSession("447700900123"), "sess-1");
   const last = calls.at(-1)!;
   assert.equal(last.model, "opus");
-  assert.deepEqual(last.allowedTools, ["WebSearch", "WebFetch", "mcp__ops__*"]);
+  assert.deepEqual(last.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*"]);
 });
 
 test("a second message resumes the stored session", async () => {
@@ -101,7 +101,7 @@ test("delegation starts a job and the worker reports back", async () => {
   assert.equal(job.status, "done");
   assert.ok(store.readOutput(job.id)?.startsWith("worker(sonnet)"));
   const workerCall = calls.find((c) => c.systemPrompt.includes("research analyst"))!;
-  assert.deepEqual(workerCall.allowedTools, ["WebSearch", "WebFetch"]);
+  assert.deepEqual(workerCall.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
   assert.ok(workerCall.systemPrompt.includes("Clean room rule"));
 });
 
@@ -115,8 +115,24 @@ test("an engineer job targeted at the workforce itself runs in SELF_REPO_DIR wit
   assert.equal(call.cwd, config.selfRepoDir);
   assert.match(call.systemPrompt, /This task is on the workforce itself/);
   assert.match(call.systemPrompt, /senior engineer/);
-  assert.ok(call.agents?.reviewer, "self-improvement still goes through the reviewer");
   assert.ok(messenger.sent.some((m) => m.text.startsWith(`Job ${job.id} (engineer, workforce) finished`)));
+});
+
+test("every engineer job is followed by a maintainer job on the same target, and only the maintainer may merge", async () => {
+  const { JobRunner } = await import("../src/jobs.js");
+  const { workerSpec } = await import("../src/agents.js");
+  const runner = new JobRunner(store, messenger, fakeRunner);
+  const job = runner.start("engineer", "Add a /health detail", "447700900123", "self");
+  await waitFor(() => store.listJobs(20).some((j) => j.kind === "maintain" && j.brief.includes("Add a /health detail")));
+  const maint = store.listJobs(20).find((j) => j.kind === "maintain" && j.brief.includes("Add a /health detail"))!;
+  assert.equal(maint.target, "self");
+  await waitFor(() => store.getJob(maint.id)?.status === "done");
+  const eng = workerSpec("engineer");
+  for (const rule of ['"Bash(gh pr merge*)"', "Bash(git merge*)"]) assert.ok(eng.disallowedTools!.some((r) => r.includes(rule.replace(/"/g, ""))), `engineer must not ${rule}`);
+  const m = workerSpec("maintain");
+  assert.ok(!m.disallowedTools!.some((r) => r.includes("gh pr merge")), "maintainer may merge");
+  assert.ok(m.disallowedTools!.includes("Edit") && m.disallowedTools!.includes("Write"), "maintainer does not write code");
+  assert.ok(messenger.sent.some((t) => t.text.includes(`Job ${job.id} (engineer, workforce) finished`) && t.text.includes("Maintainer job")));
 });
 
 test("approval flow: unknown id, reject, and executor failure are all reported", async () => {

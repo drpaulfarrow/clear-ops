@@ -1,5 +1,6 @@
-# Tests on every push and pull request. Deploys main to Fly when they pass.
-# The engineer merges to main; this is what takes its change live.
+# Tests on every push and pull request. Deploys main to Fly when they pass and a
+# FLY_API_TOKEN secret exists; until then the deploy job completes without doing anything.
+# The maintainer merges to main; this is what takes its change live.
 name: ci
 on:
   push:
@@ -21,8 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     concurrency: deploy
     steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only --strategy rolling
+      - id: check
+        run: echo "ready=${{ secrets.FLY_API_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+      - if: steps.check.outputs.ready != 'true'
+        run: echo "No FLY_API_TOKEN secret yet; skipping deploy."
+      - if: steps.check.outputs.ready == 'true'
+        uses: actions/checkout@v4
+      - if: steps.check.outputs.ready == 'true'
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - if: steps.check.outputs.ready == 'true'
+        run: flyctl deploy --remote-only --strategy rolling
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

@@ -2,7 +2,7 @@
 
 An agentic workforce for Clear Exchange that you run from WhatsApp.
 
-You message a WhatsApp number. A chief-of-staff agent answers quick questions itself and delegates longer work to four workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements, tests, gets an independent review, merges and pushes on its own) and an analyst (questions about previous outputs and data). Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
+You message a WhatsApp number. A chief-of-staff agent answers quick questions itself and delegates longer work to five workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) and an analyst (questions about previous outputs and data). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
 
 Everything runs on the Claude Agent SDK. Conversation memory persists per phone number; jobs, approvals, schedules and standing notes persist in a JSON store on a volume.
 
@@ -32,13 +32,13 @@ Create an API key at the Claude Console and keep it for step 4.
 4. Add your personal number as a recipient (test numbers can only message listed recipients).
 
 ### 3. A clean repository for the engineer
-Create an empty private repo (for example `clear-exchange`) and a fine-grained GitHub token with contents read and write on that repo. Clone it with the token in the URL so the engineer can push:
+Create an empty private repo (for example `clear-exchange`) and a fine-grained GitHub token with contents and pull requests read and write on that repo and on this one. Put it in `GH_TOKEN` (the `gh` CLI reads it) and clone with it in the URL so git can push:
 ```bash
 git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-exchange workspace
 git -C workspace config user.name "Clear Exchange engineer"
 git -C workspace config user.email "engineer@clear.exchange"
 ```
-The engineer only works here. It must not be, or contain, anything from previous employer repositories. If you add CI (a GitHub Actions workflow that runs the tests on push), the engineer treats a red build as not done.
+The engineer only works here. It must not be, or contain, anything from previous employer repositories. Protect `main` in the repo settings: require a pull request and the CI check before merging. That makes the maintainer's role a rule GitHub enforces, not only a prompt. Add a workflow that runs the tests on pull requests so the maintainer has a green check to look for.
 
 ### 4. Run it
 Locally first:
@@ -67,7 +67,7 @@ fly ssh console -C "git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<
 Point the Meta callback URL at `https://clear-ops.fly.dev/webhook`. Any host that runs a Docker container with a persistent volume works the same way (Azure Container Apps, Railway, a VPS).
 
 ## Self-improvement
-The engineer can work on this workforce as well as on the product. Say "improve yourself: add a tool that reads my Google Calendar" or "give the researcher a stricter sourcing rule" and the chief starts an engineer job with target `self`. The engineer clones nothing; it works in `SELF_REPO_DIR`, a checkout of this repository, under the same process as any other task: branch, tests, reviewer, merge, push. It cannot restart itself. The GitHub Actions workflow in `.github/workflows/deploy.yml` runs the tests on the merge and deploys to Fly with a rolling strategy, so the old version keeps answering until the new one passes its health check. A few minutes after the engineer reports, the new workforce is live, and your conversation continues from the stored session.
+The engineer can work on this workforce as well as on the product. Say "improve yourself: add a tool that reads my Google Calendar" or "give the researcher a stricter sourcing rule" and the chief starts an engineer job with target `self`. It works in `SELF_REPO_DIR`, a checkout of this repository, under the same process as any other task: branch, tests, pull request, then the maintainer reviews and merges. Nothing restarts itself. The GitHub Actions workflow in `.github/workflows/deploy.yml` runs the tests on the merge and deploys to Fly with a rolling strategy, so the old version keeps answering until the new one passes its health check. A few minutes after the engineer reports, the new workforce is live, and your conversation continues from the stored session.
 
 Setup for this: clone this repository into `SELF_REPO_DIR` with a token that can push (same pattern as step 3), and add `FLY_API_TOKEN` as a repository secret so the workflow can deploy. The invariants in `CLAUDE.md` and `test/invariants.test.ts` are what stop a self-improvement from removing the allowlist, the signature check, the clean-room rule or the spend caps.
 
@@ -86,7 +86,8 @@ See `.env.example`. The important ones:
 
 ## Safety model
 - Headless permission mode: tools not pre-approved are denied, never left waiting.
-- The engineer works like a senior engineer: branch, tests, an independent reviewer agent, merge, push. It cannot force-push, rewrite shared history, delete recursively or disable failing tests. If it cannot finish safely it pushes the branch unmerged and says why.
+- Engineers work like senior engineers: branch, tests, pull request. They cannot merge, push the default branch, force-push, rewrite shared history, delete recursively or disable failing tests.
+- One maintainer agent reviews and merges. It runs tests, checks CI, reads the diff, and either merges or requests changes. It cannot edit code. Branch protection on `main` is the hard backstop, since both agents use the same GitHub token.
 - One side effect exists outside that remit (`run_command`, for deploys and migrations) and it needs `YES <id>`.
 - The chief never sends email or messages anyone but you. Drafts come to you.
 - Spend is capped per job; subagent nesting is limited.

@@ -47,8 +47,8 @@ export class JobRunner {
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        maxTurns: job.kind === "engineer" ? 200 : 40,
-        maxBudgetUsd: job.kind === "engineer" ? config.engineerBudgetUsd : config.jobBudgetUsd,
+        maxTurns: job.kind === "engineer" ? 200 : job.kind === "maintain" ? 80 : 40,
+        maxBudgetUsd: job.kind === "engineer" || job.kind === "maintain" ? config.engineerBudgetUsd : config.jobBudgetUsd,
       });
       const outputPath = this.store.writeOutput(id, result.text);
       const summary = firstLines(result.text, 1200);
@@ -60,9 +60,20 @@ export class JobRunner {
         costUsd: result.costUsd,
       });
       const cost = result.costUsd != null ? ` Cost $${result.costUsd.toFixed(2)}.` : "";
+      // An engineer's pull request is reviewed by the maintainer without anyone asking.
+      let chained = "";
+      if (job.kind === "engineer") {
+        const m = this.start(
+          "maintain",
+          `Review the pull request just opened by the engineer for this task, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${result.text}`,
+          job.requestedBy,
+          job.target,
+        );
+        chained = `\nMaintainer job ${m.id} started to review and merge.`;
+      }
       await this.messenger.send(
         job.requestedBy,
-        `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
+        `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
       );
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
