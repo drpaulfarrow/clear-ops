@@ -8,6 +8,7 @@ import { Store } from "./store.js";
 import { CloudApiMessenger, parseInbound, verifySignature, type Messenger } from "./whatsapp.js";
 import { TelegramMessenger, TelegramPoller } from "./telegram.js";
 import { isAllowed } from "./config.js";
+import { bootstrapRepos } from "./bootstrap.js";
 import type { AgentRunner } from "./agents.js";
 
 export interface AppDeps {
@@ -57,6 +58,7 @@ export function buildApp(deps: AppDeps) {
 const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/").split("/").pop()!);
 if (isMain) {
   assertProductionConfig();
+  await bootstrapRepos();
   const store = new Store(config.dataDir);
   const messenger: Messenger = config.channel === "telegram" ? new TelegramMessenger() : new CloudApiMessenger();
   const { app, orchestrator } = buildApp({ messenger, runner: sdkRunner, store });

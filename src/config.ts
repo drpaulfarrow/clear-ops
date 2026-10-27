@@ -27,6 +27,11 @@ export const config = {
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN ?? "",
   },
+  /** GitHub "owner/name" slugs. Cloned automatically on first start when GH_TOKEN is set. */
+  repos: {
+    product: process.env.PRODUCT_REPO || undefined,
+    self: process.env.SELF_REPO || "drpaulfarrow/clear-ops",
+  },
   whatsapp: {
     token: process.env.WHATSAPP_TOKEN ?? "",
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? "",

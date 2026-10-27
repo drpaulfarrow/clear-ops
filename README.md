@@ -39,13 +39,7 @@ Set `CHANNEL=whatsapp`. At Meta for Developers, create an app of type Business a
 </details>
 
 ### 3. A clean repository for the engineer
-Create an empty private repo (for example `clear-exchange`) and a fine-grained GitHub token with contents and pull requests read and write on that repo and on this one. Put it in `GH_TOKEN` (the `gh` CLI reads it) and clone with it in the URL so git can push:
-```bash
-git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-exchange workspace
-git -C workspace config user.name "Clear Exchange engineer"
-git -C workspace config user.email "engineer@clear.exchange"
-```
-The engineer only works here. It must not be, or contain, anything from previous employer repositories. Protect `main` in the repo settings: require a pull request and the CI check before merging. That makes the maintainer's role a rule GitHub enforces, not only a prompt. Add a workflow that runs the tests on pull requests so the maintainer has a green check to look for.
+Create an empty private repo (for example `clear-exchange`) and a fine-grained GitHub token with contents and pull requests read and write on that repo and on this one. Put the token in `GH_TOKEN` and the repo names in `PRODUCT_REPO` and `SELF_REPO`. That is all: on first start the service clones both into `workspace/` and `self/` and configures git to push with the token. The engineer only works in the product repo. It must not be, or contain, anything from previous employer repositories. Protect `main` in the repo settings: require a pull request and the CI check before merging. That makes the maintainer's role a rule GitHub enforces, not only a prompt. Add a workflow that runs the tests on pull requests so the maintainer has a green check to look for.
 
 ### 4. Run it
 Needs Node 22 or later (`node --version`) and git. The engineer and maintainer also need the GitHub CLI (`gh`).
@@ -74,10 +68,9 @@ npm run dev
 ```bash
 fly launch --no-deploy --copy-config
 fly volumes create clear_ops_data --region lhr --size 3
-fly secrets set ANTHROPIC_API_KEY=... GH_TOKEN=... TELEGRAM_BOT_TOKEN=... ALLOWED_TELEGRAM_IDS=...
+fly secrets set ANTHROPIC_API_KEY=... GH_TOKEN=... PRODUCT_REPO=<you>/clear-exchange TELEGRAM_BOT_TOKEN=... ALLOWED_TELEGRAM_IDS=...
 fly deploy
-fly ssh console -C "git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-exchange /data/workspace"
-fly ssh console -C "git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-ops /data/self"
+# the service clones both repositories into the volume on first start
 ```
 Any host that runs a Docker container with a persistent volume works the same way (Azure Container Apps, Railway, a VPS). With Telegram there is no webhook to configure.
 
@@ -95,8 +88,9 @@ See `.env.example`. The important ones:
 | `ALLOWED_TELEGRAM_IDS` | Only these Telegram ids get a reply. |
 | `ALLOWED_NUMBERS` | WhatsApp: only these numbers get a reply. E.164 digits, no plus. |
 | `WHATSAPP_APP_SECRET` | WhatsApp: enables webhook signature checks. Set it in production. |
-| `REPO_DIR` | The clean product repository the engineer works in. |
-| `SELF_REPO_DIR` | A checkout of this repository, for self-improvement jobs. |
+| `GH_TOKEN` | Fine-grained token with contents and pull requests read/write on both repos. |
+| `PRODUCT_REPO`, `SELF_REPO` | The two repositories as `owner/name`, cloned on first start. |
+| `REPO_DIR`, `SELF_REPO_DIR` | Where the clones live. |
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. |
 | `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
 | `ENGINEER_BUDGET_USD` | Spend cap per engineering job. |
