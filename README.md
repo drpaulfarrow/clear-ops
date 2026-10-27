@@ -123,6 +123,7 @@ See `.env.example`. The important ones:
 - Spend is capped per job; subagent nesting is limited.
 - A broken session is dropped automatically so the conversation never jams; `/reset` does it by hand.
 - A deploy restarts the service. Jobs that were running are re-queued on start with a note to inspect the working folder and carry on, since the clones live on the volume. After three interruptions a job is stopped and you are told.
+- Only one engineering job (engineer or agent-creator) works on each repository at a time, so two never fight over the same checkout. Ask for another while one is running and it is queued behind it: `/jobs` shows `queued behind <id>`, and it starts by itself, in the order you asked, when the running one finishes or fails. The product and the workforce queue separately, and the queue survives restarts. Research, writing, analysis and the maintainer's reviews never wait.
 
 ## Development
 ```bash
