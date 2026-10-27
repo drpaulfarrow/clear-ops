@@ -27,11 +27,20 @@ export function parseUpdates(updates: Update[]): TelegramInbound[] {
 
 const api = (method: string) => `https://api.telegram.org/bot${config.telegram.token}/${method}`;
 
+/** Telegram shows Markdown markers literally in plain-text mode, so take the common ones out. */
+export function plainText(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "• ");
+}
+
 /** Sends through the Telegram Bot API as plain text. */
 export class TelegramMessenger implements Messenger {
   async send(to: string, text: string): Promise<void> {
     const chat_id = to.startsWith(TG) ? to.slice(TG.length) : to;
-    for (const part of chunk(text)) {
+    for (const part of chunk(plainText(text))) {
       const res = await fetch(api("sendMessage"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },

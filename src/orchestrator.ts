@@ -18,6 +18,13 @@ You never send email, post publicly, sign anything or move money. Side effects o
 
 Clean room rule: never reference or reconstruct anything from a repository called comp-exchange or "Atom", or any Microsoft internal material. Paul is leaving Microsoft; everything here is built from public standards and his general expertise.`;
 
+export interface HandleContext {
+  /** Address replies go to and the conversation is keyed by. Defaults to the sender. */
+  replyTo?: string;
+  /** The inbound message id, for channels that can open a thread under it. */
+  messageId?: string;
+}
+
 export class Orchestrator {
   private queues = new Map<string, Promise<void>>();
 
@@ -29,19 +36,25 @@ export class Orchestrator {
     private readonly run: AgentRunner,
   ) {}
 
-  /** Serialise messages per sender so a quick second message does not race the first. */
-  handle(from: string, text: string): Promise<void> {
-    const prev = this.queues.get(from) ?? Promise.resolve();
-    const next = prev.then(() => this.handleOne(from, text)).catch(async (err) => {
-      await this.messenger.send(from, `Something went wrong: ${err instanceof Error ? err.message : String(err)}`);
+  /**
+   * Serialise messages per conversation so a quick second message does not race the first.
+   * `ctx.replyTo` is where replies go (a chat, channel or thread); it is also the conversation key,
+   * so each Discord thread is its own conversation with the chief. Defaults to the sender.
+   */
+  handle(from: string, text: string, ctx: HandleContext = {}): Promise<void> {
+    const replyTo = ctx.replyTo ?? from;
+    const prev = this.queues.get(replyTo) ?? Promise.resolve();
+    const next = prev.then(() => this.handleOne(from, text, replyTo, ctx.messageId)).catch(async (err) => {
+      await this.messenger.send(replyTo, `Something went wrong: ${err instanceof Error ? err.message : String(err)}`);
     });
-    this.queues.set(from, next);
+    this.queues.set(replyTo, next);
     return next;
   }
 
-  private async handleOne(from: string, text: string): Promise<void> {
-    if (!isAllowed(from)) {
-      console.warn(`Ignored message from unlisted sender ${from}`);
+  private async handleOne(sender: string, text: string, from: string, messageId?: string): Promise<void> {
+    // `sender` is who wrote; `from` is the conversation address replies and sessions are keyed by.
+    if (!isAllowed(sender)) {
+      console.warn(`Ignored message from unlisted sender ${sender}`);
       return;
     }
     const trimmed = text.trim();
@@ -72,7 +85,7 @@ export class Orchestrator {
         resume: this.store.getSession(from),
         allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*"],
         tools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep"],
-        mcpServers: { ops: this.opsServer(from) },
+        mcpServers: { ops: this.opsServer(sender, from, messageId) },
         maxTurns: 25,
         maxBudgetUsd: config.jobBudgetUsd,
       });
@@ -129,8 +142,8 @@ export class Orchestrator {
     return p.map((a) => `${a.id} ${a.kind}: ${a.description}\nReply YES ${a.id} or NO ${a.id}`).join("\n\n");
   }
 
-  /** The chief's tools. Each call closes over the requesting number so results route back correctly. */
-  private opsServer(from: string) {
+  /** The chief's tools. Each call closes over the requester and conversation so results route back correctly. */
+  private opsServer(sender: string, from: string, messageId?: string) {
     const store = this.store;
     const jobs = this.jobs;
     const scheduler = this.scheduler;
@@ -149,7 +162,14 @@ export class Orchestrator {
             target: z.enum(["product", "self"]).default("product").describe('Engineer only. "product" is the Clear Exchange repository; "self" is this workforce\'s own code.'),
           },
           async ({ kind, brief, target }) => {
-            const job = jobs.start(kind, brief, from, target as JobTarget);
+            // On channels with threads, give the job its own thread so its reports and the maintainer's review stay together.
+            let replyTo = from;
+            if (this.messenger.openThread && messageId) {
+              const thread = await this.messenger.openThread(from, messageId, `${kind}: ${brief.slice(0, 70)}`).catch(() => undefined);
+              if (thread) replyTo = thread;
+            }
+            const job = jobs.start(kind, brief, sender, target as JobTarget, replyTo);
+            if (replyTo !== from) await this.messenger.send(replyTo, `Job ${job.id} (${kind}) started. Reports will land here.`);
             return { content: [{ type: "text", text: `Started job ${job.id} (${kind}${target === "self" ? ", on the workforce itself" : ""}).` }] };
           },
         ),
@@ -185,7 +205,7 @@ export class Orchestrator {
             payload: z.record(z.string(), z.unknown()).describe("run_command: {command}."),
           },
           async ({ kind, description, payload }) => {
-            const a = store.createAction(kind, description, payload, from);
+            const a = store.createAction(kind, description, payload, sender);
             return { content: [{ type: "text", text: `Pending approval ${a.id}. Tell the founder to reply YES ${a.id} or NO ${a.id}.` }] };
           },
         ),
@@ -194,7 +214,7 @@ export class Orchestrator {
           "Create a recurring job. cron is a 5-field expression evaluated in Europe/London.",
           { cron: z.string(), kind, brief: z.string() },
           async ({ cron, kind, brief }) => {
-            const s = scheduler.add({ cron, timezone: "Europe/London", kind, brief, requestedBy: from });
+            const s = scheduler.add({ cron, timezone: "Europe/London", kind, brief, requestedBy: sender, replyTo: from });
             return { content: [{ type: "text", text: `Scheduled ${s.id}: ${s.cron} (${kind}).` }] };
           },
         ),

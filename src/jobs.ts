@@ -18,11 +18,32 @@ export class JobRunner {
     private readonly run: AgentRunner,
   ) {}
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product"): Job {
-    const job = this.store.createJob(kind, brief, requestedBy, target);
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string): Job {
+    const job = this.store.createJob(kind, brief, requestedBy, target, replyTo);
     // Fire and forget. The webhook has already been acknowledged.
     void this.execute(job.id);
     return job;
+  }
+
+  /**
+   * A deploy restarts the process, and a job that was running dies with it. The working
+   * folders live on the volume, so the job is re-queued with a note to inspect the repo
+   * state and carry on rather than start again. Called once on boot.
+   */
+  async resumeInterrupted(): Promise<number> {
+    const jobs = this.store.interruptedJobs();
+    for (const job of jobs) {
+      const resumed = (job.resumed ?? 0) + 1;
+      if (resumed > 3) {
+        this.store.updateJob(job.id, { status: "failed", finishedAt: new Date().toISOString(), error: "Interrupted by restarts three times; giving up." });
+        await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${job.id} (${job.kind}) was interrupted by restarts three times and has been stopped. Start it again when things are quiet.`);
+        continue;
+      }
+      this.store.updateJob(job.id, { status: "queued", resumed });
+      await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${job.id} (${job.kind}) was interrupted by a restart. Resuming it (attempt ${resumed + 1}).`);
+      void this.execute(job.id);
+    }
+    return jobs.length;
   }
 
   isRunning(id: string): boolean {
@@ -38,8 +59,11 @@ export class JobRunner {
     try {
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
+      const resume = job.resumed
+        ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
+        : "";
       const result = await this.run({
-        prompt: `${job.brief}${standing}`,
+        prompt: `${job.brief}${standing}${resume}`,
         systemPrompt: spec.prompt,
         model: spec.model,
         cwd: spec.cwd,
@@ -68,17 +92,18 @@ export class JobRunner {
           `Review the pull request just opened by the engineer for this task, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${result.text}`,
           job.requestedBy,
           job.target,
+          job.replyTo,
         );
         chained = `\nMaintainer job ${m.id} started to review and merge.`;
       }
       await this.messenger.send(
-        job.requestedBy,
+        job.replyTo ?? job.requestedBy,
         `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
       );
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error });
-      await this.messenger.send(job.requestedBy, `Job ${id} (${job.kind}) failed: ${error}`);
+      await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${id} (${job.kind}) failed: ${error}`);
     } finally {
       this.running.delete(id);
     }

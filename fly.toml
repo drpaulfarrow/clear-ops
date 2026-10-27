@@ -9,7 +9,7 @@ primary_region = "lhr"
 
 [env]
   PORT = "8080"
-  CHANNEL = "telegram"
+  CHANNELS = "telegram,discord"
   DATA_DIR = "/data"
   REPO_DIR = "/data/workspace"
   SELF_REPO_DIR = "/data/self"

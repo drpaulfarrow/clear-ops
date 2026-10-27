@@ -7,6 +7,8 @@ import { Scheduler } from "./scheduler.js";
 import { Store } from "./store.js";
 import { CloudApiMessenger, parseInbound, verifySignature, type Messenger } from "./whatsapp.js";
 import { TelegramMessenger, TelegramPoller } from "./telegram.js";
+import { DiscordListener } from "./discord.js";
+import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
 import { bootstrapRepos } from "./bootstrap.js";
 import type { AgentRunner } from "./agents.js";
@@ -60,10 +62,26 @@ if (isMain) {
   assertProductionConfig();
   await bootstrapRepos();
   const store = new Store(config.dataDir);
-  const messenger: Messenger = config.channel === "telegram" ? new TelegramMessenger() : new CloudApiMessenger();
-  const { app, orchestrator } = buildApp({ messenger, runner: sdkRunner, store });
-  app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channel})`));
-  if (config.channel === "telegram") {
+
+  // One messenger per channel, routed by address prefix; one orchestrator behind all of them.
+  const routes: Array<{ prefix: string; messenger: Messenger }> = [];
+  let discord: DiscordListener | undefined;
+  if (config.channels.includes("telegram")) routes.push({ prefix: "tg:", messenger: new TelegramMessenger() });
+  if (config.channels.includes("discord")) {
+    discord = new DiscordListener((from, text, ctx) => orchestrator.handle(from, text, ctx), isAllowed);
+    routes.push({ prefix: "dc:", messenger: discord.messenger() });
+  }
+  const messenger = new RouterMessenger(routes, config.channels.includes("whatsapp") ? new CloudApiMessenger() : undefined);
+
+  const { app, orchestrator, jobs } = buildApp({ messenger, runner: sdkRunner, store });
+  app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
+
+  if (config.channels.includes("telegram")) {
     void new TelegramPoller((from, text) => orchestrator.handle(from, text), messenger, isAllowed).start();
   }
+  if (discord) await discord.start();
+
+  // Jobs a previous process left running are picked up again, now that channels can deliver.
+  const resumed = await jobs.resumeInterrupted();
+  if (resumed) console.log(`resumed ${resumed} interrupted job(s)`);
 }

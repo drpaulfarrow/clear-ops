@@ -6,11 +6,18 @@ function req(name: string): string {
   return v;
 }
 
-export type Channel = "telegram" | "whatsapp";
+export type Channel = "telegram" | "discord" | "whatsapp";
+
+const channels = (process.env.CHANNELS ?? process.env.CHANNEL ?? "telegram")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean) as Channel[];
 
 export const config = {
   port: Number(process.env.PORT ?? 8080),
-  channel: (process.env.CHANNEL ?? "telegram") as Channel,
+  /** Channels to run at once, e.g. "telegram,discord". */
+  channels,
+  channel: channels[0],
   dataDir: path.resolve(process.env.DATA_DIR ?? "./data"),
   repoDir: path.resolve(process.env.REPO_DIR ?? "./workspace"),
   /** A clone of this service's own repository, so the engineer can improve the workforce itself. */
@@ -24,8 +31,16 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean)
     .map((id) => `tg:${id}`),
+  allowedDiscordIds: (process.env.ALLOWED_DISCORD_IDS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((id) => `dc:u:${id}`),
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN ?? "",
+  },
+  discord: {
+    token: process.env.DISCORD_BOT_TOKEN ?? "",
   },
   /** GitHub "owner/name" slugs. Cloned automatically on first start when GH_TOKEN is set. */
   repos: {
@@ -52,22 +67,28 @@ export const config = {
 
 /** Everyone the workforce will answer, across channels. */
 export function isAllowed(from: string): boolean {
-  return config.allowedNumbers.includes(from) || config.allowedTelegramIds.includes(from);
+  return config.allowedNumbers.includes(from) || config.allowedTelegramIds.includes(from) || config.allowedDiscordIds.includes(from);
 }
 
 /** Validate what production needs. Tests and the simulator skip this. */
 export function assertProductionConfig(): void {
   req("ANTHROPIC_API_KEY");
-  if (config.channel === "telegram") {
-    req("TELEGRAM_BOT_TOKEN");
-    if (config.allowedTelegramIds.length === 0) {
-      // Not fatal: the bot starts, answers nobody, and tells whoever messages it their id.
-      console.warn("ALLOWED_TELEGRAM_IDS is empty. Message the bot to learn your id, then set it and redeploy.");
+  if (config.channels.length === 0) throw new Error("CHANNELS must name at least one of telegram, discord, whatsapp");
+  for (const c of config.channels) {
+    if (c === "telegram") {
+      req("TELEGRAM_BOT_TOKEN");
+      // An empty allowlist is not fatal: the bot starts, answers nobody, and tells whoever messages it their id.
+      if (config.allowedTelegramIds.length === 0) console.warn("ALLOWED_TELEGRAM_IDS is empty. Message the bot to learn your id, then set it and redeploy.");
+    } else if (c === "discord") {
+      req("DISCORD_BOT_TOKEN");
+      if (config.allowedDiscordIds.length === 0) console.warn("ALLOWED_DISCORD_IDS is empty. Message the bot to learn your id, then set it and redeploy.");
+    } else if (c === "whatsapp") {
+      req("WHATSAPP_TOKEN");
+      req("WHATSAPP_PHONE_NUMBER_ID");
+      req("WHATSAPP_VERIFY_TOKEN");
+      if (config.allowedNumbers.length === 0) throw new Error("ALLOWED_NUMBERS must list at least one phone number");
+    } else {
+      throw new Error(`Unknown channel "${c}"`);
     }
-  } else {
-    req("WHATSAPP_TOKEN");
-    req("WHATSAPP_PHONE_NUMBER_ID");
-    req("WHATSAPP_VERIFY_TOKEN");
-    if (config.allowedNumbers.length === 0) throw new Error("ALLOWED_NUMBERS must list at least one phone number");
   }
 }

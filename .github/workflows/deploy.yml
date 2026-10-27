@@ -47,6 +47,9 @@ jobs:
             GH_TOKEN="${{ secrets.GH_TOKEN }}" \
             TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" \
             ALLOWED_TELEGRAM_IDS="${{ secrets.ALLOWED_TELEGRAM_IDS }}" \
+            DISCORD_BOT_TOKEN="${{ secrets.DISCORD_BOT_TOKEN }}" \
+            ALLOWED_DISCORD_IDS="${{ secrets.ALLOWED_DISCORD_IDS }}" \
+            CHANNELS="${{ vars.CHANNELS || 'telegram,discord' }}" \
             PRODUCT_REPO="${{ secrets.PRODUCT_REPO }}"
       - name: Deploy
         if: steps.check.outputs.ready == 'true'

@@ -8,7 +8,10 @@ export interface InboundMessage {
 }
 
 export interface Messenger {
+  /** `to` is an address: a phone number, "tg:<chat>", "dc:c:<channel>" or "dc:u:<user>". */
   send(to: string, text: string): Promise<void>;
+  /** Channels with threads (Discord) open one under a message and return its address. */
+  openThread?(replyTo: string, messageId: string, name: string): Promise<string | undefined>;
 }
 
 /** Split long text on paragraph boundaries so each piece fits a WhatsApp message. */

@@ -10,11 +10,17 @@ const src = (f: string) => fs.readFileSync(new URL(`../src/${f}`, import.meta.ur
 
 test("only allowlisted numbers are answered", () => {
   const orch = src("orchestrator.ts");
-  assert.match(orch, /if \(!isAllowed\(from\)\)/, "the allowlist check must stay in the orchestrator");
+  assert.match(orch, /if \(!isAllowed\((from|sender)\)\)/, "the allowlist check must stay in the orchestrator");
   const cfg = src("config.ts");
   assert.match(cfg, /allowedNumbers\.includes\(from\) \|\| config\.allowedTelegramIds\.includes\(from\)/);
+  assert.match(cfg, /config\.allowedDiscordIds\.includes\(from\)/);
   const tg = src("telegram.ts");
   assert.match(tg, /if \(this\.isAllowed\(m\.from\)\) void this\.handle/, "the Telegram poller must check the allowlist before handling");
+  const dc = src("discord.ts");
+  const allowAt = dc.indexOf("if (!this.isAllowed(from))");
+  const handleAt = dc.indexOf("await this.handle(from, m.content");
+  assert.ok(allowAt > -1 && handleAt > allowAt, "the Discord listener must check the allowlist before handling");
+  assert.match(dc, /if \(m\.author\.bot/, "the Discord listener must ignore bots");
 });
 
 test("webhook signatures are verified before any message is processed", () => {

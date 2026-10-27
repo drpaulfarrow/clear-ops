@@ -1,6 +1,6 @@
 # clear-ops
 
-An agentic workforce for Clear Exchange that you run from your phone, over Telegram (default) or WhatsApp.
+An agentic workforce for Clear Exchange that you run from chat: Telegram, Discord or WhatsApp, any or all at once.
 
 You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to five workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) and an analyst (questions about previous outputs and data). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
 
@@ -25,12 +25,16 @@ YES 1f3a9c
 ### 1. Anthropic key
 Create an API key at the Claude Console and keep it for step 4. The agents run on Anthropic's API and are billed by usage; every job has a spend cap.
 
-### 2. A Telegram bot (two minutes)
+### 2. A chat channel: Telegram, Discord, or both
+
+**Discord (threads per job, like Slack).** At discord.com/developers, New Application, then Bot: Reset Token and copy it into `DISCORD_BOT_TOKEN`; on the same page turn on **Message Content Intent**. Under OAuth2, URL Generator: scope `bot`, permissions Send Messages, Create Public Threads, Send Messages in Threads, Read Message History; open the generated URL and add the bot to your server. Message it once; it replies with your user id for `ALLOWED_DISCORD_IDS`. In Discord, every job the chief starts gets its own thread under your message, and the engineer's report and the maintainer's review land in that thread. Each thread is its own conversation with the chief. DMs to the bot work too.
+
+**Telegram (quickest to try).**
 1. In Telegram, message `@BotFather`, send `/newbot`, pick a name and a username. Copy the token into `TELEGRAM_BOT_TOKEN`.
 2. Start the service (step 4) and message your bot anything. It replies with your Telegram id because you are not allowlisted yet.
 3. Put that id in `ALLOWED_TELEGRAM_IDS` and restart. From now on it answers only you.
 
-Telegram needs no public URL: the service long-polls Telegram's API, so it runs anywhere, including on a laptop.
+Neither Telegram nor Discord needs a public URL: Telegram is long-polled and Discord uses a gateway connection, so the service runs anywhere, including on a laptop. Set `CHANNELS=telegram,discord` to run both; each conversation is answered where it came from.
 
 <details>
 <summary>Using WhatsApp instead (Meta Cloud API)</summary>
@@ -68,9 +72,9 @@ npm run dev
 The workflow in `.github/workflows/deploy.yml` creates the Fly app and volume, pushes the secrets and deploys. You need two websites.
 
 1. At fly.io, sign up (a card is required; this runs on one small machine, a few dollars a month). Then Account > Tokens > create a token.
-2. In this GitHub repository: Settings > Secrets and variables > Actions > New repository secret, one for each of: `FLY_API_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `PRODUCT_REPO` (for example `drpaulfarrow/clear-exchange`). Leave `ALLOWED_TELEGRAM_IDS` out for now.
+2. In this GitHub repository: Settings > Secrets and variables > Actions > New repository secret, one for each of: `FLY_API_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, `PRODUCT_REPO` (for example `drpaulfarrow/clear-exchange`), and the bot tokens for the channels you use: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`. Leave the allowlists (`ALLOWED_TELEGRAM_IDS`, `ALLOWED_DISCORD_IDS`) out for now. A repository variable `CHANNELS` picks the channels; the default is `telegram,discord`.
 3. Actions tab > ci > Run workflow. The first deploy creates the app and volume, and the service starts, clones both repositories and begins polling Telegram.
-4. Message your bot. It replies with your Telegram id. Add that as the `ALLOWED_TELEGRAM_IDS` secret and run the workflow again. From then on it answers only you, and every merge to main redeploys on its own.
+4. Message your bot on each channel. It replies with your id. Add those as the `ALLOWED_TELEGRAM_IDS` and `ALLOWED_DISCORD_IDS` secrets and run the workflow again. From then on it answers only you, and every merge to main redeploys on its own.
 
 If the app name `clear-ops` is already taken on Fly, add a repository variable `FLY_APP` with another name. Logs are at fly.io under the app's Monitoring tab. Any host that runs a Docker container with a persistent volume works the same way; with Telegram there is no webhook to configure.
 
@@ -84,8 +88,8 @@ See `.env.example`. The important ones:
 
 | Variable | Meaning |
 |---|---|
-| `CHANNEL` | `telegram` (default) or `whatsapp`. |
-| `ALLOWED_TELEGRAM_IDS` | Only these Telegram ids get a reply. |
+| `CHANNELS` | Any of `telegram`, `discord`, `whatsapp`, comma separated. Default `telegram`. |
+| `ALLOWED_TELEGRAM_IDS`, `ALLOWED_DISCORD_IDS` | Only these ids get a reply. |
 | `ALLOWED_NUMBERS` | WhatsApp: only these numbers get a reply. E.164 digits, no plus. |
 | `WHATSAPP_APP_SECRET` | WhatsApp: enables webhook signature checks. Set it in production. |
 | `GH_TOKEN` | Fine-grained token with contents and pull requests read/write on both repos. |
@@ -103,6 +107,7 @@ See `.env.example`. The important ones:
 - The chief never sends email or messages anyone but you. Drafts come to you. An unlisted Telegram sender is told its own id once and nothing else.
 - Spend is capped per job; subagent nesting is limited.
 - A broken session is dropped automatically so the conversation never jams; `/reset` does it by hand.
+- A deploy restarts the service. Jobs that were running are re-queued on start with a note to inspect the working folder and carry on, since the clones live on the volume. After three interruptions a job is stopped and you are told.
 
 ## Development
 ```bash

@@ -36,7 +36,7 @@ export class Scheduler {
     const task = cron.schedule(
       s.cron,
       () => {
-        this.jobs.start(s.kind, `${s.brief}\n\n(This is the scheduled run ${s.id}.)`, s.requestedBy);
+        this.jobs.start(s.kind, `${s.brief}\n\n(This is the scheduled run ${s.id}.)`, s.requestedBy, "product", s.replyTo);
       },
       { timezone: s.timezone },
     );

@@ -13,7 +13,11 @@ export interface Job {
   target?: JobTarget;
   brief: string;
   requestedBy: string;
+  /** Where results are posted: the chat, channel or thread the job came from. Defaults to requestedBy. */
+  replyTo?: string;
   status: JobStatus;
+  /** Set when a restart interrupted the job and it was re-queued. */
+  resumed?: number;
   createdAt: string;
   finishedAt?: string;
   summary?: string;
@@ -40,6 +44,7 @@ export interface Schedule {
   kind: JobKind;
   brief: string;
   requestedBy: string;
+  replyTo?: string;
   createdAt: string;
   enabled: boolean;
 }
@@ -96,13 +101,14 @@ export class Store {
   }
 
   // Jobs
-  createJob(kind: JobKind, brief: string, requestedBy: string, target?: JobTarget): Job {
+  createJob(kind: JobKind, brief: string, requestedBy: string, target?: JobTarget, replyTo?: string): Job {
     const job: Job = {
       id: shortId(),
       kind,
       target,
       brief,
       requestedBy,
+      replyTo: replyTo ?? requestedBy,
       status: "queued",
       createdAt: new Date().toISOString(),
     };
@@ -119,6 +125,10 @@ export class Store {
   }
   getJob(id: string): Job | undefined {
     return this.state.jobs[id];
+  }
+  /** Jobs a previous process left running. Called once on boot so they can be resumed. */
+  interruptedJobs(): Job[] {
+    return Object.values(this.state.jobs).filter((j) => j.status === "running" || j.status === "queued");
   }
   listJobs(limit = 10): Job[] {
     return Object.values(this.state.jobs)
