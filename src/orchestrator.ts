@@ -3,16 +3,16 @@ import { z } from "zod";
 import { config, isAllowed } from "./config.js";
 import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
-import { ACTION_KINDS, actionExecutors, type JobRunner } from "./jobs.js";
+import { ACTION_KINDS, actionExecutors, lockKey, type JobRunner } from "./jobs.js";
 import type { Scheduler } from "./scheduler.js";
-import type { JobKind, JobTarget, Store } from "./store.js";
+import type { Job, JobKind, JobTarget, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
 
 You talk to Paul over a chat app on his phone, so keep replies short: a few sentences, or a compact list when he is choosing between things. No em dashes. British English. Direct and honest; no flattery.
 
-You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data), create_agent (the agent-creator, see below). Every agent can read both repositories. Give the engineer a clear outcome, not instructions on how; it decides the approach. If the maintainer requests changes, start a new engineer job whose brief is to address the review comments on that pull request. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. When Paul asks for a new kind of agent in plain language ("I want an agent that monitors IAB Tech Lab announcements weekly", "an agent that drafts publisher outreach"), start a create_agent job and pass his request on in his words, plus any context from the conversation; do not design it yourself or tell him how it will be built. The agent-creator decides whether it is a scheduled job on an existing kind (it then recommends a brief and cron and writes no code) or a new worker kind (it opens a pull request on this workforce, which the maintainer reviews and merges like any other). When it recommends a schedule and Paul agrees, read the job with get_output and call schedule_job with the kind, cron and brief it gave. Use engineer with target "self" for other changes to the workforce, and create_agent only for adding an agent. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
+You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data), create_agent (the agent-creator, see below). Every agent can read both repositories. Give the engineer a clear outcome, not instructions on how; it decides the approach. If the maintainer requests changes, start a new engineer job whose brief is to address the review comments on that pull request. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. When Paul asks for a new kind of agent in plain language ("I want an agent that monitors IAB Tech Lab announcements weekly", "an agent that drafts publisher outreach"), start a create_agent job and pass his request on in his words, plus any context from the conversation; do not design it yourself or tell him how it will be built. The agent-creator decides whether it is a scheduled job on an existing kind (it then recommends a brief and cron and writes no code) or a new worker kind (it opens a pull request on this workforce, which the maintainer reviews and merges like any other). When it recommends a schedule and Paul agrees, read the job with get_output and call schedule_job with the kind, cron and brief it gave. Use engineer with target "self" for other changes to the workforce, and create_agent only for adding an agent. Only one engineering job (engineer or create_agent) runs per repository at a time, product and workforce counted separately. Queueing is automatic: if one is already running on that repository, start_job queues the new one and tells you which job it is waiting behind, and it starts by itself when that finishes, in the order requested. So start engineer jobs whenever they are needed, without checking job_status first, and tell Paul when one is queued. The maintainer and the other kinds never wait. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
 
 You never send email, post publicly, sign anything or move money. Side effects outside the workers' remit (a deploy or migration command, for example) go through propose_action, which asks Paul to reply YES <id>; only run_command exists. Recurring work goes through schedule_job with a cron expression in Europe/London time. If Paul tells you something to apply from now on, store it with remember.
 
@@ -133,7 +133,13 @@ export class Orchestrator {
   private jobsText(): string {
     const jobs = this.store.listJobs(10);
     if (!jobs.length) return "No jobs yet.";
-    return jobs.map((j) => `${j.id} ${j.kind} ${j.status} · ${j.brief.slice(0, 60)}`).join("\n");
+    return jobs.map((j) => `${j.id} ${j.kind} ${this.statusText(j)} · ${j.brief.slice(0, 60)}`).join("\n");
+  }
+
+  private statusText(j: Job): string {
+    if (j.status !== "queued" || !j.waitingFor) return j.status;
+    const pos = this.jobs.queuePosition(j.id);
+    return `queued behind ${j.waitingFor}${pos ? ` (#${pos} on ${lockKey(j)})` : ""}`;
   }
 
   private pendingText(): string {
@@ -156,7 +162,7 @@ export class Orchestrator {
       tools: [
         tool(
           "start_job",
-          "Delegate a task to a worker agent. Returns a job id. The worker messages the founder when it finishes. Use kind create_agent when the founder asks for a new kind of agent; its brief is his request in plain language.",
+          "Delegate a task to a worker agent. Returns a job id. The worker messages the founder when it finishes. Use kind create_agent when the founder asks for a new kind of agent; its brief is his request in plain language. Only one engineer or create_agent job runs per repository (product, self) at a time; if one is running, the new job is queued automatically and starts when it finishes, so there is no need to check first.",
           {
             kind,
             brief: z.string().describe("A complete, self-contained brief. The worker has no other context."),
@@ -171,18 +177,27 @@ export class Orchestrator {
               if (thread) replyTo = thread;
             }
             const job = jobs.start(kind, brief, sender, target as JobTarget, replyTo);
+            const where = target === "self" ? ", on the workforce itself" : "";
+            if (job.waitingFor) {
+              const behind = `queued behind job ${job.waitingFor}, the ${target === "self" ? "workforce" : "product"} repository's running engineering job`;
+              if (replyTo !== from) await this.messenger.send(replyTo, `Job ${job.id} (${kind}) ${behind}. It starts automatically when that finishes. Reports will land here.`);
+              const pos = jobs.queuePosition(job.id);
+              return { content: [{ type: "text", text: `Queued job ${job.id} (${kind}${where}): ${behind}${pos && pos > 1 ? `, position ${pos} in the queue` : ""}. It starts automatically when that finishes.` }] };
+            }
             if (replyTo !== from) await this.messenger.send(replyTo, `Job ${job.id} (${kind}) started. Reports will land here.`);
-            return { content: [{ type: "text", text: `Started job ${job.id} (${kind}${target === "self" ? ", on the workforce itself" : ""}).` }] };
+            return { content: [{ type: "text", text: `Started job ${job.id} (${kind}${where}).` }] };
           },
         ),
         tool(
           "job_status",
-          "List recent jobs with their status, or one job by id.",
+          "List recent jobs with their status, or one job by id. A queued engineering job shows the job it is waiting behind and its place in that repository's queue.",
           { id: z.string().optional() },
           async ({ id }) => {
             if (id) {
               const j = store.getJob(id);
-              return { content: [{ type: "text", text: j ? JSON.stringify(j, null, 2) : `No job ${id}` }] };
+              if (!j) return { content: [{ type: "text", text: `No job ${id}` }] };
+              const queue = j.waitingFor ? { queuedBehind: j.waitingFor, queuePosition: jobs.queuePosition(j.id) } : {};
+              return { content: [{ type: "text", text: JSON.stringify({ ...j, ...queue }, null, 2) }] };
             }
             return { content: [{ type: "text", text: this.jobsText() }] };
           },
