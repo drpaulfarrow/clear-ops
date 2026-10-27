@@ -1,7 +1,7 @@
 import { query, type AgentDefinition, type McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import path from "node:path";
 import { config } from "./config.js";
-import type { JobKind } from "./store.js";
+import type { JobKind, JobTarget } from "./store.js";
 
 export interface RunOptions {
   prompt: string;
@@ -89,7 +89,15 @@ export interface WorkerSpec {
   agents?: Record<string, AgentDefinition>;
 }
 
-export function workerSpec(kind: JobKind): WorkerSpec {
+const SELF_IMPROVEMENT = `
+
+This task is on the workforce itself: the clear-ops service that runs you, the chief of staff and the other workers. Treat it as production infrastructure. Read CLAUDE.md and README.md first. The invariants in CLAUDE.md are not negotiable: only allowlisted numbers get replies, webhook signatures are verified, the clean-room rule stays in every agent prompt, and the tests that enforce these may be extended but never removed or weakened. The service cannot patch itself while running: you merge to main, CI runs the tests and deploys, and a health check keeps the old version serving if the new one fails to start. So your definition of done is: tests and typecheck green locally, reviewer clean, merged and pushed. State in your report that the deploy will follow from CI and what the founder should see change.`;
+
+export function workerSpec(kind: JobKind, target: JobTarget = "product"): WorkerSpec {
+  if (kind === "engineer" && target === "self") {
+    const base = workerSpec("engineer", "product");
+    return { ...base, cwd: config.selfRepoDir, prompt: base.prompt + SELF_IMPROVEMENT };
+  }
   switch (kind) {
     case "research":
       return {

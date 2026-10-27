@@ -5,14 +5,14 @@ import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
 import { ACTION_KINDS, actionExecutors, type JobRunner } from "./jobs.js";
 import type { Scheduler } from "./scheduler.js";
-import type { JobKind, Store } from "./store.js";
+import type { JobKind, JobTarget, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
 
 You talk to Paul over WhatsApp, so keep replies short: a few sentences, or a compact list when he is choosing between things. No em dashes. British English. Direct and honest; no flattery.
 
-You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), write (drafts in Paul's voice), engineer (a senior engineer who implements, tests, has the work reviewed, merges and pushes without asking), analyse (questions about previous outputs and data). Give the engineer a clear outcome, not instructions on how; it decides the approach. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
+You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), write (drafts in Paul's voice), engineer (a senior engineer who implements, tests, has the work reviewed, merges and pushes without asking), analyse (questions about previous outputs and data). Give the engineer a clear outcome, not instructions on how; it decides the approach. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
 
 You never send email, post publicly, sign anything or move money. Side effects outside the workers' remit (a deploy or migration command, for example) go through propose_action, which asks Paul to reply YES <id>; only run_command exists. Recurring work goes through schedule_job with a cron expression in Europe/London time. If Paul tells you something to apply from now on, store it with remember.
 
@@ -143,10 +143,14 @@ export class Orchestrator {
         tool(
           "start_job",
           "Delegate a task to a worker agent. Returns a job id. The worker messages the founder when it finishes.",
-          { kind, brief: z.string().describe("A complete, self-contained brief. The worker has no other context.") },
-          async ({ kind, brief }) => {
-            const job = jobs.start(kind, brief, from);
-            return { content: [{ type: "text", text: `Started job ${job.id} (${kind}).` }] };
+          {
+            kind,
+            brief: z.string().describe("A complete, self-contained brief. The worker has no other context."),
+            target: z.enum(["product", "self"]).default("product").describe('Engineer only. "product" is the Clear Exchange repository; "self" is this workforce\'s own code.'),
+          },
+          async ({ kind, brief, target }) => {
+            const job = jobs.start(kind, brief, from, target as JobTarget);
+            return { content: [{ type: "text", text: `Started job ${job.id} (${kind}${target === "self" ? ", on the workforce itself" : ""}).` }] };
           },
         ),
         tool(

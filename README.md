@@ -62,8 +62,14 @@ fly secrets set ANTHROPIC_API_KEY=... WHATSAPP_TOKEN=... WHATSAPP_PHONE_NUMBER_I
   WHATSAPP_VERIFY_TOKEN=... WHATSAPP_APP_SECRET=... ALLOWED_NUMBERS=447...
 fly deploy
 fly ssh console -C "git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-exchange /data/workspace"
+fly ssh console -C "git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-ops /data/self"
 ```
 Point the Meta callback URL at `https://clear-ops.fly.dev/webhook`. Any host that runs a Docker container with a persistent volume works the same way (Azure Container Apps, Railway, a VPS).
+
+## Self-improvement
+The engineer can work on this workforce as well as on the product. Say "improve yourself: add a tool that reads my Google Calendar" or "give the researcher a stricter sourcing rule" and the chief starts an engineer job with target `self`. The engineer clones nothing; it works in `SELF_REPO_DIR`, a checkout of this repository, under the same process as any other task: branch, tests, reviewer, merge, push. It cannot restart itself. The GitHub Actions workflow in `.github/workflows/deploy.yml` runs the tests on the merge and deploys to Fly with a rolling strategy, so the old version keeps answering until the new one passes its health check. A few minutes after the engineer reports, the new workforce is live, and your conversation continues from the stored session.
+
+Setup for this: clone this repository into `SELF_REPO_DIR` with a token that can push (same pattern as step 3), and add `FLY_API_TOKEN` as a repository secret so the workflow can deploy. The invariants in `CLAUDE.md` and `test/invariants.test.ts` are what stop a self-improvement from removing the allowlist, the signature check, the clean-room rule or the spend caps.
 
 ## Configuration
 See `.env.example`. The important ones:
@@ -72,7 +78,8 @@ See `.env.example`. The important ones:
 |---|---|
 | `ALLOWED_NUMBERS` | Only these numbers get a reply. E.164 digits, no plus. |
 | `WHATSAPP_APP_SECRET` | Enables webhook signature checks. Set it in production. |
-| `REPO_DIR` | The clean repository the engineer works in. |
+| `REPO_DIR` | The clean product repository the engineer works in. |
+| `SELF_REPO_DIR` | A checkout of this repository, for self-improvement jobs. |
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. |
 | `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
 | `ENGINEER_BUDGET_USD` | Spend cap per engineering job. |

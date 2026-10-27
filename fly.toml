@@ -13,6 +13,7 @@ primary_region = "lhr"
   PORT = "8080"
   DATA_DIR = "/data"
   REPO_DIR = "/data/workspace"
+  SELF_REPO_DIR = "/data/self"
   CHIEF_MODEL = "opus"
   WORKER_MODEL = "sonnet"
   ENGINEER_MODEL = "opus"
@@ -28,6 +29,14 @@ primary_region = "lhr"
   auto_stop_machines = false   # the scheduler must keep running
   auto_start_machines = true
   min_machines_running = 1
+
+# A rolling deploy only retires the old machine once the new one answers /health.
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/health"
 
 [[vm]]
   size = "shared-cpu-1x"

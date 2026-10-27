@@ -3,11 +3,14 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 
 export type JobKind = "research" | "write" | "engineer" | "analyse";
+/** Which codebase an engineering job works in: the product, or this workforce itself. */
+export type JobTarget = "product" | "self";
 export type JobStatus = "queued" | "running" | "done" | "failed";
 
 export interface Job {
   id: string;
   kind: JobKind;
+  target?: JobTarget;
   brief: string;
   requestedBy: string;
   status: JobStatus;
@@ -93,10 +96,11 @@ export class Store {
   }
 
   // Jobs
-  createJob(kind: JobKind, brief: string, requestedBy: string): Job {
+  createJob(kind: JobKind, brief: string, requestedBy: string, target?: JobTarget): Job {
     const job: Job = {
       id: shortId(),
       kind,
+      target,
       brief,
       requestedBy,
       status: "queued",

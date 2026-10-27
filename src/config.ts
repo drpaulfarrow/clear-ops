@@ -10,6 +10,8 @@ export const config = {
   port: Number(process.env.PORT ?? 8080),
   dataDir: path.resolve(process.env.DATA_DIR ?? "./data"),
   repoDir: path.resolve(process.env.REPO_DIR ?? "./workspace"),
+  /** A clone of this service's own repository, so the engineer can improve the workforce itself. */
+  selfRepoDir: path.resolve(process.env.SELF_REPO_DIR ?? "./self"),
   allowedNumbers: (process.env.ALLOWED_NUMBERS ?? "")
     .split(",")
     .map((s) => s.trim())

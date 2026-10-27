@@ -18,9 +18,9 @@ const calls: RunOptions[] = [];
 /** Fake runner: records the call, exercises the chief's tools when asked, returns canned text. */
 const fakeRunner: AgentRunner = async (o) => {
   calls.push(o);
-  if (o.systemPrompt.includes("chief of staff")) {
-    const ops = o.mcpServers?.ops as { instance?: unknown } | undefined;
-    assert.ok(ops, "chief gets the ops tool server");
+  const ops = o.mcpServers?.ops as { instance?: unknown } | undefined;
+  if (ops) {
+    assert.ok(o.systemPrompt.includes("chief of staff"), "only the chief gets the ops tool server");
     if (o.prompt.startsWith("delegate:")) {
       // Simulate the chief calling start_job through the MCP instance's registered handler.
       const server = (ops as any).instance;
@@ -103,6 +103,20 @@ test("delegation starts a job and the worker reports back", async () => {
   const workerCall = calls.find((c) => c.systemPrompt.includes("research analyst"))!;
   assert.deepEqual(workerCall.allowedTools, ["WebSearch", "WebFetch"]);
   assert.ok(workerCall.systemPrompt.includes("Clean room rule"));
+});
+
+test("an engineer job targeted at the workforce itself runs in SELF_REPO_DIR with the self-improvement brief", async () => {
+  const { JobRunner } = await import("../src/jobs.js");
+  const { config } = await import("../src/config.js");
+  const runner = new JobRunner(store, messenger, fakeRunner);
+  const job = runner.start("engineer", "Add a /version command", "447700900123", "self");
+  await waitFor(() => store.getJob(job.id)?.status === "done");
+  const call = calls.find((c) => c.prompt.startsWith("Add a /version command"))!;
+  assert.equal(call.cwd, config.selfRepoDir);
+  assert.match(call.systemPrompt, /This task is on the workforce itself/);
+  assert.match(call.systemPrompt, /senior engineer/);
+  assert.ok(call.agents?.reviewer, "self-improvement still goes through the reviewer");
+  assert.ok(messenger.sent.some((m) => m.text.startsWith(`Job ${job.id} (engineer, workforce) finished`)));
 });
 
 test("approval flow: unknown id, reject, and executor failure are all reported", async () => {

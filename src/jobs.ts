@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { config } from "./config.js";
 import type { AgentRunner } from "./agents.js";
 import { workerSpec } from "./agents.js";
-import type { Job, JobKind, PendingAction, Store } from "./store.js";
+import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 
 const exec = promisify(execFile);
@@ -18,8 +18,8 @@ export class JobRunner {
     private readonly run: AgentRunner,
   ) {}
 
-  start(kind: JobKind, brief: string, requestedBy: string): Job {
-    const job = this.store.createJob(kind, brief, requestedBy);
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product"): Job {
+    const job = this.store.createJob(kind, brief, requestedBy, target);
     // Fire and forget. The webhook has already been acknowledged.
     void this.execute(job.id);
     return job;
@@ -32,7 +32,7 @@ export class JobRunner {
   private async execute(id: string): Promise<void> {
     const job = this.store.getJob(id);
     if (!job) return;
-    const spec = workerSpec(job.kind);
+    const spec = workerSpec(job.kind, job.target);
     this.running.add(id);
     this.store.updateJob(id, { status: "running" });
     try {
@@ -62,7 +62,7 @@ export class JobRunner {
       const cost = result.costUsd != null ? ` Cost $${result.costUsd.toFixed(2)}.` : "";
       await this.messenger.send(
         job.requestedBy,
-        `Job ${id} (${job.kind}) finished.${cost}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
+        `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
       );
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
