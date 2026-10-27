@@ -60,7 +60,10 @@ export function assertProductionConfig(): void {
   req("ANTHROPIC_API_KEY");
   if (config.channel === "telegram") {
     req("TELEGRAM_BOT_TOKEN");
-    if (config.allowedTelegramIds.length === 0) throw new Error("ALLOWED_TELEGRAM_IDS must list at least one Telegram id");
+    if (config.allowedTelegramIds.length === 0) {
+      // Not fatal: the bot starts, answers nobody, and tells whoever messages it their id.
+      console.warn("ALLOWED_TELEGRAM_IDS is empty. Message the bot to learn your id, then set it and redeploy.");
+    }
   } else {
     req("WHATSAPP_TOKEN");
     req("WHATSAPP_PHONE_NUMBER_ID");

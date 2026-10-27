@@ -64,15 +64,15 @@ npm run dev
 
 `npm run simulate` chats in the terminal instead of Telegram, for trying things without a bot. The `.env` file is read automatically.
 
-### 5. Deploy (Fly.io, London)
-```bash
-fly launch --no-deploy --copy-config
-fly volumes create clear_ops_data --region lhr --size 3
-fly secrets set ANTHROPIC_API_KEY=... GH_TOKEN=... PRODUCT_REPO=<you>/clear-exchange TELEGRAM_BOT_TOKEN=... ALLOWED_TELEGRAM_IDS=...
-fly deploy
-# the service clones both repositories into the volume on first start
-```
-Any host that runs a Docker container with a persistent volume works the same way (Azure Container Apps, Railway, a VPS). With Telegram there is no webhook to configure.
+### 5. Deploy from GitHub, with nothing installed locally
+The workflow in `.github/workflows/deploy.yml` creates the Fly app and volume, pushes the secrets and deploys. You need two websites.
+
+1. At fly.io, sign up (a card is required; this runs on one small machine, a few dollars a month). Then Account > Tokens > create a token.
+2. In this GitHub repository: Settings > Secrets and variables > Actions > New repository secret, one for each of: `FLY_API_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `PRODUCT_REPO` (for example `drpaulfarrow/clear-exchange`). Leave `ALLOWED_TELEGRAM_IDS` out for now.
+3. Actions tab > ci > Run workflow. The first deploy creates the app and volume, and the service starts, clones both repositories and begins polling Telegram.
+4. Message your bot. It replies with your Telegram id. Add that as the `ALLOWED_TELEGRAM_IDS` secret and run the workflow again. From then on it answers only you, and every merge to main redeploys on its own.
+
+If the app name `clear-ops` is already taken on Fly, add a repository variable `FLY_APP` with another name. Logs are at fly.io under the app's Monitoring tab. Any host that runs a Docker container with a persistent volume works the same way; with Telegram there is no webhook to configure.
 
 ## Self-improvement
 The engineer can work on this workforce as well as on the product. Say "improve yourself: add a tool that reads my Google Calendar" or "give the researcher a stricter sourcing rule" and the chief starts an engineer job with target `self`. It works in `SELF_REPO_DIR`, a checkout of this repository, under the same process as any other task: branch, tests, pull request, then the maintainer reviews and merges. Nothing restarts itself. The GitHub Actions workflow in `.github/workflows/deploy.yml` runs the tests on the merge and deploys to Fly with a rolling strategy, so the old version keeps answering until the new one passes its health check. A few minutes after the engineer reports, the new workforce is live, and your conversation continues from the stored session.
