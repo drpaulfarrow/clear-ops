@@ -69,3 +69,61 @@ test("spend is capped on every run", () => {
   assert.match(jobs, /maxBudgetUsd:/);
   assert.match(orch, /maxBudgetUsd:/);
 });
+
+/* ---------- New worker kinds (the agent-creator adds them; these keep every one inside the guardrails) ---------- */
+
+const declaredKinds = (): string[] => {
+  const m = src("agents.ts").match(/export const JOB_KINDS: JobKind\[\] = \[([^\]]*)\]/);
+  assert.ok(m, "JOB_KINDS must be declared as a literal array in agents.ts");
+  return [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
+};
+
+test("every declared worker kind, including ones added later, carries the clean-room rule", async () => {
+  const agents = src("agents.ts");
+  const kinds = declaredKinds();
+  for (const k of ["research", "write", "engineer", "maintain", "analyse", "create_agent"]) assert.ok(kinds.includes(k), `${k} must stay a job kind`);
+  const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
+  assert.deepEqual([...JOB_KINDS], kinds);
+  const cleanRoom = agents.match(/const CLEAN_ROOM = `([^`]*)`/)![1];
+  for (const kind of kinds) {
+    assert.ok(agents.includes(`case "${kind}":`), `${kind} must have a case in workerSpec`);
+    for (const target of ["product", "self"] as const) {
+      assert.ok(workerSpec(kind as any, target).prompt.includes(cleanRoom), `${kind} (${target}) prompt must include the full CLEAN_ROOM text`);
+    }
+  }
+});
+
+test("only engineering kinds can write code; nothing else gets Edit, Write or unrestricted Bash", async () => {
+  const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
+  const writers = ["engineer", "create_agent"];
+  for (const kind of JOB_KINDS) {
+    const s = workerSpec(kind);
+    if (writers.includes(kind)) continue;
+    for (const t of ["Edit", "Write"]) assert.ok(!s.allowedTools.includes(t), `${kind} must not be allowed ${t}`);
+    if (kind !== "maintain") assert.ok(!s.allowedTools.includes("Bash"), `${kind} must not be allowed unrestricted Bash`);
+  }
+});
+
+test("the agent-creator has every engineer restriction and works only on the workforce repo", async () => {
+  const { workerSpec } = await import("../src/agents.js");
+  const { config } = await import("../src/config.js");
+  const eng = workerSpec("engineer");
+  for (const target of ["product", "self"] as const) {
+    const ac = workerSpec("create_agent", target);
+    assert.equal(ac.cwd, config.selfRepoDir, "create_agent must run in the workforce repo");
+    for (const rule of eng.disallowedTools!) assert.ok(ac.disallowedTools!.includes(rule), `create_agent must disallow ${rule}`);
+    assert.match(ac.prompt, /propose_action/, "create_agent must route side effects through propose_action");
+    assert.match(ac.prompt, /Never merge/, "create_agent must not merge");
+  }
+});
+
+test("every kind that opens pull requests is followed by a maintainer review", () => {
+  const jobs = src("jobs.ts");
+  assert.match(src("agents.ts"), /export const PR_KINDS: JobKind\[\] = \[[^\]]*"engineer"[^\]]*"create_agent"[^\]]*\]/);
+  assert.match(jobs, /job\.kind === "create_agent"\)[\s\S]*?this\.start\(\s*"maintain"/, "a maintainer job must follow every agent-creator job that may have opened a pull request");
+});
+
+test("the agent-creator cannot be put on a schedule", () => {
+  assert.match(src("orchestrator.ts"), /JOB_KINDS\.filter\(\(k\) => k !== "create_agent"\)/);
+  assert.match(src("orchestrator.ts"), /kind: scheduleKind/);
+});

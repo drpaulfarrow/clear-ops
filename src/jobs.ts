@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
 import type { AgentRunner } from "./agents.js";
-import { workerSpec } from "./agents.js";
+import { PR_KINDS, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 
@@ -71,8 +71,8 @@ export class JobRunner {
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        maxTurns: job.kind === "engineer" ? 200 : job.kind === "maintain" ? 80 : 40,
-        maxBudgetUsd: job.kind === "engineer" || job.kind === "maintain" ? config.engineerBudgetUsd : config.jobBudgetUsd,
+        maxTurns: PR_KINDS.includes(job.kind) ? 200 : job.kind === "maintain" ? 80 : 40,
+        maxBudgetUsd: PR_KINDS.includes(job.kind) || job.kind === "maintain" ? config.engineerBudgetUsd : config.jobBudgetUsd,
       });
       const outputPath = this.store.writeOutput(id, result.text);
       const summary = firstLines(result.text, 1200);
@@ -96,6 +96,22 @@ export class JobRunner {
         );
         chained = `\nMaintainer job ${m.id} started to review and merge.`;
       }
+      // So is the agent-creator's, on the workforce repo. Only an explicit schedule verdict (no code
+      // written) skips the maintainer; a missing or garbled verdict still gets a review.
+      if (job.kind === "create_agent") {
+        if (isScheduleVerdict(result.text)) {
+          chained = `\nNo code needed: it fits an existing kind. Say "set it up" and I will schedule it.`;
+        } else {
+          const m = this.start(
+            "maintain",
+            `Review the pull request just opened by the agent-creator, which adds a new worker kind to this workforce, and any other open pull requests. Check in particular that the new kind's prompt carries the clean-room rule, its tools are least-privilege (no Edit, Write or unrestricted Bash unless it is an engineer, nothing that sends, posts, signs or pays), and the invariant tests were extended, not weakened:\n\n${job.brief}\n\nAgent-creator's report:\n${result.text}`,
+            job.requestedBy,
+            "self",
+            job.replyTo,
+          );
+          chained = `\nMaintainer job ${m.id} started to review and merge.`;
+        }
+      }
       await this.messenger.send(
         job.replyTo ?? job.requestedBy,
         `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
@@ -108,6 +124,11 @@ export class JobRunner {
       this.running.delete(id);
     }
   }
+}
+
+/** True only when the agent-creator's output opens with the schedule verdict, i.e. it wrote no code. */
+export function isScheduleVerdict(text: string): boolean {
+  return text.trimStart().toLowerCase().startsWith(SCHEDULE_VERDICT.toLowerCase());
 }
 
 function firstLines(text: string, max: number): string {

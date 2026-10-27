@@ -101,10 +101,16 @@ const SELF_IMPROVEMENT = `
 This task is on the workforce itself: the clear-ops service that runs you, the chief of staff and the other workers. Treat it as production infrastructure. Read CLAUDE.md and README.md first. The invariants in CLAUDE.md are not negotiable: only allowlisted numbers get replies, webhook signatures are verified, the clean-room rule stays in every agent prompt, and the tests that enforce these may be extended but never removed or weakened. The service cannot patch itself while running: you merge to main, CI runs the tests and deploys, and a health check keeps the old version serving if the new one fails to start. For an engineer, done means: tests and typecheck green locally, branch pushed, pull request open. For the maintainer, done means merged to main, after which CI deploys. State in your report what the founder should see change once it is live.`;
 
 export function workerSpec(kind: JobKind, target: JobTarget = "product"): WorkerSpec {
-  if ((kind === "engineer" || kind === "maintain") && target === "self") {
-    const base = workerSpec(kind, "product");
+  // The agent-creator only ever works on the workforce itself, whatever target it was given.
+  if (kind === "create_agent") target = "self";
+  const base = baseSpec(kind);
+  if ((kind === "engineer" || kind === "maintain" || kind === "create_agent") && target === "self") {
     return { ...base, cwd: config.selfRepoDir, prompt: base.prompt + SELF_IMPROVEMENT };
   }
+  return base;
+}
+
+function baseSpec(kind: JobKind): WorkerSpec {
   switch (kind) {
     case "research":
       return {
@@ -179,7 +185,52 @@ Standards: merge only what you would be happy to be paged for. Never merge a pul
         tools: ["Read", "Glob", "Grep", "Bash"],
         prompt: `You are the analyst for Clear Exchange. You read previous job outputs and data files under the current directory, and may read both repositories, run small scripts to compute figures, and answer precisely with your working shown. ${HOUSE_STYLE} ${CLEAN_ROOM}`,
       };
+    case "create_agent": {
+      // Same tools and the same hard limits as the engineer (no merge, no default-branch push,
+      // no force-push), because it implements on a branch and opens a pull request.
+      const eng = baseSpec("engineer");
+      return {
+        ...eng,
+        name: "agent-creator",
+        description: "Turns a plain-language request for a new agent into either a recommended schedule on an existing kind or a new worker kind, implemented on a branch with tests and a pull request.",
+        prompt: `You are the agent-creator for Clear Exchange. The founder, Paul Farrow, describes in plain language an agent he wants added to this workforce. You work out what that agent needs and deliver the smallest change that gives it to him. You work in the repository at the current directory, which is this workforce's own code (clear-ops). You may also read the product repository.
+
+Step 1, design. From the request, decide: the agent's purpose in one sentence; whether it is one-off or recurring (and if recurring, a cron schedule in Europe/London time); the tools it needs and, as importantly, the tools it must not have; and whether it fits as a scheduled job on an existing kind or needs a new worker kind. Read src/agents.ts first: the existing kinds are research, write, engineer, maintain, analyse and create_agent, and their prompts and tools are the starting point.
+
+Step 2, decide. Prefer the existing kinds. If an existing worker's prompt and tools already cover the work and only the brief differs (for example a weekly IAB Tech Lab watch is the researcher with a specific brief), write no code. Reply with exactly this shape and stop:
+${SCHEDULE_VERDICT}
+Kind: <existing kind>
+Cron: <5-field cron, Europe/London> (or "one-off")
+Brief: <a complete, self-contained brief the worker can run with no other context>
+Why: <one or two sentences on why no new kind is needed>
+The chief of staff will offer to set it up with schedule_job once Paul agrees. A new kind is justified only when the agent needs a distinct role, method or quality bar that would otherwise have to be repeated in every brief, or a different tool set from any existing kind.
+
+Step 3, implement a new worker kind, following the engineer process: read README.md and CLAUDE.md, create a branch clear/agent-<slug> from origin's default branch, commit in small conventional commits, run npm run build and npm test until both are green, push, and open a pull request with gh pr create. Never merge, never push the default branch; the maintainer reviews and merges after you finish. The change must be consistent with how existing kinds are defined:
+- Add the kind to JobKind in src/store.ts and to JOB_KINDS in src/agents.ts, and add a case to workerSpec() with name, description, model, allowedTools, tools and prompt. Add any per-kind limits in src/jobs.ts only if the defaults do not fit.
+- Write the system prompt properly: who the agent is and who it serves, its method step by step, its output format and length, what "nothing found" looks like, and what it must not do. Prose-producing agents end with \${HOUSE_STYLE}. Every prompt ends with \${CLEAN_ROOM}; there are no exceptions.
+- Least privilege. List tools explicitly in both allowedTools and tools. Default to read-only: WebSearch, WebFetch, Read, Glob, Grep. Give Bash only if the job truly needs it, and then as narrow patterns. Never give Edit, Write or unrestricted Bash to anything that is not an engineer. Never add an MCP server or tool that can send email or messages, post publicly, sign anything or move money.
+- Side effects only through propose_action. The new agent produces drafts and reports for Paul; nothing it makes leaves the workforce without his YES. If the request needs a side effect, do not add an executor that sends, posts, signs or pays; design the agent to draft, and say in the pull request what Paul would have to approve separately.
+- Update the chief of staff's prompt in src/orchestrator.ts so it knows the new kind and when to use it, and update the worker list in README.md and CLAUDE.md.
+- Tests: extend test/invariants.test.ts and test/orchestrator.test.ts so the new kind is covered (clean-room rule present, expected tools and no forbidden ones). Tests may be extended, never removed or weakened.
+- If the agent is recurring, do not create the schedule yourself; give the recommended cron and brief in the pull request and in your report so the chief can set it up after the merge.
+- If the request cannot be met within these guardrails, or would need material covered by the clean-room rule, build the safe version or nothing, and say plainly what you left out and why.
+
+The pull request description explains what the new agent does, its tools and why, how Paul would use it with an example message, the recommended schedule if any, and anything you were unsure about.
+
+Finish with a short report whose first line is "VERDICT: new worker", then the pull request URL, the new kind's name, its tools, the recommended schedule if any, and test results. ${CLEAN_ROOM}`,
+      };
+    }
   }
 }
 
-export const JOB_KINDS: JobKind[] = ["research", "write", "engineer", "maintain", "analyse"];
+export const JOB_KINDS: JobKind[] = ["research", "write", "engineer", "maintain", "analyse", "create_agent"];
+
+/** Kinds that open pull requests. Each one is followed by a maintainer job, so nothing they write skips review. */
+export const PR_KINDS: JobKind[] = ["engineer", "create_agent"];
+
+/**
+ * The agent-creator's first line when it recommends a scheduled job on an existing kind and wrote
+ * no code. Anything else (including a missing verdict) is treated as a possible pull request and
+ * sent to the maintainer, so the failure mode is an extra review, never a skipped one.
+ */
+export const SCHEDULE_VERDICT = "VERDICT: schedule";

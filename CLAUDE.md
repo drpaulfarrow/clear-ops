@@ -3,7 +3,7 @@
 The agentic workforce for Clear Exchange, operated by the founder from Telegram, Discord or WhatsApp, any or all at once.
 
 ## What this is
-A small Node service. Messages arrive from Telegram (long polling, `src/telegram.ts`), Discord (gateway, `src/discord.ts`; each job gets a thread) or WhatsApp (`/webhook`), and replies go back to the conversation they came from through `src/channels.ts`. Jobs interrupted by a restart are re-queued on boot. a chief-of-staff agent (Claude Agent SDK) replies, and delegates longer work to worker agents (research, write, engineer, maintain, analyse) that run in the background and message the founder when done. Every agent can read both repositories. Engineers implement on branches and open pull requests. One agent, the maintainer, reviews and merges; it runs automatically after every engineer job. Commands outside that remit need a `YES <id>` reply. Recurring jobs run on cron.
+A small Node service. Messages arrive from Telegram (long polling, `src/telegram.ts`), Discord (gateway, `src/discord.ts`; each job gets a thread) or WhatsApp (`/webhook`), and replies go back to the conversation they came from through `src/channels.ts`. Jobs interrupted by a restart are re-queued on boot. a chief-of-staff agent (Claude Agent SDK) replies, and delegates longer work to worker agents (research, write, engineer, maintain, analyse, create_agent) that run in the background and message the founder when done. Every agent can read both repositories. Engineers implement on branches and open pull requests. One agent, the maintainer, reviews and merges; it runs automatically after every engineer job and every agent-creator job that may have opened a pull request. The agent-creator (`create_agent`) turns a plain-language request for a new agent into a recommended schedule on an existing kind or a new worker kind on a pull request against this repository. Commands outside that remit need a `YES <id>` reply. Recurring jobs run on cron.
 
 ## Self-improvement
 The engineer and maintainer may work on this repository (job target "self"). Nothing patches the running process: the maintainer merges to main, `.github/workflows/deploy.yml` runs the tests and deploys, and the Fly health check keeps the old machine serving if the new one fails. Definition of done: engineer, pull request open with green tests; maintainer, merged to main.
@@ -11,7 +11,7 @@ The engineer and maintainer may work on this repository (job target "self"). Not
 ## Invariants (enforced by `test/invariants.test.ts`, which may be extended but never removed or weakened)
 - Only senders in `ALLOWED_TELEGRAM_IDS`, `ALLOWED_DISCORD_IDS` or `ALLOWED_NUMBERS` get a reply (`isAllowed` in `src/config.ts`), and every listener checks before handling.
 - WhatsApp webhook signatures are verified before any message is parsed.
-- Every agent prompt carries the clean-room rule.
+- Every agent prompt carries the clean-room rule, including every kind added to `JOB_KINDS` later. Only engineering kinds (engineer, create_agent) get Edit, Write or unrestricted Bash.
 - Only the maintainer merges. Engineers cannot merge or push the default branch; nobody force-pushes, rewrites shared history or deletes recursively. Branch protection on `main` (require a pull request and the `ci / test` check) is the hard backstop.
 - Agents run headless (`permissionMode: "dontAsk"`); spend is capped on every run.
 
