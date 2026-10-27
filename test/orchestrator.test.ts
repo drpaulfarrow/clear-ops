@@ -109,12 +109,12 @@ test("approval flow: unknown id, reject, and executor failure are all reported",
   await post(inbound("447700900123", "YES abc123"));
   await waitFor(() => messenger.sent.some((m) => m.text === "No pending action abc123."));
 
-  const a = store.createAction("push_branch", "Push clear/test", { branch: "clear/test" }, "447700900123");
+  const a = store.createAction("run_command", "Deploy", { command: "echo deploy" }, "447700900123");
   await post(inbound("447700900123", `no ${a.id}`));
   await waitFor(() => messenger.sent.some((m) => m.text === `Rejected ${a.id}.`));
   assert.equal(store.getAction(a.id)!.status, "rejected");
 
-  const b = store.createAction("push_branch", "Push bad", { branch: "bad name;rm" }, "447700900123");
+  const b = store.createAction("run_command", "Bad", { command: "" }, "447700900123");
   await post(inbound("447700900123", `YES ${b.id}`));
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Action ${b.id} failed`)));
   assert.equal(store.getAction(b.id)!.status, "failed");

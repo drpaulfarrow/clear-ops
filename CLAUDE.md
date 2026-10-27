@@ -3,11 +3,11 @@
 The agentic workforce for Clear Exchange, operated by the founder over WhatsApp.
 
 ## What this is
-A small Node service. WhatsApp messages arrive at `/webhook`, a chief-of-staff agent (Claude Agent SDK) replies, and delegates longer work to worker agents (research, write, engineer, analyse) that run in the background and message the founder when done. Side effects outside the sandbox need a `YES <id>` reply. Recurring jobs run on cron.
+A small Node service. WhatsApp messages arrive at `/webhook`, a chief-of-staff agent (Claude Agent SDK) replies, and delegates longer work to worker agents (research, write, engineer, analyse) that run in the background and message the founder when done. The engineer is autonomous: it branches, tests, has a reviewer agent check the diff, merges and pushes. Commands outside that remit need a `YES <id>` reply. Recurring jobs run on cron.
 
 ## Rules for anyone (human or agent) working in this repo
 - Clean room: never reference, copy or reconstruct anything from a repository called `comp-exchange` or "Atom", or any Microsoft internal material. Only public standards and general knowledge.
-- No new side effects without an approval gate. Anything that sends, posts, pushes, signs or pays goes through `propose_action` and an executor in `src/jobs.ts`.
+- The engineer may merge and push to its own repository. Anything else that sends, posts, signs or pays goes through `propose_action` and an executor in `src/jobs.ts`.
 - Only numbers in `ALLOWED_NUMBERS` are ever answered.
 - Keep replies short; they are read on a phone. No em dashes, British English.
 - Tests must pass: `npm test`. Typecheck: `npm run build`.

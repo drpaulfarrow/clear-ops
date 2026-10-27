@@ -27,6 +27,7 @@ export const config = {
     engineer: process.env.ENGINEER_MODEL ?? "opus",
   },
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
+  engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */
   maxMessageChars: 3900,
 };

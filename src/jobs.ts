@@ -46,8 +46,9 @@ export class JobRunner {
         allowedTools: spec.allowedTools,
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
-        maxTurns: job.kind === "engineer" ? 80 : 40,
-        maxBudgetUsd: config.jobBudgetUsd,
+        agents: spec.agents,
+        maxTurns: job.kind === "engineer" ? 200 : 40,
+        maxBudgetUsd: job.kind === "engineer" ? config.engineerBudgetUsd : config.jobBudgetUsd,
       });
       const outputPath = this.store.writeOutput(id, result.text);
       const summary = firstLines(result.text, 1200);
@@ -84,18 +85,11 @@ function firstLines(text: string, max: number): string {
 export type ActionExecutor = (action: PendingAction) => Promise<string>;
 
 /**
- * The only side effects the workforce can take outside its sandbox, each behind
- * an explicit YES from the founder. Add to this map carefully.
+ * Side effects outside the workers' own remit, each behind an explicit YES from the
+ * founder. The engineer merges and pushes on its own; this is for anything else.
  */
 export const actionExecutors: Record<string, ActionExecutor> = {
-  /** Push a branch the engineer created. payload: { branch } */
-  async push_branch(action) {
-    const branch = String(action.payload.branch ?? "");
-    if (!/^[\w./-]+$/.test(branch)) throw new Error("Invalid branch name");
-    const { stdout, stderr } = await exec("git", ["push", "-u", "origin", branch], { cwd: config.repoDir });
-    return (stdout + stderr).trim() || `Pushed ${branch}`;
-  },
-  /** Run one shell command in the repo, as proposed by the engineer. payload: { command } */
+  /** Run one shell command in the repo on the founder's behalf (a deploy, a migration). payload: { command } */
   async run_command(action) {
     const command = String(action.payload.command ?? "");
     if (!command) throw new Error("No command given");

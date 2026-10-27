@@ -2,7 +2,7 @@
 
 An agentic workforce for Clear Exchange that you run from WhatsApp.
 
-You message a WhatsApp number. A chief-of-staff agent answers quick questions itself and delegates longer work to four workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), an engineer (code on a branch in your repository, never pushed) and an analyst (questions about previous outputs and data). Workers run in the background and message you when they finish. Anything that would push code or run a command in the repo waits for you to reply `YES <id>`. Recurring jobs run on a schedule you set in chat.
+You message a WhatsApp number. A chief-of-staff agent answers quick questions itself and delegates longer work to four workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements, tests, gets an independent review, merges and pushes on its own) and an analyst (questions about previous outputs and data). Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
 
 Everything runs on the Claude Agent SDK. Conversation memory persists per phone number; jobs, approvals, schedules and standing notes persist in a JSON store on a volume.
 
@@ -32,7 +32,13 @@ Create an API key at the Claude Console and keep it for step 4.
 4. Add your personal number as a recipient (test numbers can only message listed recipients).
 
 ### 3. A clean repository for the engineer
-Create an empty private repo (for example `clear-exchange`) and note its clone URL. The engineer only works here. It must not be, or contain, anything from previous employer repositories.
+Create an empty private repo (for example `clear-exchange`) and a fine-grained GitHub token with contents read and write on that repo. Clone it with the token in the URL so the engineer can push:
+```bash
+git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-exchange workspace
+git -C workspace config user.name "Clear Exchange engineer"
+git -C workspace config user.email "engineer@clear.exchange"
+```
+The engineer only works here. It must not be, or contain, anything from previous employer repositories. If you add CI (a GitHub Actions workflow that runs the tests on push), the engineer treats a red build as not done.
 
 ### 4. Run it
 Locally first:
@@ -55,7 +61,7 @@ fly volumes create clear_ops_data --region lhr --size 3
 fly secrets set ANTHROPIC_API_KEY=... WHATSAPP_TOKEN=... WHATSAPP_PHONE_NUMBER_ID=... \
   WHATSAPP_VERIFY_TOKEN=... WHATSAPP_APP_SECRET=... ALLOWED_NUMBERS=447...
 fly deploy
-fly ssh console -C "git clone <your-repo-url> /data/workspace"
+fly ssh console -C "git clone https://x-access-token:<GITHUB_TOKEN>@github.com/<you>/clear-exchange /data/workspace"
 ```
 Point the Meta callback URL at `https://clear-ops.fly.dev/webhook`. Any host that runs a Docker container with a persistent volume works the same way (Azure Container Apps, Railway, a VPS).
 
@@ -68,12 +74,13 @@ See `.env.example`. The important ones:
 | `WHATSAPP_APP_SECRET` | Enables webhook signature checks. Set it in production. |
 | `REPO_DIR` | The clean repository the engineer works in. |
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. |
-| `JOB_BUDGET_USD` | Spend cap per job and per chat turn. |
+| `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
+| `ENGINEER_BUDGET_USD` | Spend cap per engineering job. |
 
 ## Safety model
 - Headless permission mode: tools not pre-approved are denied, never left waiting.
-- The engineer cannot push, delete recursively or reach the network. Pushing is an approved action.
-- Only two side effects exist (`push_branch`, `run_command`) and both need `YES <id>`.
+- The engineer works like a senior engineer: branch, tests, an independent reviewer agent, merge, push. It cannot force-push, rewrite shared history, delete recursively or disable failing tests. If it cannot finish safely it pushes the branch unmerged and says why.
+- One side effect exists outside that remit (`run_command`, for deploys and migrations) and it needs `YES <id>`.
 - The chief never sends email or messages anyone but you. Drafts come to you.
 - Spend is capped per job; subagent nesting is limited.
 - A broken session is dropped automatically so the conversation never jams; `/reset` does it by hand.

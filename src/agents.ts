@@ -86,6 +86,7 @@ export interface WorkerSpec {
   disallowedTools?: string[];
   tools?: string[];
   cwd?: string;
+  agents?: Record<string, AgentDefinition>;
 }
 
 export function workerSpec(kind: JobKind): WorkerSpec {
@@ -111,12 +112,31 @@ export function workerSpec(kind: JobKind): WorkerSpec {
     case "engineer":
       return {
         name: "engineer",
-        description: "Implements scoped engineering tasks in the Clear Exchange repository on a branch, with tests.",
+        description: "Senior engineer. Implements tasks in the Clear Exchange repository end to end: branch, tests, review, merge, push.",
         model: config.models.engineer,
         cwd: config.repoDir,
-        allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
-        disallowedTools: ["Bash(git push*)", "Bash(rm -rf*)", "Bash(curl*)", "Bash(wget*)", "WebFetch", "WebSearch"],
-        prompt: `You are the engineer for Clear Exchange, working in the repository at the current directory. For each task: create a branch named clear/<short-task-slug> from the default branch, implement the change with tests, run the tests, and commit with a clear message. Never push; the founder approves pushes. Finish with a short report: what changed, which files, test results, and anything you were unsure about. Keep changes small and reviewable. ${CLEAN_ROOM}`,
+        allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Agent"],
+        disallowedTools: ["Bash(rm -rf*)", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git reset --hard*)", "Bash(git clean*)"],
+        agents: {
+          reviewer: {
+            description: "Independent code reviewer. Reviews a branch's diff for correctness, security, tests and clarity before merge.",
+            model: config.models.engineer,
+            tools: ["Read", "Glob", "Grep", "Bash(git diff*)", "Bash(git log*)", "Bash(npm test*)", "Bash(npm run*)"],
+            prompt: `You review code written by a colleague before it merges. Read the diff against the default branch, run the tests, and report: blocking problems (bugs, security issues, missing tests, secrets, breaking changes), then suggestions. Be specific: file, line, what is wrong, what to do. Approve only if you would merge it yourself. ${CLEAN_ROOM}`,
+          },
+        },
+        prompt: `You are the senior engineer for Clear Exchange, working in the repository at the current directory. You own delivery end to end and do not ask the founder for permission to merge.
+
+Your process for every task:
+1. Read the repository's README, CLAUDE.md and existing patterns before writing anything. Match the conventions you find.
+2. Create a branch named clear/<short-task-slug> from the default branch, with the default branch up to date (git fetch, then branch from origin's default).
+3. Implement the change in small, coherent commits with conventional commit messages. Write or update tests alongside the code. Keep documentation current.
+4. Run the full test suite and any linter or typecheck the repo defines. Fix what you broke.
+5. Ask the reviewer agent to review the branch. Fix every blocking issue it raises, re-run the tests, and re-review if the fixes were substantial.
+6. When tests are green and the review is clean, merge into the default branch with a merge commit (no squash, no rebase of shared history), push the default branch, and delete the branch.
+7. If you cannot finish safely, push the branch unmerged and say exactly what is blocking.
+
+Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. If the repo has CI, treat a red CI as not done. Finish with a short report: what changed, which files, test results, the reviewer's verdict, and the commit hash on the default branch. ${CLEAN_ROOM}`,
       };
     case "analyse":
       return {
