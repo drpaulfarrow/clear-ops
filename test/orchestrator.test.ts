@@ -32,6 +32,13 @@ const fakeRunner: AgentRunner = async (o) => {
       }
       return { text: "Delegated (handler not found)", sessionId: "sess-1" };
     }
+    if (o.prompt.startsWith("new agent:")) {
+      // Simulate the chief starting the agent-creator, wrongly asking for the product repo.
+      const server = (ops as any).instance;
+      const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
+      const r = await handler({ kind: "create_agent", brief: o.prompt.slice(10).trim(), target: "product" }, {});
+      return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
+    }
     return { text: `chief says: ${o.prompt}`, sessionId: "sess-1" };
   }
   return { text: `worker(${o.model}) did: ${o.prompt.slice(0, 40)}`, costUsd: 0.01 };
@@ -208,4 +215,44 @@ test("verifySignature accepts a correct HMAC and rejects a wrong one", () => {
   assert.equal(verifySignature(raw, sig, "secret"), true);
   assert.equal(verifySignature(raw, "sha256=" + "0".repeat(64), "secret"), false);
   assert.equal(verifySignature(raw, undefined, ""), true, "no secret configured means skip");
+});
+
+test("the chief starts the agent-creator on the workforce repo, and its pull request goes to the maintainer", async () => {
+  const { config } = await import("../src/config.js");
+  await post(inbound("447700900123", "new agent: an agent that drafts publisher outreach"));
+  await waitFor(() => messenger.sent.some((m) => m.text.includes("(create_agent, on the workforce itself)")));
+  const job = store.listJobs(50).find((j) => j.kind === "create_agent" && j.brief.includes("drafts publisher outreach"))!;
+  assert.equal(job.target, "self", "create_agent is forced onto the workforce repo");
+  await waitFor(() => store.listJobs(50).some((j) => j.kind === "maintain" && j.brief.includes("drafts publisher outreach")));
+  const maint = store.listJobs(50).find((j) => j.kind === "maintain" && j.brief.includes("drafts publisher outreach"))!;
+  assert.equal(maint.target, "self");
+  assert.match(maint.brief, /clean-room rule/);
+  const call = calls.find((c) => c.prompt.startsWith("an agent that drafts publisher outreach"))!;
+  assert.equal(call.cwd, config.selfRepoDir);
+  assert.match(call.systemPrompt, /agent-creator/);
+  assert.match(call.systemPrompt, /This task is on the workforce itself/);
+  assert.match(call.systemPrompt, /Clean room rule/);
+  assert.ok(call.disallowedTools!.includes("Bash(gh pr merge*)"));
+  assert.equal(call.maxBudgetUsd, config.engineerBudgetUsd);
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Job ${job.id} (create_agent, workforce) finished`) && m.text.includes("Maintainer job")));
+});
+
+test("an agent-creator schedule verdict writes no code and starts no maintainer", async () => {
+  const { JobRunner, isScheduleVerdict } = await import("../src/jobs.js");
+  const verdict = "VERDICT: schedule\nKind: research\nCron: 0 7 * * 1\nBrief: Check IAB Tech Lab announcements from the past week.\nWhy: the researcher already does this.";
+  const runner = new JobRunner(store, messenger, async (o) => {
+    calls.push(o);
+    return { text: o.systemPrompt.includes("agent-creator") ? verdict : "reviewed", costUsd: 0.01 };
+  });
+  const job = runner.start("create_agent", "Monitor IAB Tech Lab announcements weekly", "447700900123");
+  await waitFor(() => store.getJob(job.id)?.status === "done");
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Job ${job.id} (create_agent`)));
+  const msg = messenger.sent.find((m) => m.text.startsWith(`Job ${job.id} (create_agent`))!;
+  assert.match(msg.text, /set it up/);
+  assert.match(msg.text, /Cron: 0 7 \* \* 1/);
+  assert.ok(!msg.text.includes("Maintainer job"));
+  assert.ok(!store.listJobs(50).some((j) => j.kind === "maintain" && j.brief.includes("Monitor IAB Tech Lab")));
+  assert.equal(isScheduleVerdict("  verdict: schedule\nKind: write"), true);
+  assert.equal(isScheduleVerdict("VERDICT: new worker\nhttps://github.com/o/r/pull/1"), false);
+  assert.equal(isScheduleVerdict("I opened a PR. VERDICT: schedule"), false, "only a leading verdict skips review");
 });
