@@ -2,7 +2,7 @@
 
 An agentic workforce for Clear Exchange that you run from chat: Telegram, Discord or WhatsApp, any or all at once.
 
-You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to five workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) and an analyst (questions about previous outputs and data). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
+You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to six workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) an analyst (questions about previous outputs and data) and an agent-creator (turns a plain-language request for a new agent into either a recommended schedule on an existing worker or a new worker kind, delivered as a pull request the maintainer reviews). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
 
 Everything runs on the Claude Agent SDK. Conversation memory persists per phone number; jobs, approvals, schedules and standing notes persist in a JSON store on a volume.
 
@@ -15,6 +15,7 @@ Draft a two-line email to the Prebid board proposing the seller module. Formal.
 Engineer: scaffold a Fastify service in the repo with a /health route and tests.
 Every Monday at 7am, research what changed in SPUR, CoMP, TollBit and Cloudflare.
 Remember: always price examples at half a cent per retrieval.
+I want an agent that drafts publisher outreach.
 show job 93137e
 /jobs   /pending   /reset   /help
 YES 1f3a9c
@@ -83,6 +84,19 @@ The engineer can work on this workforce as well as on the product. Say "improve 
 
 Setup for this: clone this repository into `SELF_REPO_DIR` with a token that can push (same pattern as step 3), and add `FLY_API_TOKEN` as a repository secret so the workflow can deploy. The invariants in `CLAUDE.md` and `test/invariants.test.ts` are what stop a self-improvement from removing the allowlist, the signature check, the clean-room rule or the spend caps.
 
+## Adding an agent
+Describe the agent you want in plain words; you do not need to say how to build it.
+
+```
+You: I want an agent that monitors IAB Tech Lab announcements weekly.
+Bot: Started job 4c1d2e (create_agent). It will tell you whether this needs a new worker or just a schedule.
+Bot: Job 4c1d2e finished. VERDICT: schedule. Kind: research. Cron: 0 7 * * 1. Brief: ...
+     No code needed: it fits an existing kind. Say "set it up" and I will schedule it.
+You: set it up
+```
+
+If the agent needs its own role, method or tools (for example "an agent that drafts publisher outreach"), the agent-creator writes the new worker kind with a proper prompt, least-privilege tools and tests, and opens a pull request on this repository. The maintainer reviews and merges it as usual, CI deploys it, and a few minutes later you can use the new kind by name. If it should run on a schedule, the report includes the recommended cron for the chief to set up once it is live.
+
 ## Configuration
 See `.env.example`. The important ones:
 
@@ -97,12 +111,13 @@ See `.env.example`. The important ones:
 | `REPO_DIR`, `SELF_REPO_DIR` | Where the clones live. |
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. |
 | `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
-| `ENGINEER_BUDGET_USD` | Spend cap per engineering job. |
+| `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job. |
 
 ## Safety model
 - Headless permission mode: tools not pre-approved are denied, never left waiting.
 - Engineers work like senior engineers: branch, tests, pull request. They cannot merge, push the default branch, force-push, rewrite shared history, delete recursively or disable failing tests.
 - One maintainer agent reviews and merges. It runs tests, checks CI, reads the diff, and either merges or requests changes. It cannot edit code. Branch protection on `main` is the hard backstop, since both agents use the same GitHub token.
+- The agent-creator has the engineer's tools and limits and works only on this repository. Every worker kind it adds must carry the clean-room rule, get read-only tools unless it is an engineer, and send nothing itself; `test/invariants.test.ts` checks every kind in `JOB_KINDS`, so a new kind that breaks these fails CI. It cannot be scheduled.
 - One side effect exists outside that remit (`run_command`, for deploys and migrations) and it needs `YES <id>`.
 - The chief never sends email or messages anyone but you. Drafts come to you. An unlisted Telegram sender is told its own id once and nothing else.
 - Spend is capped per job; subagent nesting is limited.
@@ -116,6 +131,6 @@ npm test          # offline test suite with a fake agent runner
 ```
 
 ## Extending
-- A new worker: add a case to `workerSpec()` in `src/agents.ts` and the kind to `JobKind`.
+- A new worker: ask for it in chat ("I want an agent that...") and the agent-creator does it. By hand: add a case to `workerSpec()` in `src/agents.ts`, the kind to `JobKind` and `JOB_KINDS`, and the kind to the chief's prompt.
 - A new side effect: add an executor to `actionExecutors` in `src/jobs.ts`. It will automatically require approval.
 - Email, calendar or GitHub tools: add an MCP server to the chief's `mcpServers` in `src/orchestrator.ts`, and gate any sending behind `propose_action`.
