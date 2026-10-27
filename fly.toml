@@ -1,0 +1,34 @@
+# Fly.io deployment. One small machine in London, a persistent volume for state and the repo.
+#   fly launch --no-deploy --copy-config
+#   fly volumes create clear_ops_data --region lhr --size 3
+#   fly secrets set ANTHROPIC_API_KEY=... WHATSAPP_TOKEN=... WHATSAPP_PHONE_NUMBER_ID=... WHATSAPP_VERIFY_TOKEN=... WHATSAPP_APP_SECRET=... ALLOWED_NUMBERS=447...
+#   fly deploy
+app = "clear-ops"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATA_DIR = "/data"
+  REPO_DIR = "/data/workspace"
+  CHIEF_MODEL = "opus"
+  WORKER_MODEL = "sonnet"
+  ENGINEER_MODEL = "opus"
+  JOB_BUDGET_USD = "5"
+
+[[mounts]]
+  source = "clear_ops_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # the scheduler must keep running
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
