@@ -7,6 +7,7 @@ import { ACTION_KINDS, actionExecutors, lockKey, type JobRunner } from "./jobs.j
 import type { Scheduler } from "./scheduler.js";
 import type { Job, JobKind, JobTarget, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
+import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
 
@@ -34,6 +35,7 @@ export class Orchestrator {
     private readonly jobs: JobRunner,
     private readonly scheduler: Scheduler,
     private readonly run: AgentRunner,
+    private readonly statusOptions: LiveStatusOptions = {},
   ) {}
 
   /**
@@ -75,8 +77,9 @@ export class Orchestrator {
       return this.messenger.send(from, out ?? `No output for job ${show[1]}.`);
     }
 
-    // Everything else goes to the chief of staff, with a "working" nudge if it takes a while
-    const nudge = setTimeout(() => void this.messenger.send(from, "Working on it."), 12_000);
+    // Everything else goes to the chief of staff. While it works, the founder sees a typing indicator
+    // and one status line, edited in place from the chief's tool calls and removed when the reply is ready.
+    const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
     try {
       const result = await this.run({
         prompt: trimmed,
@@ -88,12 +91,13 @@ export class Orchestrator {
         mcpServers: { ops: this.opsServer(sender, from, messageId) },
         maxTurns: 25,
         maxBudgetUsd: config.jobBudgetUsd,
+        onToolUse: (name, input) => status.update(describeToolUse(name, input)),
       });
-      clearTimeout(nudge);
+      await status.finish();
       if (result.sessionId) this.store.setSession(from, result.sessionId);
       await this.messenger.send(from, result.text || "(no reply)");
     } catch (err) {
-      clearTimeout(nudge);
+      await status.finish();
       // A broken session should not brick the conversation: drop it and tell the founder.
       this.store.clearSession(from);
       throw err;

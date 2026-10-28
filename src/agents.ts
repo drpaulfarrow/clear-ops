@@ -18,6 +18,8 @@ export interface RunOptions {
   maxBudgetUsd?: number;
   /** Directories outside cwd the agent may read. Every agent gets both repositories. */
   additionalDirectories?: string[];
+  /** Called for each tool the agent calls (top level only), so the founder can see what it is doing. */
+  onToolUse?: (name: string, input: Record<string, unknown>) => void;
 }
 
 export interface RunResult {
@@ -60,6 +62,16 @@ export const sdkRunner: AgentRunner = async (o) => {
         },
       },
     })) {
+      if (message.type === "assistant" && o.onToolUse && !message.parent_tool_use_id) {
+        for (const block of message.message.content) {
+          if (block.type !== "tool_use") continue;
+          try {
+            o.onToolUse(block.name, (block.input ?? {}) as Record<string, unknown>);
+          } catch {
+            // A status display must never break the run.
+          }
+        }
+      }
       if (message.type === "result") {
         sessionId = message.session_id;
         costUsd = message.total_cost_usd;
