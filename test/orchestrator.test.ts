@@ -305,3 +305,42 @@ test("the chief knows the design worker and can start the design loop with start
   // The fake designer gives no verdict, so the loop pauses and says so rather than stalling silently.
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Design loop Customer-ready site (${job.id}) is paused`)));
 });
+
+test("a message in a job thread gives the chief the job and the last 20 messages, with or without a session", async () => {
+  const { Orchestrator } = await import("../src/orchestrator.js");
+  const { JobRunner } = await import("../src/jobs.js");
+  const { Scheduler } = await import("../src/scheduler.js");
+  const thread = "dc:c:555000111";
+  const seen: Array<{ to: string; limit: number }> = [];
+  const m = new ConsoleMessenger() as InstanceType<typeof ConsoleMessenger> & { recent: (to: string, limit: number) => Promise<Array<{ author: string; text: string }>> };
+  m.recent = async (to, limit) => {
+    seen.push({ to, limit });
+    return Array.from({ length: limit }, (_, i) => ({ author: i % 2 ? "Clear Ops" : "Paul", text: `thread line ${i + 1}` }));
+  };
+  const job = store.createJob("research", "Map the TollBit competitors in depth", "dc:u:1", "product", thread, { title: "TollBit research" });
+  store.updateJob(job.id, { status: "running" });
+  const before = calls.length;
+  const jobs = new JobRunner(store, m, fakeRunner);
+  const orch = new Orchestrator(store, m, jobs, new Scheduler(store, jobs), fakeRunner);
+  const sender = "447700900123";
+
+  for (const withSession of [false, true]) {
+    if (withSession) store.setSession(thread, "sess-existing");
+    else store.clearSession(thread);
+    await orch.handle(sender, `how is it going? ${withSession}`, { replyTo: thread });
+    const call = calls.slice(before).filter((c) => c.prompt.includes(`how is it going? ${withSession}`)).pop()!;
+    assert.equal(call.resume, withSession ? "sess-existing" : undefined);
+    assert.match(call.prompt, new RegExp(`thread of job ${job.id}`));
+    assert.match(call.prompt, /Title: TollBit research/);
+    assert.match(call.prompt, /Brief: Map the TollBit competitors in depth/);
+    assert.match(call.prompt, /Status: running/);
+    assert.match(call.prompt, /thread line 1\b/);
+    assert.match(call.prompt, /thread line 20\b/);
+    assert.ok(call.prompt.endsWith(`how is it going? ${withSession}`), "Paul's message comes last");
+  }
+  assert.ok(seen.every((s) => s.to === thread && s.limit === 20));
+
+  // Outside a job thread nothing is added.
+  await orch.handle(sender, "plain hello", { replyTo: "dc:c:999" });
+  assert.equal(calls.slice(before).filter((c) => c.prompt.includes("plain hello")).pop()!.prompt, "plain hello");
+});

@@ -27,6 +27,8 @@ export interface Messenger {
   sendImage?(to: string, file: string, caption: string): Promise<void>;
   /** Show a typing indicator for a few seconds. Resolves true if the channel supports it. */
   typing?(to: string): Promise<boolean>;
+  /** Channels with readable history (Discord) return the last `limit` messages of a conversation, oldest first. */
+  recent?(to: string, limit: number): Promise<Array<{ author: string; text: string }>>;
 }
 
 /** Split long text on paragraph boundaries so each piece fits a WhatsApp message. */

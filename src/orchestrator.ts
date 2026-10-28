@@ -41,6 +41,9 @@ Paul can send files in chat (a LinkedIn Connections.csv export, PDFs, spreadshee
 
 Clean room rule: never reference or reconstruct anything from a repository called comp-exchange or "Atom", or any Microsoft internal material. Paul is leaving Microsoft; everything here is built from public standards and his general expertise.`;
 
+/** How many earlier messages of a job thread the chief is shown. */
+const THREAD_HISTORY = 20;
+
 export interface HandleContext {
   /** Address replies go to and the conversation is keyed by. Defaults to the sender. */
   replyTo?: string;
@@ -152,8 +155,9 @@ export class Orchestrator {
     // and one status line, edited in place from the chief's tool calls and removed when the reply is ready.
     const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
     try {
+      const context = await this.threadContext(from);
       const result = await this.run({
-        prompt,
+        prompt: context ? `${context}\n\n${prompt}` : prompt,
         ...(images?.length ? { images } : {}),
         systemPrompt: CHIEF_PROMPT + this.standingNotes(),
         model: config.models.chief,
@@ -178,6 +182,34 @@ export class Orchestrator {
       this.store.clearSession(from);
       throw err;
     }
+  }
+
+  /**
+   * When Paul writes inside a job's thread (the conversation address is the job's replyTo), the
+   * chief gets that job's title, brief, status and queue position and the last messages of the
+   * thread, every turn, whether or not a chief session exists for it. Empty outside job threads.
+   */
+  private async threadContext(from: string): Promise<string> {
+    if (!threadMention(from)) return "";
+    const job = this.store
+      .allJobs()
+      .filter((j) => j.replyTo === from)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    if (!job) return "";
+    let history: Array<{ author: string; text: string }> = [];
+    try {
+      history = (await this.messenger.recent?.(from, THREAD_HISTORY)) ?? [];
+    } catch (err) {
+      console.warn(`orchestrator: could not read thread history for ${from}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const pos = this.jobs.queuePosition(job.id);
+    return [
+      `This message is in the thread of job ${job.id}. Job context (from the store, not from Paul):`,
+      `Title: ${jobTitle(job)}`,
+      `Brief: ${job.brief}`,
+      `Status: ${this.statusText(job)}${pos ? `; queue position ${pos}` : ""}`,
+      history.length ? `Last ${history.length} messages in this thread, oldest first:\n${history.slice(-THREAD_HISTORY).map((m) => `${m.author}: ${m.text}`).join("\n")}` : "No earlier messages could be read from this thread.",
+    ].join("\n");
   }
 
   private followUps(): FollowUps {

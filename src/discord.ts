@@ -97,6 +97,18 @@ export class DiscordMessenger implements Messenger {
     return true;
   }
 
+  /** The last `limit` messages of a channel or thread, oldest first. */
+  async recent(to: string, limit: number): Promise<Array<{ author: string; text: string }>> {
+    if (!to.startsWith(DC_CHANNEL)) return [];
+    const channel = await this.client.channels.fetch(to.slice(DC_CHANNEL.length));
+    if (!channel || !channel.isTextBased() || !("messages" in channel)) return [];
+    const fetched = await channel.messages.fetch({ limit });
+    return [...fetched.values()]
+      .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+      .map((m) => ({ author: m.author?.bot ? "Clear Ops" : "Paul", text: m.content ?? "" }))
+      .filter((m) => m.text.trim());
+  }
+
   /** An image attachment with the caption as the message text. */
   async sendImage(to: string, file: string, caption: string): Promise<void> {
     const target = (await this.resolve(to)) as unknown as { send: (m: { content?: string; files: string[] }) => Promise<unknown> };
