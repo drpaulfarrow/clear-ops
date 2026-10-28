@@ -55,7 +55,7 @@ export interface Identity {
  */
 export function chooseIdentity(designer: Identity | undefined, current: Identity): Identity {
   const who = current.uid === 0 ? designer : designer ?? current;
-  if (!who) throw new Error(`no unprivileged "${config.design.user}" user, so the browser will not run (it never runs as root)`);
+  if (!who) throw new Error(`${config.design.user} user not found; refusing to run the browser as root`);
   if (who.uid === 0 || who.gid === 0) throw new Error(`"${config.design.user}" must not be root`);
   return who;
 }
@@ -75,6 +75,8 @@ export function designIdentity(): Promise<Identity> {
     const current = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
     const who = chooseIdentity(designer && Number.isInteger(designer.uid) && Number.isInteger(designer.gid) ? designer : undefined, current);
     if (current.uid === 0) lockDown([config.dataDir, config.repoDir, config.selfRepoDir]);
+    // UPLOADS_DIR may sit outside DATA_DIR; uploads can hold personal data and the browser runs untrusted pages.
+    if (current.uid === 0) lockDown([config.uploadsDir]);
     return who;
   })().catch((err) => {
     identity = undefined;
@@ -158,15 +160,50 @@ export const chromiumCapture: Capture = async (r) => {
 
 /* ---------- What may be screenshotted ---------- */
 
-/** Loopback, private, link-local, carrier-grade NAT and unique-local addresses, v4 and v6. */
-export function isPrivateAddress(ip: string): boolean {
-  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
-  if (net.isIPv4(v4)) {
-    const [a, b] = v4.split(".").map(Number);
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+function isPrivateV4(v4: string): boolean {
+  const [a, b] = v4.split(".").map(Number);
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+}
+
+/** An IPv6 address as its 8 hextets, whatever way it is written (`::`, embedded dotted IPv4, zone id). */
+export function expandIPv6(ip: string): number[] | undefined {
+  const s = ip.replace(/^\[|\]$/g, "").replace(/%.*$/, "").toLowerCase();
+  if (!net.isIPv6(s)) return undefined;
+  let groups = s;
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (dotted) {
+    const [a, b, c, d] = dotted[1].split(".").map(Number);
+    groups = s.slice(0, dotted.index) + ((a << 8) | b).toString(16) + ":" + ((c << 8) | d).toString(16);
   }
-  const s = ip.toLowerCase();
-  return s === "::" || s === "::1" || /^f[cd]/.test(s) || /^fe[89ab]/.test(s);
+  const [head, tail] = groups.includes("::") ? groups.split("::") : [groups, undefined];
+  const h = head ? head.split(":") : [];
+  const t = tail === undefined ? [] : tail ? tail.split(":") : [];
+  const fill = tail === undefined ? [] : new Array(8 - h.length - t.length).fill("0");
+  const all = [...h, ...fill, ...t].map((x) => parseInt(x, 16));
+  return all.length === 8 && all.every((x) => Number.isInteger(x) && x >= 0 && x <= 0xffff) ? all : undefined;
+}
+
+/**
+ * Loopback, private, link-local, carrier-grade NAT, multicast and unique-local addresses, v4 and v6.
+ * IPv6 is checked on the parsed address, not its spelling, so `::ffff:7f00:1` is as private as
+ * `127.0.0.1`. IPv4-mapped (::ffff:0:0/96) and IPv4-compatible (::/96) addresses are refused whatever
+ * they carry, and so are NAT64 (64:ff9b::/96) and 6to4 (2002::/16): the browser needs none of them.
+ * Anything that is not a valid address counts as private.
+ */
+export function isPrivateAddress(ip: string): boolean {
+  if (net.isIPv4(ip)) return isPrivateV4(ip);
+  const h = expandIPv6(ip);
+  if (!h) return true;
+  const zeros = (n: number) => h.slice(0, n).every((x) => x === 0);
+  if (zeros(6)) return true; // ::, ::1 and IPv4-compatible ::/96
+  if (zeros(5) && h[5] === 0xffff) return true; // IPv4-mapped ::ffff:0:0/96
+  if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((x) => x === 0)) return true; // NAT64
+  if (h[0] === 0x2002) return true; // 6to4
+  if ((h[0] & 0xfe00) === 0xfc00) return true; // unique local fc00::/7
+  if ((h[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
+  if ((h[0] & 0xffc0) === 0xfec0) return true; // deprecated site-local fec0::/10
+  if ((h[0] & 0xff00) === 0xff00) return true; // multicast ff00::/8
+  return false;
 }
 
 export type Lookup = (host: string) => Promise<string[]>;

@@ -212,6 +212,47 @@ test("the egress proxy allows the capture's one local port and refuses every oth
   }
 });
 
+test("IPv4 written in IPv6 form, NAT64, 6to4 and multicast are private however they are spelled", async () => {
+  const priv = ["::ffff:7f00:1", "::ffff:127.0.0.1", "::ffff:a00:1", "::ffff:a9fe:a9fe", "0:0:0:0:0:0:0:1", "::7f00:1", "64:ff9b::7f00:1", "ff02::1", "fdaa::3",
+    "::ffff:8.8.8.8", "2002:7f00:1::", "[::ffff:7f00:1]", "fe80::1%eth0", "0000:0000:0000:0000:0000:ffff:7f00:0001", "not-an-address"];
+  for (const ip of priv) assert.ok(d.isPrivateAddress(ip), `${ip} is private`);
+  for (const ip of ["2606:4700::1111", "2a00:1450:4009::1", "2001:4860:4860::8888"]) assert.ok(!d.isPrivateAddress(ip), `${ip} is public`);
+  assert.deepEqual(d.expandIPv6("::ffff:127.0.0.1"), [0, 0, 0, 0, 0, 0xffff, 0x7f00, 1]);
+  assert.deepEqual(d.expandIPv6("::ffff:7f00:1"), d.expandIPv6("::ffff:127.0.0.1"), "both spellings are the same address");
+  assert.equal(new URL("http://[::ffff:127.0.0.1]:8080/").hostname, "[::ffff:7f00:1]", "URL parsing rewrites the mapped form to hex");
+  for (const raw of ["http://[::ffff:127.0.0.1]:8080/", "http://[::ffff:7f00:1]/", "http://[::ffff:a9fe:a9fe]/latest/meta-data", "http://[64:ff9b::a00:1]/"]) {
+    await assert.rejects(d.checkPublicUrl(raw, publicDns), /private/, raw);
+  }
+  await assert.rejects(d.checkPublicUrl("http://mapped.example/", async () => ["::ffff:7f00:1"]), /private/);
+});
+
+test("the egress proxy refuses IPv4-mapped IPv6 loopback, written either way, and dials nothing", async () => {
+  const board = await localServer("board");
+  const other = await localServer("the service itself");
+  const dialled: string[] = [];
+  const dns: Record<string, string[]> = { "mapped.example": ["::ffff:7f00:1"] };
+  const proxy = await d.startEgressProxy({
+    allow: `127.0.0.1:${board.port}`,
+    resolve: async (h) => dns[h] ?? [],
+    dial: (ip, port) => (dialled.push(ip), net.connect({ host: "127.0.0.1", port })),
+  });
+  try {
+    for (const url of [`http://[::ffff:127.0.0.1]:${other.port}/`, `http://[::ffff:7f00:1]:${other.port}/`, `http://[::ffff:7f00:1]:${board.port}/`, "http://mapped.example/"]) {
+      const r = await viaProxy(proxy.url, url);
+      assert.equal(r.status, 403, url);
+      assert.ok(!r.body.includes("the service itself"), url);
+    }
+    assert.equal(await connectVia(proxy.url, `[::ffff:7f00:1]:${other.port}`), 403);
+    assert.equal(await connectVia(proxy.url, `[::ffff:127.0.0.1]:${other.port}`), 403);
+    assert.equal(await connectVia(proxy.url, "mapped.example:443"), 403);
+    assert.deepEqual(dialled, [], "nothing was dialled");
+  } finally {
+    await proxy.stop();
+    await board.close();
+    await other.close();
+  }
+});
+
 test("the egress proxy refuses hostnames that resolve to private or Fly 6PN addresses", async () => {
   const dns: Record<string, string[]> = { "ten.example": ["10.0.0.7"], "sixpn.example": ["fdaa:0:1:a7b::2"], "mixed.example": ["93.184.216.34", "127.0.0.1"] };
   const dialled: string[] = [];
@@ -276,7 +317,7 @@ test("the browser's account is never root; with no designer user, root refuses t
   const root = { uid: 0, gid: 0 };
   const designer = { uid: 999, gid: 998 };
   assert.deepEqual(d.chooseIdentity(designer, root), designer);
-  assert.throws(() => d.chooseIdentity(undefined, root), /never runs as root/);
+  assert.throws(() => d.chooseIdentity(undefined, root), /designer user not found; refusing to run the browser as root/);
   assert.throws(() => d.chooseIdentity({ uid: 0, gid: 0 }, root), /must not be root/);
   assert.throws(() => d.chooseIdentity({ uid: 999, gid: 0 }, root), /must not be root/);
   assert.deepEqual(d.chooseIdentity(undefined, { uid: 1000, gid: 1000 }), { uid: 1000, gid: 1000 }, "an unprivileged service runs it as itself");
