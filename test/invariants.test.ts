@@ -195,6 +195,32 @@ test("the design worker's browser can never be pointed at local files or the pri
   assert.match(design, /env: \{ PATH: process\.env\.PATH \?\? "\/usr\/bin:\/bin", HOME: tmp, HOST: "127\.0\.0\.1"/, "branch previews run with a scrubbed environment on loopback");
 });
 
+test("the design worker's browser checks every request it makes, not only the address it was given", () => {
+  const design = src("design.ts");
+  const capture = design.slice(design.indexOf("export function chromiumArgs"), design.indexOf("/* ---------- What may be screenshotted"));
+  assert.match(capture, /`--proxy-server=\$\{r\.proxy\}`/, "Chromium reaches the network only through the egress proxy");
+  assert.match(capture, /"--proxy-bypass-list=<-loopback>"/, "loopback goes through the proxy too");
+  assert.match(capture, /if \(!r\.proxy\) throw/, "Chromium never runs without a proxy");
+  assert.match(design, /proxy = await startEgressProxy\(\{ allow: served \? new URL\(served\.base\)\.host : undefined/, "each capture gets a proxy allowing only its own local server");
+  assert.match(design, /await capture\(\{[^}]*proxy: proxy\.url \}\)/, "every capture is given that proxy");
+  assert.match(design, /if \(allow && `\$\{host\}:\$\{port\}` === allow\) return host;\n  return \(await publicAddresses\(host, resolve\)\)\[0\];/, "the proxy connects to the address it checked");
+});
+
+test("the design worker's browser and branch previews never run as root", async () => {
+  const { chooseIdentity } = await import("../src/design.js");
+  assert.throws(() => chooseIdentity(undefined, { uid: 0, gid: 0 }), "root with no designer user refuses");
+  assert.throws(() => chooseIdentity({ uid: 0, gid: 0 }, { uid: 0, gid: 0 }), "a designer that is root is refused");
+  const design = src("design.ts");
+  const chromium = design.slice(design.indexOf("export const chromiumCapture"), design.indexOf("/* ---------- What may be screenshotted"));
+  assert.match(chromium, /exec\(config\.design\.chromiumPath, [^)]*\), \{[^}]*uid: who\.uid,\s*gid: who\.gid,/, "Chromium runs as the designer");
+  const preview = design.slice(design.indexOf("export async function previewBranch"), design.indexOf("const TYPES"));
+  assert.match(preview, /spawn\(process\.execPath, \[PREVIEW_ENTRY\], \{[^}]*uid: who\.uid,\s*gid: who\.gid,/, "the branch preview runs as the designer");
+  assert.match(preview, /tar -xf[^\n]*uid: who\.uid, gid: who\.gid/, "the branch is unpacked as the designer");
+  assert.match(design, /const who = await designIdentity\(\);[\s\S]*const who = await designIdentity\(\);/, "both launches look up the designer first");
+  assert.match(design, /if \(current\.uid === 0\) lockDown\(\[config\.dataDir, config\.repoDir, config\.selfRepoDir\]\)/, "the data folder and git credentials are closed to the designer");
+  assert.match(src("../Dockerfile"), /useradd --system[^\n]* designer/, "the image has the unprivileged designer user");
+});
+
 test("the design loop is capped, builds only through engineers, and never merges or skips review", () => {
   const jobs = src("jobs.ts");
   assert.match(src("design.ts"), /export const MAX_DESIGN_ROUNDS = [1-5];/, "design rounds must stay capped at a small number");

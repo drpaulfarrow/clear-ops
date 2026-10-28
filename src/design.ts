@@ -33,37 +33,124 @@ export interface CaptureRequest {
   width: number;
   height: number;
   scale: number;
+  /** The egress proxy every request of this capture must go through, e.g. http://127.0.0.1:41234. */
+  proxy?: string;
 }
 /** Renders one URL to a PNG. The real one drives headless Chromium; tests inject a fake. */
 export type Capture = (r: CaptureRequest) => Promise<void>;
 
+/* ---------- Who the browser and previews run as ---------- */
+
+export interface Identity {
+  uid: number;
+  gid: number;
+}
+
 /**
- * Headless Chromium from its command line: no npm dependency, and the browser gets a scrubbed
- * environment so nothing secret is visible to the page or the renderer.
+ * The account the browser and branch previews run as. Never root: a root process could read the
+ * service's environment through /proc/<pid>/environ, the data folder and the git credentials. When
+ * the service runs as root (the container), that is the unprivileged `designer` user; with no such
+ * user it refuses rather than fall back to root. When the service is already unprivileged (local
+ * development, tests), it is the service's own account. Pure, so tests can drive every case.
+ */
+export function chooseIdentity(designer: Identity | undefined, current: Identity): Identity {
+  const who = current.uid === 0 ? designer : designer ?? current;
+  if (!who) throw new Error(`no unprivileged "${config.design.user}" user, so the browser will not run (it never runs as root)`);
+  if (who.uid === 0 || who.gid === 0) throw new Error(`"${config.design.user}" must not be root`);
+  return who;
+}
+
+/** Makes the service's own folders unreadable to any other account, the designer included. */
+export function lockDown(dirs: string[]): void {
+  for (const d of dirs) if (fs.existsSync(d)) fs.chmodSync(d, 0o700);
+}
+
+let identity: Promise<Identity> | undefined;
+
+/** Looked up once. Before anything runs as the designer, the data and repository folders are locked down. */
+export function designIdentity(): Promise<Identity> {
+  identity ??= (async () => {
+    const id = async (flag: string) => Number((await exec("id", [flag, config.design.user], { timeout: 5000 })).stdout.trim());
+    const designer = await Promise.all([id("-u"), id("-g")]).then(([uid, gid]) => ({ uid, gid })).catch(() => undefined);
+    const current = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+    const who = chooseIdentity(designer && Number.isInteger(designer.uid) && Number.isInteger(designer.gid) ? designer : undefined, current);
+    if (current.uid === 0) lockDown([config.dataDir, config.repoDir, config.selfRepoDir]);
+    return who;
+  })().catch((err) => {
+    identity = undefined;
+    throw err;
+  });
+  return identity;
+}
+
+/** A fresh temporary folder owned by the designer, so the browser or preview can write only there. */
+function designerTemp(prefix: string, who: Identity): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  if (process.getuid?.() === 0) fs.chownSync(dir, who.uid, who.gid);
+  return dir;
+}
+
+/* ---------- Headless Chromium ---------- */
+
+/** Chromium's own sandbox, until it has been seen not to start on this machine. */
+let sandboxWorks = true;
+const SANDBOX_FAILURE = /sandbox|namespace|zygote/i;
+
+/** Chromium's flags for one capture. Every request goes through the egress proxy, loopback included. */
+export function chromiumArgs(r: CaptureRequest, profile: string, shot: string, sandbox: boolean): string[] {
+  return [
+    "--headless=new",
+    ...(sandbox ? [] : ["--no-sandbox"]),
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--hide-scrollbars",
+    "--no-first-run",
+    "--mute-audio",
+    "--disable-background-networking",
+    `--proxy-server=${r.proxy}`,
+    // Without this Chromium sends loopback requests straight past the proxy.
+    "--proxy-bypass-list=<-loopback>",
+    // WebRTC must not open UDP around the proxy.
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    `--user-data-dir=${path.join(profile, "data")}`,
+    `--window-size=${r.width},${r.height}`,
+    `--force-device-scale-factor=${r.scale}`,
+    "--virtual-time-budget=8000",
+    `--screenshot=${shot}`,
+    r.url,
+  ];
+}
+
+/**
+ * Headless Chromium from its command line: no npm dependency. It runs as the unprivileged designer
+ * with a scrubbed environment, writes only into its own temporary folder (the screenshot is copied
+ * into the job's folder afterwards), and reaches the network only through the egress proxy. Its
+ * sandbox is tried first; it is switched off only if it cannot start here, and that is logged.
  */
 export const chromiumCapture: Capture = async (r) => {
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "clear-design-chrome-"));
+  if (!r.proxy) throw new Error("the browser only runs behind the egress proxy");
+  const who = await designIdentity();
+  const profile = designerTemp("clear-design-chrome-", who);
+  const shot = path.join(profile, "shot.png");
+  const run = (sandbox: boolean) =>
+    exec(config.design.chromiumPath, chromiumArgs(r, profile, shot, sandbox), {
+      timeout: 90_000,
+      uid: who.uid,
+      gid: who.gid,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: profile },
+    });
   try {
-    await exec(
-      config.design.chromiumPath,
-      [
-        "--headless=new",
-        "--no-sandbox", // runs as root in the container; the page is only ever rendered, never trusted
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--hide-scrollbars",
-        "--no-first-run",
-        "--mute-audio",
-        `--user-data-dir=${profile}`,
-        `--window-size=${r.width},${r.height}`,
-        `--force-device-scale-factor=${r.scale}`,
-        "--virtual-time-budget=8000",
-        `--screenshot=${r.out}`,
-        r.url,
-      ],
-      { timeout: 90_000, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: profile } },
-    );
-    if (!fs.existsSync(r.out)) throw new Error("the browser produced no screenshot");
+    try {
+      await run(sandboxWorks);
+    } catch (err) {
+      const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+      if (!sandboxWorks || !SANDBOX_FAILURE.test(stderr)) throw err;
+      sandboxWorks = false;
+      console.warn(`[design] Chromium's sandbox would not start, so screenshots run without it from now on (still as ${config.design.user}, behind the proxy): ${stderr.split("\n").find((l) => SANDBOX_FAILURE.test(l))?.trim() ?? ""}`);
+      await run(false);
+    }
+    if (!fs.existsSync(shot)) throw new Error("the browser produced no screenshot");
+    fs.copyFileSync(shot, r.out);
   } finally {
     fs.rmSync(profile, { recursive: true, force: true });
   }
@@ -98,12 +185,122 @@ export async function checkPublicUrl(raw: string, resolve: Lookup = dnsLookup): 
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("only http and https pages can be screenshotted");
   if (url.username || url.password) throw new Error("URLs with credentials are not allowed");
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  await publicAddresses(url.hostname, resolve);
+  return url.toString();
+}
+
+/** The addresses of a public host, refusing local names and any host with a private address. */
+async function publicAddresses(hostname: string, resolve: Lookup): Promise<string[]> {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local")) throw new Error(`${host} is not a public host`);
   const addrs = net.isIP(host) ? [host] : await resolve(host).catch(() => [] as string[]);
   if (!addrs.length) throw new Error(`cannot resolve ${host}`);
   if (addrs.some(isPrivateAddress)) throw new Error(`${host} resolves to a private address`);
-  return url.toString();
+  return addrs;
+}
+
+/* ---------- The egress proxy: the browser's only way out ---------- */
+
+export type Dial = (ip: string, port: number) => net.Socket;
+const netDial: Dial = (ip, port) => net.connect({ host: ip, port });
+
+export interface EgressProxy {
+  /** For Chromium's --proxy-server. */
+  url: string;
+  /** Every destination refused, for tests and logs. */
+  refused: string[];
+  stop: () => Promise<void>;
+}
+
+/**
+ * Where one browser request may go, as the IP to connect to. Exactly one loopback host:port (the
+ * capture's own board or branch server) is allowed; anything else must be a public host, and the
+ * proxy connects to the very address it checked here, so a redirect to a private address, a page
+ * loading one, or DNS that changes between the check and the connection all fail the same way.
+ */
+export async function checkDestination(hostname: string, port: number, allow: string | undefined, resolve: Lookup = dnsLookup): Promise<string> {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`bad port ${port}`);
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (allow && `${host}:${port}` === allow) return host;
+  return (await publicAddresses(host, resolve))[0];
+}
+
+/**
+ * A forward proxy on loopback for one capture. It handles CONNECT (https and WebSockets) and
+ * absolute-URI http requests, checks each destination with checkDestination, and refuses the rest
+ * with 403. Chromium is launched with --proxy-server pointing here and --proxy-bypass-list=<-loopback>.
+ */
+export async function startEgressProxy(o: { allow?: string; resolve?: Lookup; dial?: Dial } = {}): Promise<EgressProxy> {
+  const resolve = o.resolve ?? dnsLookup;
+  const dial = o.dial ?? netDial;
+  const refused: string[] = [];
+  const sockets = new Set<net.Socket>();
+
+  const server = http.createServer(async (req, res) => {
+    let url: URL;
+    let ip: string;
+    try {
+      url = new URL(req.url ?? "");
+      if (url.protocol !== "http:") throw new Error("only absolute http URLs are proxied");
+      ip = await checkDestination(url.hostname, Number(url.port || 80), o.allow, resolve);
+    } catch (err) {
+      refused.push(req.url ?? "");
+      res.writeHead(403, { "content-type": "text/plain" }).end(`Refused: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    const headers = { ...req.headers };
+    for (const h of Object.keys(headers)) if (h.startsWith("proxy-")) delete headers[h];
+    const port = Number(url.port || 80);
+    const up = http.request({ method: req.method, path: url.pathname + url.search, headers, createConnection: () => dial(ip, port) }, (upRes) => {
+      res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+      upRes.pipe(res);
+    });
+    up.on("error", () => (res.headersSent ? res.destroy() : res.writeHead(502).end()));
+    req.pipe(up);
+  });
+
+  server.on("connect", async (req: http.IncomingMessage, client: net.Socket, head: Buffer) => {
+    sockets.add(client);
+    client.on("close", () => sockets.delete(client));
+    client.on("error", () => client.destroy());
+    const m = (req.url ?? "").match(/^\[?([^\]\s]+?)\]?:(\d{1,5})$/);
+    let ip: string;
+    try {
+      if (!m) throw new Error("bad CONNECT target");
+      ip = await checkDestination(m[1], Number(m[2]), o.allow, resolve);
+    } catch {
+      refused.push(req.url ?? "");
+      client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+      return;
+    }
+    const up = dial(ip, Number(m[2]));
+    sockets.add(up);
+    up.on("close", () => sockets.delete(up));
+    up.once("connect", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length) up.write(head);
+      up.pipe(client);
+      client.pipe(up);
+    });
+    up.on("error", () => {
+      client.destroy();
+      up.destroy();
+    });
+    client.on("close", () => up.destroy());
+  });
+
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as net.AddressInfo).port;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    refused,
+    stop: () =>
+      new Promise<void>((r) => {
+        for (const s of sockets) s.destroy();
+        server.closeAllConnections();
+        server.close(() => r());
+      }),
+  };
 }
 
 /** A branch name safe to hand to git: no options, no ranges, no odd characters. */
@@ -162,25 +359,35 @@ export const PREVIEW_ENTRY = "src/server.ts";
 
 /**
  * Runs one branch of the product locally so it can be screenshotted before it merges. The branch is
- * exported with git archive into a temporary folder (the engineer's checkout is never touched) and
- * started with a scrubbed environment: no API keys, no tokens, in development mode.
+ * exported with git archive into a temporary folder (the engineer's checkout is never touched),
+ * unpacked and started as the unprivileged designer with a scrubbed environment: no API keys, no
+ * tokens, in development mode, unable to read the service's environment, data or git credentials.
  */
 export async function previewBranch(branch: string): Promise<Served> {
   checkBranch(branch);
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clear-design-preview-"));
+  const who = await designIdentity();
+  const tmp = designerTemp("clear-design-preview-", who);
   const tar = path.join(tmp, "src.tar");
   const app = path.join(tmp, "app");
-  fs.mkdirSync(app);
   const remote = `refs/remotes/origin/${branch}`;
-  await exec("git", ["-C", config.repoDir, "fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`], { timeout: 120_000 });
-  await exec("git", ["-C", config.repoDir, "archive", "--format=tar", "-o", tar, remote], { timeout: 60_000 });
-  await exec("tar", ["-xf", tar, "-C", app], { timeout: 60_000 });
+  try {
+    await exec("git", ["-C", config.repoDir, "fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`], { timeout: 120_000 });
+    await exec("git", ["-C", config.repoDir, "archive", "--format=tar", "-o", tar, remote], { timeout: 60_000 });
+    fs.chmodSync(tar, 0o644);
+    await exec("sh", ["-c", 'mkdir "$1" && tar -xf "$2" -C "$1"', "unpack", app, tar], { timeout: 60_000, uid: who.uid, gid: who.gid });
+  } catch (err) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    throw err;
+  }
   const port = await freePort();
   const child = spawn(process.execPath, [PREVIEW_ENTRY], {
     cwd: app,
+    uid: who.uid,
+    gid: who.gid,
     env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmp, HOST: "127.0.0.1", PORT: String(port), VAR_DIR: path.join(tmp, "var") },
     stdio: "ignore",
   });
+  child.on("error", (err) => console.warn(`[design] preview of ${branch} could not start: ${err.message}`));
   const stop = async () => {
     if (child.exitCode === null) child.kill("SIGTERM");
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -220,6 +427,8 @@ export interface DesignDeps {
   capture?: Capture;
   resolve?: Lookup;
   preview?: (branch: string) => Promise<Served>;
+  /** How the egress proxy opens a connection to a checked address. Tests point it at a local server. */
+  dial?: Dial;
 }
 
 const slug = (s: string) => s.toLowerCase().replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "page";
@@ -262,17 +471,22 @@ export async function takeScreenshots(
     url = `${served.base}/${encodeURIComponent(input.asset!)}`;
     label = `asset-${input.asset}`;
   }
+  let proxy: EgressProxy | undefined;
   try {
+    // The browser's only way out: the one local server for this capture, or public hosts.
+    proxy = await startEgressProxy({ allow: served ? new URL(served.base).host : undefined, resolve: deps.resolve, dial: deps.dial });
     const base = nextFree(dir, slug(input.name ?? label));
     const out: string[] = [];
     for (const v of input.viewports?.length ? input.viewports : (["desktop", "mobile"] as Viewport[])) {
       const vp = VIEWPORTS[v];
       const file = `${base}-${v}.png`;
-      await capture({ url, out: file, width: vp.width, height: input.tall ? vp.height * 3 : vp.height, scale: vp.scale });
+      await capture({ url, out: file, width: vp.width, height: input.tall ? vp.height * 3 : vp.height, scale: vp.scale, proxy: proxy.url });
       out.push(file);
     }
+    if (proxy.refused.length) console.warn(`[design] job ${jobId}: the egress proxy refused ${[...new Set(proxy.refused)].slice(0, 5).join(", ")}`);
     return out;
   } finally {
+    await proxy?.stop().catch(() => undefined);
     await served?.stop().catch(() => undefined);
   }
 }

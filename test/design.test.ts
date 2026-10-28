@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,12 +14,58 @@ import type { CaptureRequest } from "../src/design.js";
 
 const publicDns = async () => ["93.184.216.34"];
 
-/** A capture that records what it was asked and fetches the page, so local servers are exercised for real. */
-function fakeCapture() {
-  const calls: Array<CaptureRequest & { body?: string }> = [];
+/** One plain http request through a forward proxy, as a browser behind --proxy-server sends it. */
+function viaProxy(proxy: string, url: string): Promise<{ status: number; body: string }> {
+  const p = new URL(proxy);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: p.hostname, port: Number(p.port), path: url, headers: { host: new URL(url).host } }, (res) => {
+      let body = "";
+      res.on("data", (c) => (body += c));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/** A CONNECT through the proxy, as for https: resolves with the status code it answers. */
+function connectVia(proxy: string, target: string): Promise<number> {
+  const p = new URL(proxy);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: p.hostname, port: Number(p.port), method: "CONNECT", path: target });
+    req.on("connect", (res, socket) => {
+      socket.destroy();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("response", (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/** A local HTTP server answering every request with `body`. */
+async function localServer(body: string) {
+  const server = http.createServer((_req, res) => res.end(body));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as net.AddressInfo).port;
+  return { port, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+/**
+ * A capture that records what it was asked and fetches the page through the capture's egress proxy,
+ * as Chromium does, so local servers and the proxy are exercised for real. `extra` URLs are fetched
+ * too, standing in for what a page loads (an iframe, an image, a redirect target).
+ */
+function fakeCapture(extra: string[] = []) {
+  const calls: Array<CaptureRequest & { body?: string; extra?: number[] }> = [];
   const capture = async (r: CaptureRequest) => {
-    const body = r.url.startsWith("http://127.0.0.1") ? await (await fetch(r.url)).text() : undefined;
-    calls.push({ ...r, body });
+    assert.ok(r.proxy, "every capture goes through the egress proxy");
+    const body = r.url.startsWith("http://127.0.0.1") ? (await viaProxy(r.proxy!, r.url)).body : undefined;
+    const statuses = await Promise.all(extra.map(async (u) => (await viaProxy(r.proxy!, u)).status));
+    calls.push({ ...r, body, extra: statuses });
     fs.writeFileSync(r.out, "png");
   };
   return { calls, capture };
@@ -139,4 +187,101 @@ test("the design verdict and image lines are parsed; images outside the job's fo
     { file: path.join(dir, "a-desktop.png"), caption: "Direction A" },
     { file: path.join(dir, "a-desktop.png"), caption: "" },
   ]);
+});
+
+/* ---------- The egress proxy: every browser request is checked, not only the first ---------- */
+
+test("the egress proxy allows the capture's one local port and refuses every other loopback port", async () => {
+  const board = await localServer("board");
+  const other = await localServer("the service itself");
+  const proxy = await d.startEgressProxy({ allow: `127.0.0.1:${board.port}`, resolve: publicDns });
+  try {
+    assert.deepEqual(await viaProxy(proxy.url, `http://127.0.0.1:${board.port}/x.html`), { status: 200, body: "board" });
+    const refused = await viaProxy(proxy.url, `http://127.0.0.1:${other.port}/`);
+    assert.equal(refused.status, 403);
+    assert.ok(!refused.body.includes("the service itself"));
+    assert.equal(await connectVia(proxy.url, `127.0.0.1:${other.port}`), 403);
+    assert.equal(await connectVia(proxy.url, `127.0.0.1:${board.port}`), 200);
+    assert.equal((await viaProxy(proxy.url, "http://localhost:8080/")).status, 403);
+    assert.equal((await viaProxy(proxy.url, "http://[::1]:8080/")).status, 403);
+    assert.equal((await viaProxy(proxy.url, "http://169.254.169.254/latest/meta-data")).status, 403);
+  } finally {
+    await proxy.stop();
+    await board.close();
+    await other.close();
+  }
+});
+
+test("the egress proxy refuses hostnames that resolve to private or Fly 6PN addresses", async () => {
+  const dns: Record<string, string[]> = { "ten.example": ["10.0.0.7"], "sixpn.example": ["fdaa:0:1:a7b::2"], "mixed.example": ["93.184.216.34", "127.0.0.1"] };
+  const dialled: string[] = [];
+  const proxy = await d.startEgressProxy({ resolve: async (h) => dns[h] ?? [], dial: (ip, port) => (dialled.push(ip), net.connect({ host: "127.0.0.1", port })) });
+  try {
+    for (const host of Object.keys(dns)) {
+      assert.equal((await viaProxy(proxy.url, `http://${host}/`)).status, 403, `${host} over http`);
+      assert.equal(await connectVia(proxy.url, `${host}:443`), 403, `${host} over CONNECT`);
+    }
+    assert.equal((await viaProxy(proxy.url, "http://unresolvable.example/")).status, 403);
+    assert.deepEqual(dialled, [], "nothing private was ever connected to");
+  } finally {
+    await proxy.stop();
+  }
+});
+
+test("the egress proxy allows public hosts and connects to the address it checked, so DNS rebinding fails", async () => {
+  const site = await localServer("public page");
+  let lookups = 0;
+  // First answer public, every later answer private: a rebinding resolver.
+  const rebinding = async () => (lookups++ === 0 ? ["93.184.216.34"] : ["127.0.0.1"]);
+  const dialled: string[] = [];
+  const proxy = await d.startEgressProxy({ resolve: rebinding, dial: (ip) => (dialled.push(ip), net.connect({ host: "127.0.0.1", port: site.port })) });
+  try {
+    assert.deepEqual(await viaProxy(proxy.url, "http://rebind.example/"), { status: 200, body: "public page" });
+    assert.equal(lookups, 1, "the host is resolved once, by the proxy");
+    assert.deepEqual(dialled, ["93.184.216.34"], "the connection goes to the checked address, not a fresh lookup");
+    assert.equal((await viaProxy(proxy.url, "http://rebind.example/")).status, 403, "the rebound answer is refused");
+    assert.equal(await connectVia(proxy.url, "93.184.216.34:443"), 200, "a public address over CONNECT is allowed");
+  } finally {
+    await proxy.stop();
+    await site.close();
+  }
+});
+
+test("a board that frames another local port, or a page that redirects to one, gets nothing", async () => {
+  const service = await localServer("secret status page");
+  try {
+    const { calls, capture } = fakeCapture([`http://127.0.0.1:${service.port}/`, "http://[fdaa::3]:8080/", "http://redirected.example/"]);
+    d.saveAsset("job007", "board.html", `<iframe src="http://127.0.0.1:${service.port}/"></iframe>`);
+    const resolve = async (h: string) => (h === "redirected.example" ? ["192.168.0.1"] : ["93.184.216.34"]);
+    await d.takeScreenshots("job007", { asset: "board.html", viewports: ["desktop"] }, { capture, resolve });
+    assert.match(calls[0].body!, /iframe/, "the board itself is served");
+    assert.deepEqual(calls[0].extra, [403, 403, 403], "everything the page loads from the private network is refused");
+    assert.match(calls[0].proxy!, /^http:\/\/127\.0\.0\.1:\d+$/);
+  } finally {
+    await service.close();
+  }
+});
+
+test("Chromium is always launched behind the proxy, loopback included, and tries its sandbox first", () => {
+  const r = { url: "https://a.example/", out: "/x.png", width: 1440, height: 900, scale: 1, proxy: "http://127.0.0.1:4000" };
+  const withSandbox = d.chromiumArgs(r, "/tmp/p", "/tmp/p/shot.png", true);
+  assert.ok(withSandbox.includes("--proxy-server=http://127.0.0.1:4000"));
+  assert.ok(withSandbox.includes("--proxy-bypass-list=<-loopback>"));
+  assert.ok(withSandbox.includes("--screenshot=/tmp/p/shot.png"), "the screenshot is written in the browser's own folder");
+  assert.ok(!withSandbox.includes("--no-sandbox"));
+  assert.ok(d.chromiumArgs(r, "/tmp/p", "/tmp/p/shot.png", false).includes("--no-sandbox"));
+});
+
+test("the browser's account is never root; with no designer user, root refuses to launch", () => {
+  const root = { uid: 0, gid: 0 };
+  const designer = { uid: 999, gid: 998 };
+  assert.deepEqual(d.chooseIdentity(designer, root), designer);
+  assert.throws(() => d.chooseIdentity(undefined, root), /never runs as root/);
+  assert.throws(() => d.chooseIdentity({ uid: 0, gid: 0 }, root), /must not be root/);
+  assert.throws(() => d.chooseIdentity({ uid: 999, gid: 0 }, root), /must not be root/);
+  assert.deepEqual(d.chooseIdentity(undefined, { uid: 1000, gid: 1000 }), { uid: 1000, gid: 1000 }, "an unprivileged service runs it as itself");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-lock-"));
+  fs.chmodSync(dir, 0o755);
+  d.lockDown([dir, path.join(dir, "missing")]);
+  assert.equal(fs.statSync(dir).mode & 0o777, 0o700, "the data folder is closed to other accounts");
 });

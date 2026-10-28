@@ -7,7 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git python3 ca-
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
   && apt-get update && apt-get install -y --no-install-recommends gh \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --system --create-home --shell /usr/sbin/nologin designer
+
+# The service runs as root; the design worker's browser and branch previews run as the unprivileged
+# designer user (src/design.ts), which cannot read the service's environment, /data or git credentials.
 
 WORKDIR /app
 COPY package.json package-lock.json ./
