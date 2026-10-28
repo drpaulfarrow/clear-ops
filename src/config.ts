@@ -99,6 +99,8 @@ export const config = {
   eaBookingLink: (process.env.EA_BOOKING_LINK ?? "").trim(),
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
+  /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */
+  deepResearchBudgetUsd: Number(process.env.DEEP_RESEARCH_BUDGET_USD ?? 20),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */
   maxMessageChars: 3900,
 };

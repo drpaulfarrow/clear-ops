@@ -59,6 +59,8 @@ export interface Job {
   awaitDeploy?: boolean;
   /** Executive-assistant jobs: what it may change (drafts, holds). Absent means read only. */
   permits?: EaPermit[];
+  /** Research jobs: "deep" gets more turns and budget and writes a long, structured report. */
+  depth?: "standard" | "deep";
   createdAt: string;
   finishedAt?: string;
   summary?: string;
