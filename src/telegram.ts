@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { config } from "./config.js";
 import { chunk, type Messenger } from "./whatsapp.js";
 
@@ -62,6 +64,16 @@ export class TelegramMessenger implements Messenger {
 
   async remove(to: string, handle: string): Promise<void> {
     await call("deleteMessage", { chat_id: chatId(to), message_id: Number(handle) });
+  }
+
+  /** A photo with a caption (Telegram caps captions at 1024 characters). */
+  async sendImage(to: string, file: string, caption: string): Promise<void> {
+    const form = new FormData();
+    form.append("chat_id", chatId(to));
+    form.append("caption", plainText(caption).slice(0, 1000));
+    form.append("photo", new Blob([fs.readFileSync(file)], { type: file.endsWith(".png") ? "image/png" : "image/jpeg" }), path.basename(file));
+    const res = await fetch(api("sendPhoto"), { method: "POST", body: form });
+    if (!res.ok) throw new Error(`Telegram sendPhoto failed: ${res.status} ${await res.text().catch(() => "")}`);
   }
 
   /** Telegram shows "typing…" for about five seconds per call. */

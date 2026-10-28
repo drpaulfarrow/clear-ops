@@ -49,6 +49,12 @@ export class DiscordMessenger implements Messenger {
     return true;
   }
 
+  /** An image attachment with the caption as the message text. */
+  async sendImage(to: string, file: string, caption: string): Promise<void> {
+    const target = (await this.resolve(to)) as unknown as { send: (m: { content?: string; files: string[] }) => Promise<unknown> };
+    await target.send({ content: caption.slice(0, DISCORD_MAX) || undefined, files: [file] });
+  }
+
   async send(to: string, text: string): Promise<void> {
     const target = await this.resolve(to);
     for (const part of chunk(text, DISCORD_MAX)) await target.send(part);

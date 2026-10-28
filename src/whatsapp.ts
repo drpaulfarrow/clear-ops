@@ -19,6 +19,8 @@ export interface Messenger {
   sendEditable?(to: string, text: string): Promise<string | undefined>;
   edit?(to: string, handle: string, text: string): Promise<void>;
   remove?(to: string, handle: string): Promise<void>;
+  /** Channels that carry images (Telegram, Discord) send a PNG or JPEG file with a caption. */
+  sendImage?(to: string, file: string, caption: string): Promise<void>;
   /** Show a typing indicator for a few seconds. Resolves true if the channel supports it. */
   typing?(to: string): Promise<boolean>;
 }
@@ -98,7 +100,12 @@ export class CloudApiMessenger implements Messenger {
 /** Records instead of sending. The simulator prints; tests stay quiet so the test runner's output stream is untouched. */
 export class ConsoleMessenger implements Messenger {
   readonly sent: Array<{ to: string; text: string }> = [];
+  readonly images: Array<{ to: string; file: string; caption: string }> = [];
   constructor(private readonly print = false) {}
+  async sendImage(to: string, file: string, caption: string): Promise<void> {
+    this.images.push({ to, file, caption });
+    if (this.print) console.log(`\n> ${to}\n[image ${file}] ${caption}\n`);
+  }
   async send(to: string, text: string): Promise<void> {
     this.sent.push({ to, text });
     if (this.print) console.log(`\n> ${to}\n${text}\n`);
