@@ -58,6 +58,13 @@ export class JobRunner {
   startDesignLoop(goal: string, requestedBy: string, replyTo?: string, continueFrom?: string): Job {
     const prev = continueFrom ? this.store.getJob(continueFrom) : undefined;
     if (continueFrom && !prev?.designLoop) throw new Error(`Job ${continueFrom} is not part of a design loop`);
+    if (prev?.designLoop) {
+      // Only a loop that stopped to wait for Paul carries on; a running one would get a second build.
+      if (!this.store.getJob(prev.designLoop)?.designPaused) {
+        throw new Error(`Design loop ${prev.designLoop} is not paused (it is still running or has finished), so there is nothing to carry on. Start a new loop for more rounds.`);
+      }
+      this.store.updateJob(prev.designLoop, { designPaused: false });
+    }
     if (!prev?.designLoop) {
       const job = this.store.createJob("design", designBrief(goal, 1), requestedBy, "product", replyTo, { designRound: 1, designGoal: goal });
       this.store.updateJob(job.id, { designLoop: job.id });
@@ -273,6 +280,8 @@ export class JobRunner {
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error });
+      // A failed round leaves its loop waiting for Paul rather than stalled for good.
+      this.pauseLoop(job.designLoop);
       await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${id} (${job.kind}) failed: ${error}`);
     } finally {
       this.running.delete(id);
@@ -297,6 +306,7 @@ export class JobRunner {
     const verdict = pr ? verdicts.find((v) => samePr(v.pr, pr)) : verdicts.length === 1 ? verdicts[0] : undefined;
     if (!verdict) {
       // A design loop must not stall silently.
+      this.pauseLoop(reviewed.designLoop);
       return reviewed.designLoop
         ? { chained: "", escalation: `Design loop ${reviewed.designLoop} is paused: the maintainer gave no verdict on ${pr ?? "the round's pull request"}. Tell me to re-review it, or to carry on the loop.` }
         : { chained: "" };
@@ -305,6 +315,7 @@ export class JobRunner {
     const url = verdict.pr;
     const target = lockKey(reviewed) ?? reviewed.target ?? "product";
     if (verdict.outcome === "needs_founder") {
+      this.pauseLoop(reviewed.designLoop);
       return {
         chained: "",
         escalation: `Action needed from you on ${url}: ${verdict.detail || "the maintainer says only you can unblock it; see its report above."}\nOnce that is done, tell me and I will have it re-reviewed.`,
@@ -312,6 +323,7 @@ export class JobRunner {
     }
     const round = (reviewed.kind === "engineer" ? reviewed.fixRound ?? 0 : 0) + 1;
     if (round > MAX_FIX_ROUNDS) {
+      this.pauseLoop(reviewed.designLoop);
       return {
         chained: "",
         escalation: `${url} is still not mergeable after ${MAX_FIX_ROUNDS} automatic fix rounds, so I have stopped. The maintainer's blocking issues are in its report above. What you can do: reply "one more fix round on ${url}" to try again, give a steer on the point it is stuck on, or close the pull request.`,
@@ -339,6 +351,7 @@ export class JobRunner {
     const round = job.designRound ?? 1;
     const verdict = parseDesignVerdict(text);
     if (verdict?.outcome === "needs_founder") {
+      this.pauseLoop(loop);
       return {
         chained: "",
         escalation: `Design decision for you (loop ${loop}, round ${round}): ${verdict.detail || "see the report above."}\nReply with your choice and I will carry on from there.`,
@@ -351,6 +364,7 @@ export class JobRunner {
       return { chained: `\nDesign loop ${loop} finished after ${built} implemented round${built === 1 ? "" : "s"}: ${why}. The report above is where the site stands now.` };
     }
     if (verdict?.outcome !== "spec") {
+      this.pauseLoop(loop);
       return { chained: "", escalation: `Design loop ${loop} is paused: round ${round} ended without a spec or a verdict. Tell me to carry on, or give a steer.` };
     }
     const eng = this.start(
@@ -363,6 +377,11 @@ export class JobRunner {
     );
     const queued = eng.waitingFor ? `, queued behind job ${eng.waitingFor}` : "";
     return { chained: `\nSpec ready. Engineer job ${eng.id} started to build it (design round ${round} of ${MAX_DESIGN_ROUNDS}${queued}); after the merge and deploy, the designer reviews the live site again.` };
+  }
+
+  /** Marks a design loop as waiting for Paul, so start_job with continueLoop may carry it on. */
+  private pauseLoop(loop: string | undefined): void {
+    if (loop && this.store.getJob(loop)) this.store.updateJob(loop, { designPaused: true });
   }
 
   /** A design-loop pull request merged: the next round looks at the deployed site once it is live. */

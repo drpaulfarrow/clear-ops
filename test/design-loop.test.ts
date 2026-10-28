@@ -122,8 +122,12 @@ test("a decision only Paul can make pauses the loop, shows him only the job's ow
   ]);
   assert.equal(store.allJobs().filter((j) => j.kind === "engineer").length, 0, "nothing is built until Paul decides");
 
+  assert.equal(store.getJob(first.id)!.designPaused, true, "the loop is marked as waiting for Paul");
   const cont = jobs.startDesignLoop("B, but warmer", FOUNDER, undefined, first.id);
   assert.equal(cont.designLoop, first.id);
+  // A loop that is running again cannot be carried on a second time: that would start a second build.
+  assert.equal(store.getJob(first.id)!.designPaused, false);
+  assert.throws(() => jobs.startDesignLoop("C instead", FOUNDER, undefined, first.id), /not paused/);
   assert.equal(cont.designRound, 1, "the same round carries on");
   assert.equal(cont.replyTo, "dc:c:t1", "it reports where the loop always has");
   assert.match(cont.brief, new RegExp(`Paul has answered the open question from job ${first.id}: B, but warmer`));
@@ -132,6 +136,7 @@ test("a decision only Paul can make pauses the loop, shows him only the job's ow
   assert.throws(() => jobs.startDesignLoop("x", FOUNDER, undefined, "nope00"), /not part of a design loop/);
   // Naming the loop (its first job) instead of the asking job still carries on from the latest round.
   store.updateJob(cont.id, { designRound: 2 });
+  store.updateJob(first.id, { designPaused: true });
   const again = jobs.startDesignLoop("A after all", FOUNDER, undefined, first.id);
   assert.equal(again.designRound, 2);
   assert.match(again.brief, new RegExp(`from job ${cont.id}: A after all`));
@@ -163,6 +168,18 @@ test("a founder-only blocker or a missing verdict pauses the loop and tells Paul
   const fc = c.jobs.startDesignLoop("Site", FOUNDER);
   await waitFor(() => c.settled() && c.messenger.sent.some((m) => m.text.startsWith(`Design loop ${fc.id} is paused: round 1 ended without a spec`)));
   assert.equal(c.store.allJobs().filter((j) => j.kind === "engineer").length, 0);
+  for (const [x, first] of [[b, fb], [c, fc]] as const) assert.equal(x.store.getJob(first.id)!.designPaused, true, "a paused loop can be carried on");
+  const fa = a.store.allJobs().find((j) => j.kind === "design")!;
+  assert.equal(a.store.getJob(fa.id)!.designPaused, true);
+});
+
+test("a loop that is running or finished cannot be carried on, so no round is built twice", async () => {
+  const { store, messenger, jobs, settled } = loop(["DESIGN: no high-impact issues"]);
+  const first = jobs.startDesignLoop("Site", FOUNDER);
+  assert.throws(() => jobs.startDesignLoop("go on", FOUNDER, undefined, first.id), /not paused/, "a running loop");
+  await waitFor(() => settled() && messenger.sent.some((m) => m.text.includes("finished after")));
+  assert.throws(() => jobs.startDesignLoop("go on", FOUNDER, undefined, first.id), /not paused/, "a finished loop");
+  assert.equal(store.allJobs().length, 1);
 });
 
 test("a loop's engineer job waits its turn behind the product's running engineering job", async () => {

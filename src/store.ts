@@ -41,6 +41,8 @@ export interface Job {
   designGoal?: string;
   /** The loop's closing critique: report to the founder, start no more engineering. */
   designFinal?: boolean;
+  /** On the loop's first job: the loop is waiting for Paul, so start_job with continueLoop may carry it on. */
+  designPaused?: boolean;
   /** A design round that must wait for the product's deploy of the merge before it looks. */
   awaitDeploy?: boolean;
   createdAt: string;
