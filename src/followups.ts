@@ -297,14 +297,16 @@ export const FOLLOWUP_COMMANDS = `Reply "done <id>", "snooze <id> 2d" (or monday
 
 /** The chat message for items that have just gone stale. */
 export function nudgeText(items: FollowUp[]): string {
-  const shown = items.slice(0, 8);
-  const lines = shown.map((f) => {
+  // Plain sentences, like a colleague would say it: the first few items, then a pointer to the rest.
+  const shown = items.slice(0, 4);
+  const parts = shown.map((f) => {
     const what =
-      f.kind === "owed" ? `${f.who} is waiting on you` : f.kind === "promised" ? `you promised ${f.who}: ${f.excerpt}` : `no reply from ${f.who} yet`;
-    return `${f.id} ${what} ("${f.subject}", since ${fmtDay(new Date(f.since))})`;
+      f.kind === "owed" ? `${f.who} is waiting on you` : f.kind === "promised" ? `you promised ${f.who} "${clip(f.excerpt.replace(/\s+/g, " ").trim(), 80)}"` : `no reply from ${f.who} yet`;
+    return `${f.id} ${what} ("${clip(f.subject.replace(/\s+/g, " ").trim(), 60)}", since ${fmtDay(new Date(f.since))})`;
   });
-  const more = items.length > shown.length ? `\n…and ${items.length - shown.length} more: /followups` : "";
-  return `Follow-ups gone stale:\n${lines.join("\n")}${more}\n${FOLLOWUP_COMMANDS}`;
+  const more = items.length > shown.length ? ` There ${items.length - shown.length === 1 ? "is 1 more" : `are ${items.length - shown.length} more`} in /followups.` : "";
+  const head = items.length === 1 ? "One follow-up has gone stale" : `${items.length} follow-ups have gone stale`;
+  return `${head}: ${parts.join("; ")}.${more} ${FOLLOWUP_COMMANDS}`;
 }
 
 /** Where follow-up nudges and hold releases go: the chat Google was connected from, else the morning brief's. */

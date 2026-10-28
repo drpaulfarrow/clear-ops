@@ -730,19 +730,23 @@ export const EA_SCHEDULES = [
     title: "Morning brief",
     cron: "30 7 * * 1-5",
     brief:
-      "EA morning brief for Paul (read only). 1) Today's agenda across all his calendars in London time: each meeting with who and why it matters, clashes, gaps, and invitations he has not answered. 2) Inbox triage since yesterday evening: what needs him today, by urgency, with a suggested action each; the rest in one line. 3) Follow-ups: run scan_followups, then list what is stale or due today first, each with its id: who is waiting on him, what he promised and by when, and who he is waiting on (offer a drafted nudge for those; do not draft). Close anything that clearly needs nothing with resolve_followup. 4) Which of today's meetings need prep, one line each, and offer to prepare them. End with: reply done <id>, snooze <id> 2d, or draft nudge <id>. Keep it to one phone screen.",
+      "EA morning brief for Paul (read only). 1) Today's agenda across all his calendars in London time: each meeting with who and why it matters, clashes, gaps, and invitations he has not answered. 2) Inbox triage since yesterday evening: what needs him today, by urgency, with a suggested action each; the rest in one line. 3) Follow-ups: run scan_followups, then list what is stale or due today first, each with its id: who is waiting on him, what he promised and by when, and who he is waiting on (offer a drafted nudge for those; do not draft). Close anything that clearly needs nothing with resolve_followup. 4) Which of today's meetings need prep, one line each, and offer to prepare them. End the report with: reply done <id>, snooze <id> 2d, or draft nudge <id>. Your message to Paul is the morning in three or four plain sentences: the first commitment, what needs him most today (with the follow-up id where he must act) and anything that clashes; the full brief stays in the report.",
   },
   {
     name: "end-of-day wrap",
     title: "End-of-day wrap",
     cron: "0 18 * * 1-5",
     brief:
-      "EA end-of-day wrap for Paul (read only). 1) What came in today that still needs him, by urgency: run scan_followups and list the follow-ups that are stale or due tomorrow, with their ids. 2) Tomorrow's agenda in London time and his first commitment. 3) Anything to prepare tonight, and replies worth drafting (offer, do not draft). Keep it to one phone screen.",
+      "EA end-of-day wrap for Paul (read only). 1) What came in today that still needs him, by urgency: run scan_followups and list the follow-ups that are stale or due tomorrow, with their ids. 2) Tomorrow's agenda in London time and his first commitment. 3) Anything to prepare tonight, and replies worth drafting (offer, do not draft). Your message to Paul is the day's wrap in three or four plain sentences: what still needs him, tomorrow's first commitment, and anything to prepare tonight; the full wrap stays in the report.",
   },
 ] as const;
 
-/** Earlier wordings of the default briefs, upgraded in place on boot so existing schedules gain follow-ups. */
+/** Earlier wordings of the default briefs, upgraded in place on boot so existing schedules gain follow-ups and the plain-message rule. */
 export const LEGACY_EA_BRIEFS: Record<string, string> = {
+  "EA morning brief for Paul (read only). 1) Today's agenda across all his calendars in London time: each meeting with who and why it matters, clashes, gaps, and invitations he has not answered. 2) Inbox triage since yesterday evening: what needs him today, by urgency, with a suggested action each; the rest in one line. 3) Follow-ups: run scan_followups, then list what is stale or due today first, each with its id: who is waiting on him, what he promised and by when, and who he is waiting on (offer a drafted nudge for those; do not draft). Close anything that clearly needs nothing with resolve_followup. 4) Which of today's meetings need prep, one line each, and offer to prepare them. End with: reply done <id>, snooze <id> 2d, or draft nudge <id>. Keep it to one phone screen.":
+    "morning brief",
+  "EA end-of-day wrap for Paul (read only). 1) What came in today that still needs him, by urgency: run scan_followups and list the follow-ups that are stale or due tomorrow, with their ids. 2) Tomorrow's agenda in London time and his first commitment. 3) Anything to prepare tonight, and replies worth drafting (offer, do not draft). Keep it to one phone screen.":
+    "end-of-day wrap",
   "EA morning brief for Paul (read only). 1) Today's agenda across all his calendars in London time: each meeting with who and why it matters, clashes, gaps, and invitations he has not answered. 2) Inbox triage since yesterday evening: what needs him today, by urgency, with a suggested action each; the rest in one line. 3) Which of today's meetings need prep, one line each, and offer to prepare them. Keep it to one phone screen.":
     "morning brief",
   "EA end-of-day wrap for Paul (read only). 1) What came in today that still needs him, by urgency, and threads waiting on his reply. 2) Tomorrow's agenda in London time and his first commitment. 3) Anything to prepare tonight, and replies worth drafting (offer, do not draft). Keep it to one phone screen.":
