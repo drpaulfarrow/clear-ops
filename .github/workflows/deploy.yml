@@ -50,7 +50,12 @@ jobs:
             DISCORD_BOT_TOKEN="${{ secrets.DISCORD_BOT_TOKEN }}" \
             ALLOWED_DISCORD_IDS="${{ secrets.ALLOWED_DISCORD_IDS }}" \
             CHANNELS="${{ vars.CHANNELS || 'telegram,discord' }}" \
-            PRODUCT_REPO="${{ secrets.PRODUCT_REPO }}"
+            PRODUCT_REPO="${{ secrets.PRODUCT_REPO }}" \
+            GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
+            GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
+            GOOGLE_ACCOUNT="${{ secrets.GOOGLE_ACCOUNT }}" \
+            GOOGLE_TOKEN_KEY="${{ secrets.GOOGLE_TOKEN_KEY }}" \
+            EA_BOOKING_LINK="${{ vars.EA_BOOKING_LINK }}"
       - name: Deploy
         if: steps.check.outputs.ready == 'true'
         run: flyctl deploy --app "$FLY_APP" --remote-only --strategy rolling

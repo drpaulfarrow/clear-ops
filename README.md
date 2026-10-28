@@ -2,7 +2,7 @@
 
 An agentic workforce for Clear Exchange that you run from chat: Telegram, Discord or WhatsApp, any or all at once.
 
-You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to six workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) an analyst (questions about previous outputs and data) and an agent-creator (turns a plain-language request for a new agent into either a recommended schedule on an existing worker or a new worker kind, delivered as a pull request the maintainer reviews). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
+You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to seven workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) an analyst (questions about previous outputs and data), an executive assistant over your Gmail and Google Calendar (triage, drafts, agenda, meeting prep, holds; it never sends or invites) and an agent-creator (turns a plain-language request for a new agent into either a recommended schedule on an existing worker or a new worker kind, delivered as a pull request the maintainer reviews). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
 
 While the chief is thinking you see it typing, plus one status line that updates in place with what it is actually doing ("Checking job 39abb7…", "Searching the web: SPUR news…", "Starting an engineer job…") and disappears when the answer arrives. On WhatsApp, which supports neither, you get a single "Working on it." if it takes more than a few seconds.
 
@@ -18,6 +18,11 @@ Engineer: scaffold a Fastify service in the repo with a /health route and tests.
 Every Monday at 7am, research what changed in SPUR, CoMP, TollBit and Cloudflare.
 Remember: always price examples at half a cent per retrieval.
 I want an agent that drafts publisher outreach.
+What needs me in my inbox today?
+Draft a reply to Sam saying half a cent works, and hold Thursday 2pm for the call.
+What did Sam last say about pricing?
+Prep me for my 10am.
+connect Google   /google   /google disconnect
 show job 93137e
 /jobs   /pending   /reset   /help   /uploads
 YES 1f3a9c
@@ -96,6 +101,28 @@ The engineer can work on this workforce as well as on the product. Say "improve 
 
 Setup for this: clone this repository into `SELF_REPO_DIR` with a token that can push (same pattern as step 3), and add `FLY_API_TOKEN` as a repository secret so the workflow can deploy. The invariants in `CLAUDE.md` and `test/invariants.test.ts` are what stop a self-improvement from removing the allowlist, the signature check, the clean-room rule or the spend caps.
 
+## Executive assistant (Gmail and Google Calendar)
+The `ea` worker is your executive assistant over your own Google Workspace account, at the level you approved, "drafts plus holds". It reads and searches your mail and every calendar you can see. When you ask for it in chat, it saves replies in your voice to your Gmail Drafts folder, and places, moves or removes holds on your own calendar (private events titled "Hold: ...", nobody invited). It cannot send email, send a draft, delete, archive or relabel mail, add attendees, send invitations or answer them: those calls are refused in code (`src/google.ts`), not only by its prompt. Once connected, a morning brief (07:30) and an end-of-day wrap (18:00) run on weekdays, as ordinary schedules you can move or cancel in chat ("move the morning brief to 8").
+
+Email is treated as untrusted input. The assistant sees mail fenced between markers it cannot forge and is told it is data, never instructions; mail that reads like instructions is flagged to you as possible phishing. What a job may change comes only from your chat: a scheduled brief only reads, and the chief grants "drafts" or "holds" to a job only when you asked. A draft can only be addressed to people you named, people on the thread being answered, or people you have written to before. The assistant has no WebFetch, so nothing in an email can be sent to a URL; mail goes nowhere except the model and your chat.
+
+### Connecting Google, once
+Say "connect Google" and the chief sends these steps (or a sign-in link once they are done). On a laptop, about ten minutes:
+
+1. Go to console.cloud.google.com signed in as your Clear Exchange Workspace account. Project picker (top left), New project, name it `clear-ops-ea`, Create, then select it.
+2. APIs & Services, Library: search "Gmail API", Enable. Back to Library: "Google Calendar API", Enable.
+3. Google Auth Platform (also shown as OAuth consent screen), Get started. App name `Clear Ops EA`, support email your address. Audience: **Internal** (Workspace users only, so no Google verification is needed). Contact email your address. Agree and Create.
+4. Data access, Add or remove scopes. Add `gmail.readonly`, `gmail.compose`, `calendar.readonly`, `calendar.events`. Update, Save.
+5. Clients, Create client. Type: **Web application**. Name `clear-ops`. Authorised redirect URIs, Add URI: `https://clear-ops.fly.dev/google/callback` (your app's address if `FLY_APP` or `PUBLIC_URL` differs). Create, then copy the Client ID and Client secret.
+6. In GitHub, this repository, Settings, Secrets and variables, Actions, New repository secret, one each: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ACCOUNT` (your Workspace email; no other account can connect) and `GOOGLE_TOKEN_KEY` (any long random string; it encrypts the stored token). Optionally, on the Variables tab, New repository variable `EA_BOOKING_LINK` with your appointment-schedule booking link, which the assistant offers in scheduling drafts. Then Actions, ci, Run workflow, so the service picks them up.
+7. Say "connect Google" again. Open the link on your phone or laptop (valid 15 minutes, single use), choose your account, Allow. The chief confirms and the two weekday briefs are scheduled.
+
+Only if Google says the app is blocked: admin.google.com, Security, Access and data control, API controls, Manage third-party app access, find "Clear Ops EA", set it to Trusted.
+
+To disconnect: say "disconnect Google" or send `/google disconnect`. That revokes the grant at Google and deletes the stored token. You can also remove it at myaccount.google.com, Security, Third-party connections. `/google` shows whether it is connected.
+
+The scopes are the narrowest that allow drafts and holds. `gmail.compose` would technically allow sending, which is why the code refuses every send endpoint whatever the model asks. The refresh token is encrypted with AES-256-GCM under `DATA_DIR/secrets` (owner-only) on the data volume.
+
 ## Adding an agent
 Describe the agent you want in plain words; you do not need to say how to build it.
 
@@ -126,6 +153,11 @@ See `.env.example`. The important ones:
 | `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job. |
 | `UPLOAD_MAX_MB` | Largest file accepted in chat, in MB. Default 20. |
 | `UPLOADS_DIR` | Where uploads are saved. Default `DATA_DIR/uploads`; must be outside both repositories. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The OAuth client for the executive assistant (see above). |
+| `GOOGLE_ACCOUNT` | The only Google account that may be connected. |
+| `GOOGLE_TOKEN_KEY` | Encrypts the stored Google refresh token. Without it a key is derived from the client secret. |
+| `EA_BOOKING_LINK` | Paul's appointment-schedule link, offered in scheduling drafts. Set as an Actions variable (not a secret). Optional. |
+| `PUBLIC_URL` | Where a browser reaches the service, for the Google redirect. Defaults to `https://<FLY_APP_NAME>.fly.dev` on Fly. |
 
 ## Safety model
 - Headless permission mode: tools not pre-approved are denied, never left waiting.
@@ -133,7 +165,7 @@ See `.env.example`. The important ones:
 - One maintainer agent reviews and merges. It runs tests, checks CI, reads the diff, and either merges or requests changes. It cannot edit code. Branch protection on `main` is the hard backstop, since both agents use the same GitHub token.
 - The agent-creator has the engineer's tools and limits and works only on this repository. Every worker kind it adds must carry the clean-room rule, get read-only tools unless it is an engineer, and send nothing itself; `test/invariants.test.ts` checks every kind in `JOB_KINDS`, so a new kind that breaks these fails CI. It cannot be scheduled.
 - One side effect exists outside that remit (`run_command`, for deploys and migrations) and it needs `YES <id>`.
-- The chief never sends email or messages anyone but you. Drafts come to you. An unlisted Telegram sender is told its own id once and nothing else.
+- The chief never sends email or messages anyone but you. Drafts come to you. The executive assistant saves drafts in your Gmail Drafts folder and places holds with nobody invited; sending, deleting, relabelling, inviting and answering invitations are refused in code, and email it reads can never grant it a permission. An unlisted Telegram sender is told its own id once and nothing else.
 - Spend is capped per job; subagent nesting is limited.
 - A broken session is dropped automatically so the conversation never jams; `/reset` does it by hand.
 - A deploy restarts the service. Jobs that were running are re-queued on start with a note to inspect the working folder and carry on, since the clones live on the volume. After three interruptions a job is stopped and you are told.
@@ -149,4 +181,4 @@ npm test          # offline test suite with a fake agent runner
 ## Extending
 - A new worker: ask for it in chat ("I want an agent that...") and the agent-creator does it. By hand: add a case to `workerSpec()` in `src/agents.ts`, the kind to `JobKind` and `JOB_KINDS`, and the kind to the chief's prompt.
 - A new side effect: add an executor to `actionExecutors` in `src/jobs.ts`. It will automatically require approval.
-- Email, calendar or GitHub tools: add an MCP server to the chief's `mcpServers` in `src/orchestrator.ts`, and gate any sending behind `propose_action`.
+- Tools for a worker: give its jobs an MCP server through `toolsFor` in `buildApp()` (`src/index.ts`), as the executive assistant does, and gate any sending behind `propose_action`.
