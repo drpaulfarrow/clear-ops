@@ -123,6 +123,7 @@ See `.env.example`. The important ones:
 - Spend is capped per job; subagent nesting is limited.
 - A broken session is dropped automatically so the conversation never jams; `/reset` does it by hand.
 - A deploy restarts the service. Jobs that were running are re-queued on start with a note to inspect the working folder and carry on, since the clones live on the volume. After three interruptions a job is stopped and you are told.
+- Reviews close themselves. If the maintainer requests changes on a pull request, an engineer is sent back to fix it on the same branch and the maintainer reviews it again, up to three rounds. You hear about it only if it is still stuck after that, or if the blocker is something only you can do (a secret, a GitHub setting, account access, a product decision), and then once, with exactly what to do. Engineers and the maintainer bring branches up to date with main themselves, by merging, so nobody has to click "Update branch".
 - Only one engineering job (engineer or agent-creator) works on each repository at a time, so two never fight over the same checkout. Ask for another while one is running and it is queued behind it: `/jobs` shows `queued behind <id>`, and it starts by itself, in the order you asked, when the running one finishes or fails. The product and the workforce queue separately, and the queue survives restarts. Research, writing, analysis and the maintainer's reviews never wait.
 
 ## Development
