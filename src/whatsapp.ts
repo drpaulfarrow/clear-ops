@@ -10,8 +10,12 @@ export interface InboundMessage {
 export interface Messenger {
   /** `to` is an address: a phone number, "tg:<chat>", "dc:c:<channel>" or "dc:u:<user>". */
   send(to: string, text: string): Promise<void>;
-  /** Channels with threads (Discord) open one under a message and return its address. */
-  openThread?(replyTo: string, messageId: string, name: string): Promise<string | undefined>;
+  /**
+   * Channels with threads (Discord) open one for a job and return its address: under the inbound
+   * message when it has none yet, otherwise a standalone thread in the channel. Undefined where the
+   * conversation cannot have threads; throws if opening one failed.
+   */
+  openThread?(replyTo: string, messageId: string | undefined, name: string): Promise<string | undefined>;
   /**
    * Channels that can edit messages (Telegram, Discord) send one and return a handle for edit and
    * remove; undefined means this address cannot be edited. Used for the chief's live status line.
