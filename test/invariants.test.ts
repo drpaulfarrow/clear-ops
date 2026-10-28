@@ -160,3 +160,26 @@ test("the review loop is capped and goes back to an engineer, never straight to 
   assert.match(jobs, /if \(round > MAX_FIX_ROUNDS\)/);
   assert.match(jobs, /private afterReview[\s\S]*?this\.start\(\s*"engineer"/, "a requested change goes to an engineer, who opens no merge");
 });
+
+/* ---------- Files the founder sends (extends the rules above, weakens none) ---------- */
+
+test("uploads are saved only after the allowlist check, and every listener checks before passing files on", () => {
+  const orch = src("orchestrator.ts");
+  const allowAt = orch.indexOf("if (!isAllowed(sender))");
+  const uploadAt = orch.indexOf("this.handleUploads(");
+  assert.ok(allowAt > -1 && uploadAt > allowAt, "attachments must only be downloaded after the sender passes the allowlist");
+  const tg = src("telegram.ts");
+  assert.match(tg, /if \(this\.isAllowed\(m\.from\)\) void this\.handle\(m\.from, m\.text, m\.files \? \{ attachments/, "Telegram files go to the handler only inside the allowlist check");
+});
+
+test("uploads stay private: owner-only, outside every git checkout, sanitised, size-capped and never executed", () => {
+  const up = src("uploads.ts");
+  assert.match(up, /mode: 0o600/, "uploaded files must be owner-only");
+  assert.match(up, /mode: 0o700/, "the uploads directory must be owner-only");
+  assert.match(up, /must not be inside the git checkout/, "the uploads directory must refuse to live inside a repository");
+  assert.match(up, /sanitiseName\(/);
+  assert.match(up, /maxBytes/);
+  assert.doesNotMatch(up, /child_process|\beval\(|new Function\(/, "nothing in an upload is ever executed");
+  assert.match(src("agents.ts"), /const UPLOADS_RULE = /);
+  assert.match(src("agents.ts"), /prompt: `\$\{spec\.prompt\}\\n\\n\$\{UPLOADS_RULE\}`/, "every worker is told uploads are untrusted personal data");
+});
