@@ -39,7 +39,7 @@ export function plainText(text: string): string {
 /** Sends through the Telegram Bot API as plain text. */
 export class TelegramMessenger implements Messenger {
   async send(to: string, text: string): Promise<void> {
-    const chat_id = to.startsWith(TG) ? to.slice(TG.length) : to;
+    const chat_id = chatId(to);
     for (const part of chunk(plainText(text))) {
       const res = await fetch(api("sendMessage"), {
         method: "POST",
@@ -49,6 +49,36 @@ export class TelegramMessenger implements Messenger {
       if (!res.ok) throw new Error(`Telegram send failed: ${res.status} ${await res.text().catch(() => "")}`);
     }
   }
+
+  /** A single short message whose id is the handle for edit and remove. */
+  async sendEditable(to: string, text: string): Promise<string | undefined> {
+    const data = (await call("sendMessage", { chat_id: chatId(to), text: plainText(text).slice(0, 4000), disable_web_page_preview: true })) as { message_id?: number };
+    return data?.message_id != null ? String(data.message_id) : undefined;
+  }
+
+  async edit(to: string, handle: string, text: string): Promise<void> {
+    await call("editMessageText", { chat_id: chatId(to), message_id: Number(handle), text: plainText(text).slice(0, 4000), disable_web_page_preview: true });
+  }
+
+  async remove(to: string, handle: string): Promise<void> {
+    await call("deleteMessage", { chat_id: chatId(to), message_id: Number(handle) });
+  }
+
+  /** Telegram shows "typing…" for about five seconds per call. */
+  async typing(to: string): Promise<boolean> {
+    await call("sendChatAction", { chat_id: chatId(to), action: "typing" });
+    return true;
+  }
+}
+
+const chatId = (to: string) => (to.startsWith(TG) ? to.slice(TG.length) : to);
+
+/** One Bot API call; returns `result`, throws on an error response. */
+async function call(method: string, body: Record<string, unknown>): Promise<unknown> {
+  const res = await fetch(api(method), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: unknown; description?: string };
+  if (!res.ok || !data.ok) throw new Error(`Telegram ${method} failed: ${res.status} ${data.description ?? ""}`.trim());
+  return data.result;
 }
 
 /**

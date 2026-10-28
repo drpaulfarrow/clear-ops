@@ -12,6 +12,15 @@ export interface Messenger {
   send(to: string, text: string): Promise<void>;
   /** Channels with threads (Discord) open one under a message and return its address. */
   openThread?(replyTo: string, messageId: string, name: string): Promise<string | undefined>;
+  /**
+   * Channels that can edit messages (Telegram, Discord) send one and return a handle for edit and
+   * remove; undefined means this address cannot be edited. Used for the chief's live status line.
+   */
+  sendEditable?(to: string, text: string): Promise<string | undefined>;
+  edit?(to: string, handle: string, text: string): Promise<void>;
+  remove?(to: string, handle: string): Promise<void>;
+  /** Show a typing indicator for a few seconds. Resolves true if the channel supports it. */
+  typing?(to: string): Promise<boolean>;
 }
 
 /** Split long text on paragraph boundaries so each piece fits a WhatsApp message. */

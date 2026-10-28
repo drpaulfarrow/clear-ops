@@ -13,7 +13,41 @@ const DISCORD_MAX = 1900; // Discord's limit is 2000 characters per message
 
 /** Sends to a channel, thread or user through the Discord gateway client, and opens job threads. */
 export class DiscordMessenger implements Messenger {
+  /** Status messages that may still be edited or deleted, by handle (the message id). */
+  private editable = new Map<string, { edit: (t: string) => Promise<unknown>; delete: () => Promise<unknown> }>();
+
   constructor(private readonly client: Client) {}
+
+  async sendEditable(to: string, text: string): Promise<string | undefined> {
+    const target = await this.resolve(to);
+    const msg = (await target.send(text.slice(0, DISCORD_MAX))) as { id?: string; edit?: (t: string) => Promise<unknown>; delete?: () => Promise<unknown> };
+    if (!msg?.id || !msg.edit || !msg.delete) return undefined;
+    this.editable.set(msg.id, msg as { edit: (t: string) => Promise<unknown>; delete: () => Promise<unknown> });
+    return msg.id;
+  }
+
+  async edit(_to: string, handle: string, text: string): Promise<void> {
+    await this.editable.get(handle)?.edit(text.slice(0, DISCORD_MAX));
+  }
+
+  async remove(_to: string, handle: string): Promise<void> {
+    const msg = this.editable.get(handle);
+    this.editable.delete(handle);
+    await msg?.delete();
+  }
+
+  /** Discord shows "is typing…" for about ten seconds per call. */
+  async typing(to: string): Promise<boolean> {
+    if (to.startsWith(DC_USER)) {
+      const user = await this.client.users.fetch(to.slice(DC_USER.length));
+      await (await user.createDM()).sendTyping();
+      return true;
+    }
+    const channel = await this.client.channels.fetch(to.startsWith(DC_CHANNEL) ? to.slice(DC_CHANNEL.length) : to);
+    if (!channel || !("sendTyping" in channel)) return false;
+    await channel.sendTyping();
+    return true;
+  }
 
   async send(to: string, text: string): Promise<void> {
     const target = await this.resolve(to);
