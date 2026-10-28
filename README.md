@@ -22,6 +22,9 @@ Design: give me three brand directions for Clear Exchange.
 Run the design loop: make the site something I can show customers.
 What needs me in my inbox today?
 Draft a reply to Sam saying half a cent works, and hold Thursday 2pm for the call.
+Reach out to Jo at the FT (jo@ft.com) about licensing their archive.
+Set up 30 minutes with sam@acme.com next week about the pilot.
+/followups   done 3fa9c1   snooze 3fa9c1 monday   draft nudge 7b20e4   /booking <link>
 What did Sam last say about pricing?
 Prep me for my 10am.
 connect Google   /google   /google disconnect
@@ -125,6 +128,22 @@ To disconnect: say "disconnect Google" or send `/google disconnect`. That revoke
 
 The scopes are the narrowest that allow drafts and holds. `gmail.compose` would technically allow sending, which is why the code refuses every send endpoint whatever the model asks. The refresh token is encrypted with AES-256-GCM under `DATA_DIR/secrets` (owner-only) on the data volume.
 
+### Follow-ups, outreach and scheduling
+**Follow-ups.** The assistant keeps a list of three kinds of thing: threads where someone is waiting on you (the last word is their question or request, addressed to you, and you have not replied; or a direct email left unanswered for days), commitments you made in sent mail ("I'll send the deck Friday", "let me check and come back to you", with the day read from the sentence or two working days by default), and threads where you asked something and are waiting on them. Newsletters and notifications are ignored. Each item has a due date and a stale date (waiting on you: due next working day, stale after three; your promises: stale on the day; waiting on them: chase after three working days, stale after five). The 07:30 brief scans and lists them with ids, and items that go stale are nudged in chat at 11:00 or 16:00 on weekdays, once each (again if a snooze runs out). Replying to the thread closes the item on the next scan.
+
+```
+/followups                        what is open
+done 3fa9c1                       close one
+snooze 3fa9c1 monday              also 2d, 1w, tomorrow, next week, 3 Nov
+draft nudge 7b20e4                a chaser (or reply) drafted into Gmail, never sent
+```
+
+**Outreach.** "Reach out to Jo Bloggs at the FT about licensing their archive for AI answers, jo@ft.com" starts an assistant job that may save drafts. It checks your email history with the person, searches the web for public facts about them and their organisation, reads a few of your sent emails for voice, and saves a personalised draft in your Gmail Drafts. You get a link that opens each draft, ready for you to review and send. Batches work too: "draft outreach to the top 10 leads in job 4c1d2e's output" gives one draft each, at most 25 per job. A draft only goes to an address you gave, someone on the thread, or someone you have written to before; an address found only on the web or in a file is reported to you and the draft is saved with no recipient, so you add it yourself.
+
+**Scheduling.** "Set up 30 minutes with sam@acme.com next week about the pilot" starts a job that may save drafts and place holds. It finds free time on your calendar, places private holds on two or three slots on different days (nobody invited), and drafts the email to Sam with those times and your booking link. When a meeting with Sam is confirmed on your calendar (Sam books through your appointment schedule, or you accept Sam's invitation), the service removes the other holds and tells you. It only ever removes holds it placed for that meeting, and only while they are still holds; if you add a guest to one, it is left alone. Set your booking link once with `/booking https://calendar.app.google/...` (or the `EA_BOOKING_LINK` variable); `/booking` shows it.
+
+None of this can send: drafts stay in Drafts, holds have no attendees, and the same `GoogleApi` refusals apply.
+
 ## Adding an agent
 Describe the agent you want in plain words; you do not need to say how to build it.
 
@@ -174,7 +193,7 @@ See `.env.example`. The important ones:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The OAuth client for the executive assistant (see above). |
 | `GOOGLE_ACCOUNT` | The only Google account that may be connected. |
 | `GOOGLE_TOKEN_KEY` | Encrypts the stored Google refresh token. Without it a key is derived from the client secret. |
-| `EA_BOOKING_LINK` | Paul's appointment-schedule link, offered in scheduling drafts. Set as an Actions variable (not a secret). Optional. |
+| `EA_BOOKING_LINK` | Paul's appointment-schedule link, offered in scheduling drafts. Set as an Actions variable (not a secret). Optional; `/booking <link>` in chat sets it at runtime and takes precedence. |
 | `PUBLIC_URL` | Where a browser reaches the service, for the Google redirect. Defaults to `https://<FLY_APP_NAME>.fly.dev` on Fly. |
 
 ## Safety model

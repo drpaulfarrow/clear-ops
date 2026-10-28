@@ -293,6 +293,27 @@ test("email is untrusted: the assistant's prompt says so, it has no WebFetch, an
   assert.match(src("index.ts"), /verifySignature\(/);
 });
 
+test("follow-ups, outreach and scheduling add no way to send, invite or write outside drafts and holds", async () => {
+  // Nothing new names a send endpoint or reaches Google except through the one door.
+  for (const f of ["followups.ts", "meetings.ts", "ea.ts", "orchestrator.ts", "index.ts"]) {
+    assert.ok(!/["'`]\s*(messages|drafts)\/send/.test(src(f)), `${f} must not reference a send endpoint`);
+  }
+  for (const f of ["followups.ts", "meetings.ts"]) assert.ok(!/\bfetch\(/.test(src(f)), `${f} must reach Google only through GoogleApi`);
+  // The service's hold release only reads the calendar and removes holds; GoogleApi re-checks each is a hold.
+  const m = src("meetings.ts");
+  assert.ok(!/"(POST|PUT|PATCH)"/.test(m), "the hold watcher never creates or changes events");
+  assert.match(m, /"DELETE", `calendars\/primary\/events\//);
+  // Proposing a meeting places holds, so it needs the holds permit; it never registers without it.
+  const ea = src("ea.ts");
+  assert.match(ea.slice(ea.indexOf("async proposeMeeting(")), /^[^]*?this\.need\("holds"\)/);
+  const { EaTools, eaServer } = await import("../src/ea.js");
+  const { GoogleApi } = await import("../src/google.js");
+  const tools = Object.keys((eaServer(new EaTools(new GoogleApi({ accessToken: async () => "x" }), { permits: [], brief: "" })) as any).instance._registeredTools);
+  for (const w of ["create_draft", "update_draft", "place_hold", "move_hold", "remove_hold", "propose_meeting"]) assert.ok(!tools.includes(w), `${w} must not exist without a permit`);
+  // "draft nudge" from Paul's chat may save a draft and nothing else.
+  assert.match(src("orchestrator.ts"), /this\.jobs\.start\("ea", nudgeBrief\(f\), sender, "product", from, \{ permits: \["drafts"\] \}\)/);
+});
+
 test("Google tokens live encrypted, owner-only, under the data volume's secrets folder", () => {
   const g = src("google.ts");
   assert.match(g, /aes-256-gcm/);
