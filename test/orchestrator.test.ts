@@ -257,7 +257,7 @@ test("an agent-creator schedule verdict writes no code and starts no maintainer"
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Finished: Monitor IAB Tech Lab announcements · create_agent · ${job.id}.`)));
   const msg = messenger.sent.find((m) => m.text.startsWith(`Finished: Monitor IAB Tech Lab announcements · create_agent · ${job.id}.`))!;
   assert.match(msg.text, /set it up/);
-  assert.match(msg.text, /Cron: 0 7 \* \* 1/);
+  assert.match(msg.text, /a research job on the schedule 0 7 \* \* 1\./);
   assert.ok(!msg.text.includes("to review and merge"));
   assert.ok(!store.listJobs(50).some((j) => j.kind === "maintain" && j.brief.includes("Monitor IAB Tech Lab")));
   assert.equal(isScheduleVerdict("  verdict: schedule\nKind: write"), true);
