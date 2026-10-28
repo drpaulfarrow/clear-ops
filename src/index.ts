@@ -164,4 +164,6 @@ if (isMain) {
   // Jobs a previous process left running are picked up again, now that channels can deliver.
   const resumed = await jobs.resumeInterrupted();
   if (resumed) console.log(`resumed ${resumed} interrupted job(s)`);
+  // From now on, every minute: stalled or over-long jobs are stopped, orphaned ones restarted, queues kept moving.
+  jobs.startWatchdog();
 }

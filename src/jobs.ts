@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import { bookingLink, config } from "./config.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
 import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
-import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
+import type { Job, JobKind, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
@@ -24,9 +26,79 @@ export function lockKey(job: Pick<Job, "kind" | "target">): JobTarget | undefine
   return job.target ?? "product";
 }
 
+/** Why the service stopped a running job. */
+export interface StopReason {
+  kind: "stalled" | "timeout" | "cancelled";
+  /** Recorded on the job as its error and in its saved output. */
+  detail: string;
+  /** The one plain sentence Paul is told, if any. Cancelling needs none: the chief tells him. */
+  notice?: (job: Job, saved: SavedWork | undefined) => string;
+}
+
+/** A worker this process is running: its heartbeat, its runtime and the handle that stops it. */
+interface LiveRun {
+  abort: AbortController;
+  startedAt: number;
+  lastActivity: number;
+  /** When lastActivityAt was last written to the store; the heartbeat is persisted at most once a minute. */
+  persistedAt: number;
+  /** Waiting for the product's deploy before a design round looks: not working yet, so never stalled. */
+  waiting: boolean;
+  /** The run returned and the job is being reported: too late to stop it. */
+  finishing: boolean;
+  stop?: StopReason;
+  /** The stop has been recorded on the job, so it is never recorded twice. */
+  recorded?: boolean;
+  settled: Promise<void>;
+  settle: () => void;
+}
+
+export interface LivenessOptions {
+  /** No activity for this long and a running job is stalled. Default JOB_STALL_MINUTES (30 minutes). */
+  stallMs?: number;
+  /** The longest a job may run. Default JOB_MAX_RUNTIME_MINUTES (4 hours). */
+  maxRuntimeMs?: number;
+  /** How long a stopped worker gets to let go before the job is finished without it. Default 30 seconds. */
+  graceMs?: number;
+  /** The clock, for tests. */
+  now?: () => number;
+  /** Keeps a stopped engineering job's work (default: stash it in its checkout). Tests inject a fake. */
+  saveWork?: (job: Job, why: StopReason["kind"]) => Promise<SavedWork | undefined>;
+}
+
+/** What the chief and Paul see when they ask whether a job is actually alive. */
+export interface Liveness {
+  id: string;
+  status: JobStatus;
+  /** True when a worker in this process is running the job and has shown activity recently. */
+  alive: boolean;
+  /** One plain sentence saying what is going on. */
+  summary: string;
+  lastActivityAt?: string;
+  idleMinutes?: number;
+  runningMinutes?: number;
+  waitingForDeploy?: boolean;
+  stallAfterMinutes: number;
+  maxRuntimeMinutes: number;
+}
+
+const MINUTE = 60_000;
+const minutes = (ms: number) => Math.round(ms / MINUTE);
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 /** Starts worker jobs in the background and reports back over WhatsApp when they finish. */
 export class JobRunner {
   private running = new Set<string>();
+  /** The workers this process is running, with their heartbeats. */
+  private live = new Map<string, LiveRun>();
+  /** Set once resumeInterrupted() has run: from then on a job marked running with no worker here is an orphan. */
+  private booted = false;
+  private checking = false;
+  private readonly stallMs: number;
+  private readonly maxRuntimeMs: number;
+  private readonly graceMs: number;
+  private readonly now: () => number;
+  private readonly saveWork: (job: Job, why: StopReason["kind"]) => Promise<SavedWork | undefined>;
   /** Which job holds each repository's engineering lock in this process. */
   private holders = new Map<JobTarget, string>();
 
@@ -40,9 +112,15 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; failureNotices?: FailureNotifierOptions } = {},
+    opts: { waitForDeploy?: DeployWait; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions } = {},
   ) {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
+    const l = opts.liveness ?? {};
+    this.stallMs = l.stallMs ?? config.jobStallMinutes * MINUTE;
+    this.maxRuntimeMs = l.maxRuntimeMs ?? config.jobMaxRuntimeMinutes * MINUTE;
+    this.graceMs = l.graceMs ?? 30_000;
+    this.now = l.now ?? Date.now;
+    this.saveWork = l.saveWork ?? defaultSaveWork;
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
@@ -250,33 +328,7 @@ export class JobRunner {
       .filter((j) => !this.running.has(j.id) && !j.waitingFor)
       // Jobs that were running reclaim their repository before ones that had not started yet.
       .sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || a.createdAt.localeCompare(b.createdAt));
-    for (const job of jobs) {
-      const resumed = (job.resumed ?? 0) + 1;
-      if (resumed > 3) {
-        this.store.updateJob(job.id, { status: "failed", finishedAt: new Date().toISOString(), error: "Interrupted by restarts three times; giving up." });
-        await this.messenger.send(job.replyTo ?? job.requestedBy, `Stopped: ${jobLabel(job)}. It was interrupted by restarts three times. Start it again when things are quiet.`);
-        continue;
-      }
-      const key = lockKey(job);
-      const holder = key && this.holders.get(key);
-      const hold = this.store.queueHold();
-      if (key && !holder && hold) {
-        // The queues are held after a credit or key failure: wait for /resume rather than fail again.
-        this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
-        await this.messenger.send(job.replyTo ?? job.requestedBy, `Interrupted by a restart: ${jobLabel(job)}. The engineering queue is paused because ${failureReason(hold)}, so it waits; send /resume once that is fixed.`);
-        continue;
-      }
-      if (key && holder) {
-        // Another job on this repository has already reclaimed it: wait behind it.
-        this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: holder, queuePos: this.nextQueuePos() });
-        await this.messenger.send(job.replyTo ?? job.requestedBy, `Interrupted by a restart: ${jobLabel(job)}. Queued behind ${jobRef(this.store.getJob(holder), holder)}; it resumes when that finishes.`);
-        continue;
-      }
-      if (key) this.holders.set(key, job.id);
-      this.store.updateJob(job.id, { status: "queued", resumed });
-      await this.messenger.send(job.replyTo ?? job.requestedBy, `Interrupted by a restart: ${jobLabel(job)}. Resuming it (attempt ${resumed + 1}).`);
-      void this.execute(job.id);
-    }
+    for (const job of jobs) await this.reclaim(job, "restart");
     // A repository nobody reclaimed (its job gave up, or none was running) starts its queue.
     for (const key of ["product", "self"] as JobTarget[]) {
       const holder = this.holders.get(key);
@@ -287,7 +339,56 @@ export class JobRunner {
       // Requests that queued during boot behind a job that has since given up now wait for the real holder.
       for (const j of this.waiting(key)) if (j.waitingFor !== holder) this.store.updateJob(j.id, { waitingFor: holder });
     }
+    this.booted = true;
     return jobs.length;
+  }
+
+  /**
+   * Puts a job that has no live worker back to work: after a restart, or when the watchdog finds a job
+   * marked running that nothing in this process is running (an orphan). It resumes in place with a note
+   * to carry on from its working folder, queues behind its repository's holder, waits for /resume while
+   * the queues are held, or, after three interruptions, is stopped.
+   */
+  private async reclaim(job: Job, why: "restart" | "orphan"): Promise<void> {
+    const label = jobLabel(job);
+    const orphan = why === "orphan";
+    const lead = orphan ? `${label} was marked running but no worker was alive` : `Interrupted by a restart: ${label}.`;
+    const to = job.replyTo ?? job.requestedBy;
+    const say = (text: string) => this.messenger.send(to, text).catch(() => undefined);
+    const resumed = (job.resumed ?? 0) + 1;
+    if (resumed > 3) {
+      this.store.updateJob(job.id, {
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        error: orphan ? "Marked running with no live worker after three interruptions; giving up." : "Interrupted by restarts three times; giving up.",
+        ...(orphan ? { failure: "stalled" as const } : {}),
+      });
+      this.pauseLoop(job.designLoop);
+      await say(orphan ? `${lead}, and it had already been restarted three times, so I have stopped it; retry ${job.id} runs it again.` : `Stopped: ${label}. It was interrupted by restarts three times. Start it again when things are quiet.`);
+      return;
+    }
+    const key = lockKey(job);
+    const current = key && this.holders.get(key);
+    const holder = current && current !== job.id ? current : undefined;
+    const hold = this.store.queueHold();
+    if (key && !holder && hold) {
+      // The queues are held after a credit or key failure: wait for /resume rather than fail again.
+      this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
+      if (this.holders.get(key) === job.id) this.holders.delete(key);
+      await say(orphan ? `${lead}, so I put it back in the queue, which is paused until you send /resume because ${failureReason(hold)}.` : `${lead} The engineering queue is paused because ${failureReason(hold)}, so it waits; send /resume once that is fixed.`);
+      return;
+    }
+    if (key && holder) {
+      // Another job on this repository has already reclaimed it: wait behind it.
+      this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: holder, queuePos: this.nextQueuePos() });
+      const ref = jobRef(this.store.getJob(holder), holder);
+      await say(orphan ? `${lead}, so I put it back in the queue behind ${ref}.` : `${lead} Queued behind ${ref}; it resumes when that finishes.`);
+      return;
+    }
+    if (key) this.holders.set(key, job.id);
+    this.store.updateJob(job.id, { status: "queued", resumed });
+    await say(orphan ? `${lead}, so I restarted it to carry on from where it left off (attempt ${resumed + 1}).` : `${lead} Resuming it (attempt ${resumed + 1}).`);
+    void this.execute(job.id);
   }
 
   isRunning(id: string): boolean {
@@ -297,11 +398,25 @@ export class JobRunner {
   private async execute(id: string): Promise<void> {
     const job = this.store.getJob(id);
     if (!job) return;
+    const now = this.now();
+    let settle = () => {};
+    const settled = new Promise<void>((r) => (settle = r));
+    const live: LiveRun = { abort: new AbortController(), startedAt: now, lastActivity: now, persistedAt: now, waiting: !!job.awaitDeploy, finishing: false, settled, settle };
+    this.live.set(id, live);
     this.running.add(id);
-    this.store.updateJob(id, { status: "running" });
+    const at = new Date(now).toISOString();
+    this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at });
     try {
       // A design round after a merge looks only once the product's deploy of that merge is live.
-      if (job.awaitDeploy) await this.waitForDeploy(new Date(job.createdAt));
+      if (job.awaitDeploy) {
+        await this.waitForDeploy(new Date(job.createdAt));
+        // The work starts now: the runtime and the heartbeat count from here.
+        live.waiting = false;
+        live.startedAt = live.lastActivity = live.persistedAt = this.now();
+        const t = new Date(live.startedAt).toISOString();
+        this.store.updateJob(id, { startedAt: t, lastActivityAt: t });
+      }
+      if (live.stop) throw new Error("stopped");
       const spec = workerSpec(job.kind, job.target);
       const perJob = spec.perJob?.(id) ?? {};
       // Engineers building a design spec may read the designer's assets.
@@ -316,6 +431,7 @@ export class JobRunner {
       const resume = job.resumed
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
+      const carryOn = job.savedWork ? `\n\n${savedWorkNote(job.savedWork)}` : "";
       const link = job.kind === "ea" ? bookingLink(this.store) : undefined;
       const permits =
         job.kind === "ea"
@@ -325,7 +441,7 @@ export class JobRunner {
       // Every run is capped; deep research gets more turns and budget than the default.
       const limits = runLimits(job.kind, job.depth);
       const result = await this.run({
-        prompt: `${job.brief}${permits}${depth}${standing}${resume}`,
+        prompt: `${job.brief}${permits}${depth}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
         model: spec.model,
         cwd: spec.cwd,
@@ -337,7 +453,12 @@ export class JobRunner {
         additionalDirectories: dirs,
         maxTurns: limits.maxTurns,
         maxBudgetUsd: limits.maxBudgetUsd,
+        abortController: live.abort,
+        onActivity: () => this.touch(id, live),
       });
+      // Stopped (stalled, too long, cancelled) while it ran: whatever came back is not the job's result.
+      if (live.stop) throw new Error("stopped");
+      live.finishing = true;
       // An API or SDK error (no credit, a rejected key, overload after retries, no output) is not work:
       // it is recorded as failed, and nothing follows it (no review, no fix round, no "Finished").
       const failed = runFailure(result);
@@ -411,16 +532,246 @@ export class JobRunner {
       if (job.kind === "design") await this.sendImages(job, report);
       if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
     } catch (err) {
-      await this.recordFailure(job, failureFromError(err));
+      if (live.stop) await this.recordStop(job, live);
+      else await this.recordFailure(job, failureFromError(err));
     } finally {
+      // A worker that would not let go after a stop was already finished without it; nothing more here.
+      const mine = this.live.get(id) === live;
+      if (mine) {
+        this.live.delete(id);
+        this.running.delete(id);
+      }
+      live.settle();
+      // Success, failure, error or stop: free the repository and start whoever is next in line.
+      if (mine) await this.release(job);
+    }
+  }
+
+  /** Frees the repository a job holds and starts whoever is next in line. */
+  private async release(job: Job): Promise<void> {
+    const key = lockKey(job);
+    if (key && this.holders.get(key) === job.id) {
+      this.holders.delete(key);
+      await this.startNext(key, job.id);
+    }
+  }
+
+  /** The heartbeat: the worker did something. Kept exactly in memory, written to the store at most once a minute. */
+  private touch(id: string, live: LiveRun): void {
+    const now = this.now();
+    live.lastActivity = now;
+    if (now - live.persistedAt < MINUTE || !this.store.getJob(id)) return;
+    live.persistedAt = now;
+    this.store.updateJob(id, { lastActivityAt: new Date(now).toISOString() });
+  }
+
+  /**
+   * Stops a running job: aborts its worker, keeps its work, records why and frees its repository. A
+   * worker that does not let go within the grace period is left behind and the job is finished
+   * without it, so a hung process can never hold the queue.
+   */
+  private async stop(id: string, reason: StopReason): Promise<boolean> {
+    const live = this.live.get(id);
+    if (!live || live.stop || live.finishing) return false;
+    live.stop = reason;
+    live.abort.abort();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settled = await Promise.race([live.settled.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), this.graceMs)))]);
+    clearTimeout(timer);
+    if (!settled && this.live.get(id) === live) {
+      this.live.delete(id);
       this.running.delete(id);
-      // Success, failure or error: free the repository and start whoever is next in line.
-      const key = lockKey(job);
-      if (key && this.holders.get(key) === id) {
-        this.holders.delete(key);
-        await this.startNext(key, id);
+      const job = this.store.getJob(id);
+      if (job) {
+        await this.recordStop(job, live);
+        await this.release(job);
       }
     }
+    return true;
+  }
+
+  /** Records a stopped job: its work kept, failed with the reason, its loop paused, Paul told in one sentence. */
+  private async recordStop(job: Job, live: LiveRun): Promise<void> {
+    const reason = live.stop;
+    if (!reason || live.recorded) return;
+    live.recorded = true;
+    let saved: SavedWork | undefined;
+    if (lockKey(job)) {
+      saved = await this.saveWork(job, reason.kind).catch((err) => {
+        console.warn(`could not keep the work of job ${job.id}: ${err instanceof Error ? err.message : err}`);
+        return undefined;
+      });
+    }
+    const failure = { kind: reason.kind, detail: reason.detail };
+    const kept = saved ? `\n\n${savedWorkNote(saved)}` : "";
+    const outputPath = this.store.writeOutput(job.id, `This job was stopped and did not finish, because ${failureReason(failure)}.\n\n${reason.detail}${kept}\n`);
+    this.store.updateJob(job.id, {
+      status: "failed",
+      finishedAt: new Date().toISOString(),
+      error: reason.detail,
+      failure: reason.kind,
+      outputPath,
+      summary: `Stopped (${failureLabel(reason.kind)}): ${shortText(reason.detail, 200)}`,
+      ...(saved ? { savedWork: saved } : {}),
+    });
+    this.pauseLoop(job.designLoop);
+    const notice = reason.notice?.(this.store.getJob(job.id) ?? job, saved);
+    if (notice) await this.messenger.send(job.replyTo ?? job.requestedBy, notice).catch(() => undefined);
+  }
+
+  /**
+   * The watchdog, run every minute. Stops a job whose worker has shown no activity for the stall limit
+   * or has run past the maximum runtime; puts back to work a job marked running that no worker here is
+   * running (it resumes, or is stopped after three interruptions); and starts any repository queue whose
+   * lock is free. Each stop keeps the job's work and tells Paul in one sentence.
+   */
+  async checkLiveness(): Promise<void> {
+    if (this.checking) return;
+    this.checking = true;
+    try {
+      const now = this.now();
+      for (const [id, live] of [...this.live]) {
+        if (live.stop || live.waiting || live.finishing) continue;
+        const idle = now - live.lastActivity;
+        const ran = now - live.startedAt;
+        if (idle >= this.stallMs) {
+          const mins = minutes(idle);
+          await this.stop(id, {
+            kind: "stalled",
+            detail: `No activity from its worker for ${plural(mins, "minute")} (the limit is ${plural(minutes(this.stallMs), "minute")}).`,
+            notice: (job, saved) => `${jobLabel(job)} showed no activity for ${plural(mins, "minute")}, so I stopped it${this.afterStop(job, saved)}.`,
+          });
+        } else if (ran >= this.maxRuntimeMs) {
+          const mins = minutes(ran);
+          await this.stop(id, {
+            kind: "timeout",
+            detail: `Ran for ${plural(mins, "minute")}, past the maximum runtime of ${plural(minutes(this.maxRuntimeMs), "minute")}.`,
+            notice: (job, saved) => `${jobLabel(job)} ran for ${duration(ran)}, past the limit of ${duration(this.maxRuntimeMs)}, so I stopped it${this.afterStop(job, saved)}.`,
+          });
+        }
+      }
+      // Before boot has resumed the interrupted jobs, a job marked running is the previous process's.
+      if (!this.booted) return;
+      for (const job of this.store.allJobs()) {
+        const lost = job.status === "running" || (job.status === "queued" && !job.waitingFor);
+        if (lost && !this.running.has(job.id)) await this.reclaim(this.store.getJob(job.id) ?? job, "orphan");
+      }
+      for (const key of ["product", "self"] as JobTarget[]) {
+        const held = this.holders.get(key);
+        // A lock held by a job nothing is running frees itself.
+        if (held && !this.running.has(held)) this.holders.delete(key);
+        const holder = this.holders.get(key);
+        if (!holder) await this.startNext(key);
+        else for (const j of this.waiting(key)) if (j.waitingFor !== holder && !this.isHeld(j)) this.store.updateJob(j.id, { waitingFor: holder });
+      }
+    } finally {
+      this.checking = false;
+    }
+  }
+
+  /** Runs the watchdog every minute (by default) until the returned function is called. */
+  startWatchdog(intervalMs = MINUTE): () => void {
+    const timer = setInterval(() => {
+      this.checkLiveness().catch((err) => console.warn(`liveness check failed: ${err instanceof Error ? err.message : err}`));
+    }, intervalMs);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }
+
+  /** The rest of the stop sentence: what happened to the work and to the queue, and how to carry on. */
+  private afterStop(job: Job, saved: SavedWork | undefined): string {
+    const key = lockKey(job);
+    const next = key ? this.waiting(key)[0] : undefined;
+    const work = saved?.stash ? ", kept its unfinished work" : "";
+    const queue = next && !this.store.queueHold() ? ` and started ${jobRef(next, next.id)}, next in the queue` : "";
+    return `${work}${queue}; retry ${job.id} carries on from where it got to`;
+  }
+
+  /**
+   * Whether a job is actually alive: a worker in this process is running it and has shown activity
+   * recently. For the chief's job_alive and job_status, when Paul says nothing seems to be running.
+   */
+  liveness(id: string): Liveness | undefined {
+    const job = this.store.getJob(id);
+    if (!job) return undefined;
+    const live = this.live.get(id);
+    const now = this.now();
+    const base = { id, status: job.status, stallAfterMinutes: minutes(this.stallMs), maxRuntimeMinutes: minutes(this.maxRuntimeMs) };
+    const label = jobLabel(job);
+    if (live) {
+      const idle = now - live.lastActivity;
+      const ran = now - live.startedAt;
+      const info = { ...base, lastActivityAt: new Date(live.lastActivity).toISOString(), idleMinutes: minutes(idle), runningMinutes: minutes(ran) };
+      if (live.waiting) return { ...info, alive: true, waitingForDeploy: true, summary: `${label} is alive, waiting for the product deploy before it starts.` };
+      if (live.stop) return { ...info, alive: false, summary: `${label} is being stopped (${failureLabel(live.stop.kind)}).` };
+      const alive = idle < this.stallMs;
+      const last = idle < MINUTE ? "under a minute ago" : `${plural(minutes(idle), "minute")} ago`;
+      return {
+        ...info,
+        alive,
+        summary: alive
+          ? `${label} is alive: its worker last did something ${last}, and it has been running for ${duration(ran)}.`
+          : `${label} looks stalled: no activity for ${plural(minutes(idle), "minute")}; the watchdog stops it at ${plural(minutes(this.stallMs), "minute")}.`,
+      };
+    }
+    if (job.status === "running") {
+      const last = job.lastActivityAt ? ` (last activity ${job.lastActivityAt})` : "";
+      return { ...base, alive: false, lastActivityAt: job.lastActivityAt, summary: `${label} is marked running but no worker is alive${last}; the watchdog will restart it or stop it within a minute, or cancel_job frees its place now.` };
+    }
+    if (job.status === "queued") {
+      const pos = this.queuePosition(id);
+      const behind = job.waitingFor ? (this.isHeld(job) ? ", held until /resume" : `, behind ${jobRef(this.store.getJob(job.waitingFor), job.waitingFor)}${pos ? ` (#${pos} on ${lockKey(job)})` : ""}`) : "";
+      return { ...base, alive: false, summary: `${label} has not started yet: it is queued${behind}.` };
+    }
+    return { ...base, alive: false, lastActivityAt: job.lastActivityAt, summary: `${label} is ${job.status}${job.finishedAt ? ` (since ${job.finishedAt})` : ""}; nothing is running for it.` };
+  }
+
+  /**
+   * Cancels a job at Paul's request: a queued job leaves the queue; a running one has its worker stopped,
+   * its work kept and its repository handed to the next in line. Returns one plain sentence.
+   */
+  async cancel(id: string): Promise<string> {
+    const job = this.store.getJob(id);
+    if (!job) throw new Error(`No job ${id}.`);
+    const label = jobLabel(job);
+    if (job.status === "done" || job.status === "failed") throw new Error(`${label} is already ${job.status}, so there is nothing to cancel.`);
+    const reason: StopReason = { kind: "cancelled", detail: "Cancelled at Paul's request." };
+    const key = lockKey(job);
+    if (job.status === "queued" && !this.running.has(id)) {
+      this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error: reason.detail, failure: "cancelled", summary: "Cancelled before it started.", waitingFor: undefined, queuePos: undefined });
+      this.pauseLoop(job.designLoop);
+      if (key && this.holders.get(key) === id) await this.release(job);
+      return `Cancelled ${label} before it started; it has left the queue.`;
+    }
+    if (this.live.has(id)) await this.stop(id, reason);
+    else {
+      // Marked running, but no worker here: nothing to stop, so record it and free its place.
+      const orphan: LiveRun = { abort: new AbortController(), startedAt: 0, lastActivity: 0, persistedAt: 0, waiting: false, finishing: false, stop: reason, settled: Promise.resolve(), settle: () => {} };
+      await this.recordStop(job, orphan);
+      if (key && this.holders.get(key) === id) await this.release(job);
+      else if (key && !this.holders.get(key)) await this.startNext(key, id);
+    }
+    const after = this.store.getJob(id) ?? job;
+    if (after.status !== "failed") return `${label} had already finished, so there was nothing to cancel.`;
+    const next = key ? this.holder(key) : undefined;
+    const work = after.savedWork?.stash ? ` Its unfinished work is kept (stash "${after.savedWork.stash}" on ${after.savedWork.branch ?? "its branch"}), and retry ${id} carries on from it.` : ` retry ${id} runs it again.`;
+    const queue = next && next !== id ? ` ${jobRef(this.store.getJob(next), next)} has started in its place.` : "";
+    return `Cancelled ${label}.${work}${queue}`;
+  }
+
+  /** Moves a queued engineering job to the front of its repository's queue, so it starts next. Returns one plain sentence. */
+  moveToFront(id: string): string {
+    const job = this.store.getJob(id);
+    if (!job) throw new Error(`No job ${id}.`);
+    const key = lockKey(job);
+    if (job.status !== "queued" || !job.waitingFor || !key) throw new Error(`${jobLabel(job)} is not waiting in a queue (it is ${job.status}), so there is nothing to move.`);
+    const queue = this.waiting(key);
+    if (queue[0]?.id === id) return `${jobLabel(job)} is already first in the ${key} queue.`;
+    const front = Math.min(...queue.map((j) => j.queuePos ?? 0)) - 1;
+    this.store.updateJob(id, { queuePos: front });
+    const holder = this.holder(key);
+    const when = this.isHeld(job) ? "once the queue is resumed" : holder ? `when ${jobRef(this.store.getJob(holder), holder)} finishes` : "next";
+    return `Moved ${jobLabel(job)} to the front of the ${key} queue; it starts ${when}.`;
   }
 
   /**
@@ -641,6 +992,47 @@ export function isScheduleVerdict(text: string): boolean {
 export function finishedText(job: Pick<Job, "id" | "title" | "brief" | "kind" | "target">, message: string, next = ""): string {
   const body = [message, next, `Full report: show job ${job.id}.`].map((s) => s.trim()).filter(Boolean).join(" ");
   return `Finished: ${jobLabel(job)}.\n${body}`;
+}
+
+/** "45 minutes", "4 hours", "2 hours 10 minutes": a duration in plain words. */
+export function duration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / MINUTE));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (!h) return plural(m, "minute");
+  return m ? `${plural(h, "hour")} ${plural(m, "minute")}` : plural(h, "hour");
+}
+
+/** What a retried job is told about the work its stopped attempt left behind. Exported for tests. */
+export function savedWorkNote(saved: SavedWork): string {
+  const where = `in ${saved.dir}${saved.branch ? ` on branch ${saved.branch}` : ""}`;
+  return saved.stash
+    ? `A previous attempt at this job was stopped before it finished. Its uncommitted work was kept ${where}, stashed with the message "${saved.stash}". Check out that branch, find the stash with git stash list, apply it with git stash apply (not pop, so it stays kept until your work is pushed), then check git status and carry on from there rather than starting again.`
+    : `A previous attempt at this job was stopped before it finished, working ${where}. Check that branch and its commits before doing anything, keep what is good and carry on from there rather than starting again.`;
+}
+
+/**
+ * Keeps a stopped engineering job's work so the next job in the checkout starts clean and nothing is
+ * lost: notes the branch and stashes any uncommitted changes, untracked files included. Never deletes
+ * anything; the stash stays until someone applies and drops it. Exported for tests.
+ */
+export async function stashWork(dir: string, message: string): Promise<SavedWork | undefined> {
+  if (!fs.existsSync(path.join(dir, ".git"))) return undefined;
+  // A stash is a commit: give it an identity in case the checkout has none configured.
+  const git = async (...args: string[]) =>
+    (await exec("git", ["-C", dir, "-c", "user.name=clear-ops", "-c", "user.email=clear-ops@users.noreply.github.com", ...args], { timeout: 60_000 })).stdout.trim();
+  const branch = await git("rev-parse", "--abbrev-ref", "HEAD").catch(() => undefined);
+  const dirty = await git("status", "--porcelain");
+  if (!dirty) return { dir, branch };
+  await git("stash", "push", "--include-untracked", "-m", message);
+  return { dir, branch, stash: message };
+}
+
+/** The real saveWork: stash in the checkout the job's worker runs in. */
+async function defaultSaveWork(job: Job, why: StopReason["kind"]): Promise<SavedWork | undefined> {
+  const dir = workerSpec(job.kind, job.target).cwd;
+  if (!dir) return undefined;
+  return stashWork(dir, `clear-ops ${job.id}: ${jobTitle(job)} (stopped: ${why})`);
 }
 
 /* ---------- Approved actions ---------- */

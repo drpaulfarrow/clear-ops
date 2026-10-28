@@ -7,9 +7,14 @@ import { jobLabel, jobRef } from "./titles.js";
 /**
  * Why a worker run produced no real work. "credit" and "auth" are account-wide: every further run
  * fails the same way until Paul fixes it, so the engineering queues are held (HOLD_KINDS).
- * "error" is anything else that threw (a crash, a failed deploy wait).
+ * "error" is anything else that threw (a crash, a failed deploy wait). The last three are jobs the
+ * service stopped (STOP_KINDS): "stalled" when its worker showed no activity for too long, "timeout"
+ * when it ran past the maximum runtime, "cancelled" when Paul cancelled it.
  */
-export type FailureKind = "credit" | "auth" | "rate_limit" | "overloaded" | "api" | "empty" | "error";
+export type FailureKind = "credit" | "auth" | "rate_limit" | "overloaded" | "api" | "empty" | "error" | "stalled" | "timeout" | "cancelled";
+
+/** Jobs the service stopped rather than ones that failed on their own; their work is kept for a retry. */
+export const STOP_KINDS: FailureKind[] = ["stalled", "timeout", "cancelled"];
 
 export interface RunFailure {
   kind: FailureKind;
@@ -111,6 +116,12 @@ export function failureReason(f: Pick<RunFailure, "kind" | "detail">): string {
       return "the agent came back with nothing";
     case "api":
       return `the Anthropic API returned an error (${shortText(f.detail, 120)})`;
+    case "stalled":
+      return "its worker showed no activity for too long, so it was stopped";
+    case "timeout":
+      return "it ran past the maximum runtime, so it was stopped";
+    case "cancelled":
+      return "it was cancelled";
     default:
       return `it hit an error (${shortText(f.detail, 120)})`;
   }
@@ -131,6 +142,12 @@ export function failureLabel(kind: FailureKind | undefined): string {
       return "no output";
     case "api":
       return "API error";
+    case "stalled":
+      return "stalled, stopped";
+    case "timeout":
+      return "ran too long, stopped";
+    case "cancelled":
+      return "cancelled";
     default:
       return "error";
   }
