@@ -2,7 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 
-export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent";
+export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea";
+/**
+ * What an executive-assistant job may change in Paul's Google Workspace, granted per job by the chief
+ * only when Paul asked for it in chat. Without a permit the job can only read.
+ */
+export type EaPermit = "drafts" | "holds";
 /** Which codebase an engineering job works in: the product, or this workforce itself. */
 export type JobTarget = "product" | "self";
 export type JobStatus = "queued" | "running" | "done" | "failed";
@@ -31,6 +36,8 @@ export interface Job {
   fixRound?: number;
   /** Maintainer jobs started automatically after an engineering job: the id of that job. */
   reviewOf?: string;
+  /** Executive-assistant jobs: what it may change (drafts, holds). Absent means read only. */
+  permits?: EaPermit[];
   createdAt: string;
   finishedAt?: string;
   summary?: string;

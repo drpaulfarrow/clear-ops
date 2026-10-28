@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
 import { MAX_FIX_ROUNDS, PR_KINDS, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
@@ -29,9 +30,15 @@ export class JobRunner {
     private readonly store: Store,
     private readonly messenger: Messenger,
     private readonly run: AgentRunner,
+    /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
+    private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
   ) {}
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "pr" | "fixRound" | "reviewOf"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "pr" | "fixRound" | "reviewOf" | "permits"> = {}): Job {
+    // Only the executive assistant has permits, and only drafts and holds exist.
+    extra = { ...extra };
+    if (kind !== "ea") delete extra.permits;
+    else if (extra.permits) extra.permits = [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds");
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
     const key = lockKey(job);
     if (key) {
@@ -152,8 +159,9 @@ export class JobRunner {
       const resume = job.resumed
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
+      const permits = job.kind === "ea" ? `\n\nThis job may change: ${job.permits?.length ? job.permits.join(" and ") : "nothing (read only)"}.` : "";
       const result = await this.run({
-        prompt: `${job.brief}${standing}${resume}`,
+        prompt: `${job.brief}${permits}${standing}${resume}`,
         systemPrompt: spec.prompt,
         model: spec.model,
         cwd: spec.cwd,
@@ -161,6 +169,7 @@ export class JobRunner {
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
+        mcpServers: this.toolsFor(job),
         maxTurns: PR_KINDS.includes(job.kind) ? 200 : job.kind === "maintain" ? 80 : 40,
         maxBudgetUsd: PR_KINDS.includes(job.kind) || job.kind === "maintain" ? config.engineerBudgetUsd : config.jobBudgetUsd,
       });
