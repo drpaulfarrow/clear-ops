@@ -38,10 +38,11 @@ primary_region = "lhr"
   method = "GET"
   path = "/health"
 
-# Agents run a coding subprocess with tests; 1 GB was not enough and the machine died.
+# Agents run coding subprocesses that typecheck and test on every change. On one shared core with
+# 2 GB the health check timed out and Telegram polling failed whenever two jobs ran at once.
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "2gb"
+  size = "shared-cpu-4x"
+  memory = "4gb"
 
 # If the process crashes, bring the machine back rather than leaving it stopped.
 [[restart]]
