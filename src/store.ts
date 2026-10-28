@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 
 export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design";
 /**
@@ -16,6 +17,12 @@ export interface Job {
   id: string;
   kind: JobKind;
   target?: JobTarget;
+  /**
+   * What Paul sees for this job everywhere: five words or fewer, chosen by the chief or derived by the
+   * system ("Review: Fly deploy"). Optional only for state written before titles; the store fills it in on load.
+   */
+  title?: string;
+  /** The full brief, unchanged, for the worker. */
   brief: string;
   requestedBy: string;
   /** Where results are posted: the chat, channel or thread the job came from. Defaults to requestedBy. */
@@ -76,6 +83,8 @@ export interface Schedule {
   cron: string;
   timezone: string;
   kind: JobKind;
+  /** The title each run's job gets. Optional only for state written before titles; filled in on load. */
+  title?: string;
   brief: string;
   requestedBy: string;
   replyTo?: string;
@@ -181,6 +190,28 @@ export class Store {
     this.state = fs.existsSync(this.file)
       ? { ...empty(), ...JSON.parse(fs.readFileSync(this.file, "utf8")) }
       : empty();
+    this.migrateTitles();
+  }
+
+  /**
+   * Jobs and schedules stored before titles existed get a short derived one, once, on load. Jobs are
+   * titled oldest first so a review or fix round can take its title from the job it belongs to.
+   */
+  private migrateTitles(): void {
+    let changed = false;
+    const schedules = Object.values(this.state.schedules);
+    for (const s of schedules) {
+      if (s.title?.trim()) continue;
+      s.title = legacyScheduleTitle(s);
+      changed = true;
+    }
+    const jobs = Object.values(this.state.jobs).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const j of jobs) {
+      if (j.title?.trim()) continue;
+      j.title = derivedJobTitle(j, (id) => this.state.jobs[id], jobs, schedules);
+      changed = true;
+    }
+    if (changed) this.save();
   }
 
   private save(): void {
@@ -215,6 +246,8 @@ export class Store {
       status: "queued",
       createdAt: new Date().toISOString(),
     };
+    // A job nobody titled (a scheduled run, a nudge, a caller that passed none) gets a derived one.
+    job.title = extra.title?.trim() || derivedJobTitle(job, (id) => this.state.jobs[id], Object.values(this.state.jobs), Object.values(this.state.schedules));
     this.state.jobs[job.id] = job;
     this.save();
     return job;
@@ -286,7 +319,7 @@ export class Store {
 
   // Schedules
   createSchedule(s: Omit<Schedule, "id" | "createdAt" | "enabled">): Schedule {
-    const schedule: Schedule = { ...s, id: shortId(), createdAt: new Date().toISOString(), enabled: true };
+    const schedule: Schedule = { ...s, title: s.title?.trim() || legacyScheduleTitle(s), id: shortId(), createdAt: new Date().toISOString(), enabled: true };
     this.state.schedules[schedule.id] = schedule;
     this.save();
     return schedule;

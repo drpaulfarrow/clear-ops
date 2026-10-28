@@ -7,6 +7,7 @@ import { MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, SCHEDULE_VER
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
+import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 
 const exec = promisify(execFile);
 
@@ -40,7 +41,7 @@ export class JobRunner {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy"> = {}): Job {
     // Only the executive assistant has permits, and only drafts and holds exist.
     extra = { ...extra };
     if (kind !== "ea") delete extra.permits;
@@ -62,7 +63,7 @@ export class JobRunner {
    * once the deploy is live. `continueFrom` (any job of a paused loop) carries on that loop, same round,
    * with the founder's decision in the brief.
    */
-  startDesignLoop(goal: string, requestedBy: string, replyTo?: string, continueFrom?: string): Job {
+  startDesignLoop(goal: string, requestedBy: string, replyTo?: string, continueFrom?: string, title?: string): Job {
     const prev = continueFrom ? this.store.getJob(continueFrom) : undefined;
     if (continueFrom && !prev?.designLoop) throw new Error(`Job ${continueFrom} is not part of a design loop`);
     if (prev?.designLoop) {
@@ -73,7 +74,8 @@ export class JobRunner {
       this.store.updateJob(prev.designLoop, { designPaused: false });
     }
     if (!prev?.designLoop) {
-      const job = this.store.createJob("design", designBrief(goal, 1), requestedBy, "product", replyTo, { designRound: 1, designGoal: goal });
+      // The loop's first job carries the loop's title; later rounds are "Design round 2: <title>".
+      const job = this.store.createJob("design", designBrief(goal, 1), requestedBy, "product", replyTo, { title: title ?? deriveTitle(goal, "design"), designRound: 1, designGoal: goal });
       this.store.updateJob(job.id, { designLoop: job.id });
       void this.execute(job.id);
       return job;
@@ -86,7 +88,9 @@ export class JobRunner {
       .at(-1) ?? prev;
     const loopGoal = this.store.getJob(prev.designLoop)?.designGoal ?? goal;
     const round = latest.designRound ?? 1;
+    const loopTitle = jobTitle(this.store.getJob(prev.designLoop) ?? latest);
     return this.start("design", designBrief(loopGoal, round, { decision: goal, previous: latest.id, final: latest.designFinal }), requestedBy, "product", replyTo ?? latest.replyTo, {
+      title: designRoundTitle(loopTitle, round, latest.designFinal),
       designLoop: prev.designLoop,
       designRound: round,
       designFinal: latest.designFinal,
@@ -133,9 +137,9 @@ export class JobRunner {
     this.store.updateJob(next.id, { waitingFor: undefined, queuePos: undefined });
     for (const j of rest) this.store.updateJob(j.id, { waitingFor: next.id });
     void this.execute(next.id);
-    const after = finished ? ` now that job ${finished} has finished` : "";
+    const after = finished ? `, now that ${jobRef(this.store.getJob(finished), finished)} has finished` : "";
     await this.messenger
-      .send(next.replyTo ?? next.requestedBy, `Job ${next.id} (${next.kind}) was queued and is starting${after}.`)
+      .send(next.replyTo ?? next.requestedBy, `Starting: ${jobLabel(next)} (was queued)${after}.`)
       .catch(() => undefined);
   }
 
@@ -156,7 +160,7 @@ export class JobRunner {
       const resumed = (job.resumed ?? 0) + 1;
       if (resumed > 3) {
         this.store.updateJob(job.id, { status: "failed", finishedAt: new Date().toISOString(), error: "Interrupted by restarts three times; giving up." });
-        await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${job.id} (${job.kind}) was interrupted by restarts three times and has been stopped. Start it again when things are quiet.`);
+        await this.messenger.send(job.replyTo ?? job.requestedBy, `Stopped: ${jobLabel(job)}. It was interrupted by restarts three times. Start it again when things are quiet.`);
         continue;
       }
       const key = lockKey(job);
@@ -164,12 +168,12 @@ export class JobRunner {
       if (key && holder) {
         // Another job on this repository has already reclaimed it: wait behind it.
         this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: holder, queuePos: this.nextQueuePos() });
-        await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${job.id} (${job.kind}) was interrupted by a restart. It is queued behind job ${holder} and will resume when that finishes.`);
+        await this.messenger.send(job.replyTo ?? job.requestedBy, `Interrupted by a restart: ${jobLabel(job)}. Queued behind ${jobRef(this.store.getJob(holder), holder)}; it resumes when that finishes.`);
         continue;
       }
       if (key) this.holders.set(key, job.id);
       this.store.updateJob(job.id, { status: "queued", resumed });
-      await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${job.id} (${job.kind}) was interrupted by a restart. Resuming it (attempt ${resumed + 1}).`);
+      await this.messenger.send(job.replyTo ?? job.requestedBy, `Interrupted by a restart: ${jobLabel(job)}. Resuming it (attempt ${resumed + 1}).`);
       void this.execute(job.id);
     }
     // A repository nobody reclaimed (its job gave up, or none was running) starts its queue.
@@ -255,9 +259,9 @@ export class JobRunner {
           job.requestedBy,
           job.target,
           job.replyTo,
-          { reviewOf: id, pr },
+          { title: reviewTitle(job), reviewOf: id, pr },
         );
-        chained = `\nMaintainer job ${m.id} started to review and merge.`;
+        chained = `\nStarted ${jobLabel(m)} to review and merge.`;
       }
       // So is the agent-creator's, on the workforce repo. Only an explicit schedule verdict (no code
       // written) skips the maintainer; a missing or garbled verdict still gets a review.
@@ -271,9 +275,9 @@ export class JobRunner {
             job.requestedBy,
             "self",
             job.replyTo,
-            { reviewOf: id, pr: findPrUrl(result.text) },
+            { title: reviewTitle(job), reviewOf: id, pr: findPrUrl(result.text) },
           );
-          chained = `\nMaintainer job ${m.id} started to review and merge.`;
+          chained = `\nStarted ${jobLabel(m)} to review and merge.`;
         }
       }
       // Close the review loop: changes requested on the reviewed job's pull request go back to an
@@ -290,7 +294,7 @@ export class JobRunner {
       }
       await this.messenger.send(
         job.replyTo ?? job.requestedBy,
-        `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
+        `Finished: ${jobLabel(job)}.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
       );
       if (job.kind === "design") await this.sendImages(job, result.text);
       if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
@@ -299,7 +303,7 @@ export class JobRunner {
       this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error });
       // A failed round leaves its loop waiting for Paul rather than stalled for good.
       this.pauseLoop(job.designLoop);
-      await this.messenger.send(job.replyTo ?? job.requestedBy, `Job ${id} (${job.kind}) failed: ${error}`);
+      await this.messenger.send(job.replyTo ?? job.requestedBy, `Failed: ${jobLabel(job)}. ${error}`);
     } finally {
       this.running.delete(id);
       // Success, failure or error: free the repository and start whoever is next in line.
@@ -325,7 +329,7 @@ export class JobRunner {
       // A design loop must not stall silently.
       this.pauseLoop(reviewed.designLoop);
       return reviewed.designLoop
-        ? { chained: "", escalation: `Design loop ${reviewed.designLoop} is paused: the maintainer gave no verdict on ${pr ?? "the round's pull request"}. Tell me to re-review it, or to carry on the loop.` }
+        ? { chained: "", escalation: `Design loop ${this.loopRef(reviewed.designLoop)} is paused: the maintainer gave no verdict on ${pr ?? "the round's pull request"}. Tell me to re-review it, or to carry on the loop.` }
         : { chained: "" };
     }
     if (verdict.outcome === "merged") return reviewed.designLoop ? this.nextDesignRound(reviewed, verdict.pr) : { chained: "" };
@@ -352,10 +356,9 @@ export class JobRunner {
       reviewed.requestedBy,
       target,
       reviewed.replyTo,
-      { pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
+      { title: fixTitle(jobTitle(reviewed), round), pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
     );
-    const queued = fix.waitingFor ? `, queued behind job ${fix.waitingFor}` : "";
-    return { chained: `\nChanges requested on ${url}. Engineer job ${fix.id} started to fix them (round ${round} of ${MAX_FIX_ROUNDS}${queued}); it is re-reviewed automatically.` };
+    return { chained: `\nChanges requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
   }
 
   /**
@@ -371,18 +374,18 @@ export class JobRunner {
       this.pauseLoop(loop);
       return {
         chained: "",
-        escalation: `Design decision for you (loop ${loop}, round ${round}): ${verdict.detail || "see the report above."}\nReply with your choice and I will carry on from there.`,
+        escalation: `Design decision for you on ${this.loopRef(loop)}, round ${round}: ${verdict.detail || "see the report above."}\nReply with your choice and I will carry on from there.`,
       };
     }
     if (job.designFinal || verdict?.outcome === "done") {
       const clean = verdict?.outcome === "done";
       const built = job.designFinal ? MAX_DESIGN_ROUNDS : round - 1;
       const why = clean ? "the customer critiques found no high-impact issues" : "that was the last round";
-      return { chained: `\nDesign loop ${loop} finished after ${built} implemented round${built === 1 ? "" : "s"}: ${why}. The report above is where the site stands now.` };
+      return { chained: `\nDesign loop ${this.loopRef(loop)} finished after ${built} implemented round${built === 1 ? "" : "s"}: ${why}. The report above is where the site stands now.` };
     }
     if (verdict?.outcome !== "spec") {
       this.pauseLoop(loop);
-      return { chained: "", escalation: `Design loop ${loop} is paused: round ${round} ended without a spec or a verdict. Tell me to carry on, or give a steer.` };
+      return { chained: "", escalation: `Design loop ${this.loopRef(loop)} is paused: round ${round} ended without a spec or a verdict. Tell me to carry on, or give a steer.` };
     }
     const eng = this.start(
       "engineer",
@@ -390,10 +393,25 @@ export class JobRunner {
       job.requestedBy,
       "product",
       job.replyTo,
-      { designLoop: loop, designRound: round },
+      { title: buildTitle(this.loopTitle(loop), round), designLoop: loop, designRound: round },
     );
-    const queued = eng.waitingFor ? `, queued behind job ${eng.waitingFor}` : "";
-    return { chained: `\nSpec ready. Engineer job ${eng.id} started to build it (design round ${round} of ${MAX_DESIGN_ROUNDS}${queued}); after the merge and deploy, the designer reviews the live site again.` };
+    return { chained: `\nSpec ready. Started ${jobLabel(eng)} to build it (design round ${round} of ${MAX_DESIGN_ROUNDS}${this.queuedText(eng)}); after the merge and deploy, the designer reviews the live site again.` };
+  }
+
+  /** ", queued behind Fly deploy (16d5d3)" for a job waiting for its repository, otherwise nothing. */
+  private queuedText(job: Job): string {
+    return job.waitingFor ? `, queued behind ${jobRef(this.store.getJob(job.waitingFor), job.waitingFor)}` : "";
+  }
+
+  /** The title of a design loop: its first job's. */
+  private loopTitle(loop: string): string {
+    const first = this.store.getJob(loop);
+    return first ? jobTitle(first) : "Design loop";
+  }
+
+  /** "Customer-ready site (3fa9c1)", for naming a design loop in a message. */
+  private loopRef(loop: string): string {
+    return jobRef(this.store.getJob(loop), loop);
   }
 
   /** Marks a design loop as waiting for Paul, so start_job with continueLoop may carry it on. */
@@ -408,12 +426,13 @@ export class JobRunner {
     const final = round > MAX_DESIGN_ROUNDS;
     const goal = this.store.getJob(loop)?.designGoal ?? "";
     const d = this.start("design", designBrief(goal, round, { merged: pr, final }), reviewed.requestedBy, "product", reviewed.replyTo, {
+      title: designRoundTitle(this.loopTitle(loop), round, final),
       designLoop: loop,
       designRound: round,
       designFinal: final || undefined,
       awaitDeploy: true,
     });
-    return { chained: `\n${pr} merged. Design job ${d.id} will ${final ? "run the closing customer critique" : `start round ${round}`} once the deploy is live.` };
+    return { chained: `\n${pr} merged. ${jobLabel(d)} will ${final ? "run the closing customer critique" : `start round ${round}`} once the deploy is live.` };
   }
 
   /** Shows the founder the images the designer picked, where the channel can carry them. */

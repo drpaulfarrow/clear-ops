@@ -75,7 +75,7 @@ test("a second engineer job on the same repository is queued, then starts when t
   assert.equal(store.getJob(a.id)!.status, "done");
   assert.equal(store.getJob(b.id)!.status, "running");
   assert.equal(store.getJob(b.id)!.waitingFor, undefined);
-  assert.ok(messenger.sent.some((m) => m.text.startsWith(`Job ${b.id} (engineer) was queued and is starting now that job ${a.id} has finished`)));
+  assert.ok(messenger.sent.some((m) => m.text === `Starting: B · engineer · ${b.id} (was queued), now that A (${a.id}) has finished.`));
 });
 
 test("the maintainer review still follows the engineer and does not hold the lock", async () => {
@@ -103,7 +103,7 @@ test("a failed or erroring job still releases the lock to the next in line", asy
   await waitFor(() => started.includes("B"));
   assert.equal(store.getJob(a.id)!.status, "failed");
   assert.equal(store.getJob(b.id)!.status, "running");
-  assert.ok(messenger.sent.some((m) => m.text === `Job ${a.id} (engineer) failed: boom`));
+  assert.ok(messenger.sent.some((m) => m.text === `Failed: A · engineer, workforce · ${a.id}. boom`));
   assert.equal(store.allJobs().filter((j) => j.kind === "maintain").length, 0, "a failed engineer starts no review");
 });
 
@@ -216,7 +216,7 @@ test("on restart two engineering jobs left running on one repository do not both
   const [first, second] = g.started[0] === "A" ? [a, b] : [b, a];
   assert.equal(store.getJob(second.id)!.status, "queued");
   assert.equal(store.getJob(second.id)!.waitingFor, first.id);
-  assert.ok(messenger.sent.some((m) => m.text.includes(`queued behind job ${first.id}`)));
+  assert.ok(messenger.sent.some((m) => m.text.includes(`Queued behind ${first.brief} (${first.id})`)));
   g.finish(g.started[0], "VERDICT: schedule\nnothing to build");
   await waitFor(() => g.started.includes(second.brief));
   assert.equal(store.getJob(second.id)!.status, "running");
@@ -252,8 +252,8 @@ test("the chief's start_job says a job was queued and behind which job; job_stat
     systemPrompt = o.systemPrompt;
     const tools = ops.instance?._registeredTools;
     const call = (name: string, args: unknown) => (tools[name].callback ?? tools[name].handler)(args, {});
-    const r1 = await call("start_job", { kind: "engineer", brief: "First", target: "self" });
-    const r2 = await call("start_job", { kind: "create_agent", brief: "Second", target: "product" });
+    const r1 = await call("start_job", { kind: "engineer", title: "Workforce first", brief: "First", target: "self" });
+    const r2 = await call("start_job", { kind: "create_agent", title: "Outreach agent", brief: "Second", target: "product" });
     const list = await call("job_status", {});
     replies.push(r1.content[0].text, r2.content[0].text, list.content[0].text);
     return { text: "ok", sessionId: "s1" };
@@ -262,8 +262,8 @@ test("the chief's start_job says a job was queued and behind which job; job_stat
   const orch = new Orchestrator(store, messenger, jobs, new Scheduler(store, jobs), runner);
   await orch.handle(FOUNDER, "two self changes please");
   const first = store.allJobs().find((j) => j.brief === "First")!;
-  assert.match(replies[0], new RegExp(`^Started job ${first.id}`));
-  assert.match(replies[1], new RegExp(`^Queued job \\w+ \\(create_agent, on the workforce itself\\): queued behind job ${first.id}.*starts automatically`));
-  assert.match(replies[2], new RegExp(`create_agent queued behind ${first.id} \\(#1 on self\\)`));
+  assert.equal(replies[0], `Started: Workforce first · engineer, workforce · ${first.id}.`);
+  assert.match(replies[1], new RegExp(`^Queued: Outreach agent · create_agent · \\w+, queued behind Workforce first \\(${first.id}\\), the workforce repository.*starts automatically`));
+  assert.match(replies[2], new RegExp(`^Outreach agent · create_agent · \\w+ · queued behind Workforce first \\(${first.id}\\), #1 on self$`, "m"));
   assert.match(systemPrompt, /Queueing is automatic/);
 });

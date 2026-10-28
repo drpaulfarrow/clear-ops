@@ -54,7 +54,7 @@ const SPEC = "Top findings...\nSpec: make the hero say what the exchange does.\n
 test("the loop runs spec, build, review, merge, deploy and critique, capped at the round limit, then reports", async () => {
   const { runs, deployWaits, store, messenger, jobs, settled } = loop(Array.from({ length: MAX_DESIGN_ROUNDS + 2 }, () => SPEC));
   const first = jobs.startDesignLoop("Make the site look like something I can show customers.", FOUNDER, "dc:c:thread-9");
-  await waitFor(() => settled() && messenger.sent.some((m) => m.text.includes(`Design loop ${first.id} finished`)));
+  await waitFor(() => settled() && messenger.sent.some((m) => m.text.includes(`Design loop ${first.title} (${first.id}) finished`)));
 
   const all = store.allJobs();
   const designs = all.filter((j) => j.kind === "design").sort((a, b) => a.designRound! - b.designRound!);
@@ -84,7 +84,7 @@ test("the loop runs spec, build, review, merge, deploy and critique, capped at t
   const designRun = runs.find(isDesigner)!;
   assert.ok(designRun.mcpServers?.design, "the designer gets its screenshot tools");
   assert.deepEqual(designRun.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__design__screenshot", "mcp__design__save_asset"]);
-  const finished = messenger.sent.filter((m) => m.text.includes(`Design loop ${first.id} finished`));
+  const finished = messenger.sent.filter((m) => m.text.includes(`Design loop ${first.title} (${first.id}) finished`));
   assert.equal(finished.length, 1, "the founder gets one closing report");
   assert.match(finished[0].text, /after 3 implemented rounds: that was the last round/);
 });
@@ -95,7 +95,7 @@ test("the loop stops early when the critiques find no high-impact issues", async
   await waitFor(() => settled() && messenger.sent.some((m) => m.text.includes("finished after")));
   assert.equal(store.allJobs().filter((j) => j.kind === "engineer").length, 1);
   assert.equal(store.allJobs().filter((j) => j.kind === "design").length, 2);
-  assert.ok(messenger.sent.some((m) => m.text.includes(`Design loop ${first.id} finished after 1 implemented round: the customer critiques found no high-impact issues`)));
+  assert.ok(messenger.sent.some((m) => m.text.includes(`Design loop ${first.title} (${first.id}) finished after 1 implemented round: the customer critiques found no high-impact issues`)));
 });
 
 test("a decision only Paul can make pauses the loop, shows him only the job's own images, and his answer carries it on", async () => {
@@ -115,7 +115,7 @@ test("a decision only Paul can make pauses the loop, shows him only the job's ow
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith("Design decision for you")));
   const ask = messenger.sent.filter((m) => m.text.startsWith("Design decision for you"));
   assert.equal(ask.length, 1);
-  assert.equal(ask[0].text.split("\n")[0], `Design decision for you (loop ${first.id}, round 1): pick a brand direction, A, B or C.`);
+  assert.equal(ask[0].text.split("\n")[0], `Design decision for you on ${first.title} (${first.id}), round 1: pick a brand direction, A, B or C.`);
   assert.deepEqual(messenger.images, [
     { to: "dc:c:t1", file: path.join(designDir(first.id), "direction-a-desktop.png"), caption: "A: Ledger" },
     { to: "dc:c:t1", file: path.join(designDir(first.id), "direction-b-desktop.png"), caption: "B: Signal" },
@@ -162,11 +162,11 @@ test("a founder-only blocker or a missing verdict pauses the loop and tells Paul
 
   const b = loop([SPEC], ["I looked at it."]);
   const fb = b.jobs.startDesignLoop("Site", FOUNDER);
-  await waitFor(() => b.settled() && b.messenger.sent.some((m) => m.text.startsWith(`Design loop ${fb.id} is paused`)));
+  await waitFor(() => b.settled() && b.messenger.sent.some((m) => m.text.startsWith(`Design loop ${fb.title} (${fb.id}) is paused`)));
 
   const c = loop(["Some thoughts, no verdict."]);
   const fc = c.jobs.startDesignLoop("Site", FOUNDER);
-  await waitFor(() => c.settled() && c.messenger.sent.some((m) => m.text.startsWith(`Design loop ${fc.id} is paused: round 1 ended without a spec`)));
+  await waitFor(() => c.settled() && c.messenger.sent.some((m) => m.text.startsWith(`Design loop ${fc.title} (${fc.id}) is paused: round 1 ended without a spec`)));
   assert.equal(c.store.allJobs().filter((j) => j.kind === "engineer").length, 0);
   for (const [x, first] of [[b, fb], [c, fc]] as const) assert.equal(x.store.getJob(first.id)!.designPaused, true, "a paused loop can be carried on");
   const fa = a.store.allJobs().find((j) => j.kind === "design")!;
@@ -198,7 +198,7 @@ test("a loop's engineer job waits its turn behind the product's running engineer
   const eng = store.allJobs().find((j) => j.kind === "engineer" && j.designLoop)!;
   assert.equal(eng.status, "queued");
   assert.equal(eng.waitingFor, other.id);
-  assert.ok(messenger.sent.some((m) => m.text.includes(`queued behind job ${other.id}`)));
+  assert.ok(messenger.sent.some((m) => m.text.includes(`queued behind Other work (${other.id})`)));
   release();
   await waitFor(() => store.getJob(eng.id)!.status !== "queued");
 });

@@ -6,6 +6,8 @@ You message a bot. A chief-of-staff agent answers quick questions itself and del
 
 While the chief is thinking you see it typing, plus one status line that updates in place with what it is actually doing ("Checking job 39abb7…", "Searching the web: SPUR news…", "Starting an engineer job…") and disappears when the answer arrives. On WhatsApp, which supports neither, you get a single "Working on it." if it takes more than a few seconds.
 
+Every job has a short title of five words or fewer ("Fly deploy", "TollBit research"), and that is how it appears everywhere: the Discord thread, `/jobs`, queue messages and every report, as `Fly deploy · engineer · 16d5d3`. The chief picks it; jobs the workforce starts itself are named after the job they follow ("Review: Fly deploy", "Fix round 2: Fly deploy", "Design round 2: Customer-ready site"), scheduled runs take their schedule's title, and the worker still gets the full brief.
+
 Everything runs on the Claude Agent SDK. Conversation memory persists per phone number; jobs, approvals, schedules and standing notes persist in a JSON store on a volume.
 
 ## What you can say
@@ -50,7 +52,7 @@ Create an API key at the Claude Console and keep it for step 4. The agents run o
 
 ### 2. A chat channel: Telegram, Discord, or both
 
-**Discord (threads per job, like Slack).** At discord.com/developers, New Application, then Bot: Reset Token and copy it into `DISCORD_BOT_TOKEN`; on the same page turn on **Message Content Intent**. Under OAuth2, URL Generator: scope `bot`, permissions Send Messages, Create Public Threads, Send Messages in Threads, Read Message History; open the generated URL and add the bot to your server. Message it once; it replies with your user id for `ALLOWED_DISCORD_IDS`. In Discord, every job the chief starts gets its own thread under your message, and the engineer's report and the maintainer's review land in that thread. Each thread is its own conversation with the chief. DMs to the bot work too.
+**Discord (threads per job, like Slack).** At discord.com/developers, New Application, then Bot: Reset Token and copy it into `DISCORD_BOT_TOKEN`; on the same page turn on **Message Content Intent**. Under OAuth2, URL Generator: scope `bot`, permissions Send Messages, Create Public Threads, Send Messages in Threads, Read Message History; open the generated URL and add the bot to your server. Message it once; it replies with your user id for `ALLOWED_DISCORD_IDS`. In Discord, every job the chief starts gets its own thread under your message, named after the job's title, and the engineer's report and the maintainer's review land in that thread. Each thread is its own conversation with the chief. DMs to the bot work too.
 
 **Telegram (quickest to try).**
 1. In Telegram, message `@BotFather`, send `/newbot`, pick a name and a username. Copy the token into `TELEGRAM_BOT_TOKEN`.
@@ -208,7 +210,7 @@ See `.env.example`. The important ones:
 - A broken session is dropped automatically so the conversation never jams; `/reset` does it by hand.
 - A deploy restarts the service. Jobs that were running are re-queued on start with a note to inspect the working folder and carry on, since the clones live on the volume. After three interruptions a job is stopped and you are told.
 - Reviews close themselves. If the maintainer requests changes on a pull request, an engineer is sent back to fix it on the same branch and the maintainer reviews it again, up to three rounds. You hear about it only if it is still stuck after that, or if the blocker is something only you can do (a secret, a GitHub setting, account access, a product decision), and then once, with exactly what to do. Engineers and the maintainer bring branches up to date with main themselves, by merging, so nobody has to click "Update branch".
-- Only one engineering job (engineer or agent-creator) works on each repository at a time, so two never fight over the same checkout. Ask for another while one is running and it is queued behind it: `/jobs` shows `queued behind <id>`, and it starts by itself, in the order you asked, when the running one finishes or fails. The product and the workforce queue separately, and the queue survives restarts. Research, writing, analysis and the maintainer's reviews never wait.
+- Only one engineering job (engineer or agent-creator) works on each repository at a time, so two never fight over the same checkout. Ask for another while one is running and it is queued behind it: `/jobs` shows `queued behind <title> (<id>)`, and it starts by itself, in the order you asked, when the running one finishes or fails. The product and the workforce queue separately, and the queue survives restarts. Research, writing, analysis and the maintainer's reviews never wait.
 
 ## Development
 ```bash
