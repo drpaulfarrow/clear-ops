@@ -221,6 +221,20 @@ test("the design worker's browser and branch previews never run as root", async 
   assert.match(src("../Dockerfile"), /useradd --system[^\n]* designer/, "the image has the unprivileged designer user");
 });
 
+test("the service never writes, chmods or reads through a path the browser's account controls", () => {
+  const design = src("design.ts");
+  const copy = design.slice(design.indexOf("export function copyScreenshot"), design.indexOf("export const chromiumCapture"));
+  assert.match(copy, /fs\.openSync\(shot, [^)]*O_NOFOLLOW/, "the screenshot is opened without following links");
+  assert.match(copy, /fs\.fstatSync\(fd\)/, "the screenshot is checked through the open descriptor");
+  assert.match(copy, /PNG_SIGNATURE/, "only a PNG is taken back");
+  assert.match(design.slice(design.indexOf("export const chromiumCapture"), design.indexOf("/* ---------- What may be screenshotted")), /copyScreenshot\(shot, r\.out, who\)/, "every capture takes its screenshot back that way");
+  assert.ok(!/copyFileSync/.test(design), "no copy follows a path the browser controls");
+  const preview = design.slice(design.indexOf("export async function previewBranch"), design.indexOf("const TYPES"));
+  assert.ok(!/chmodSync\((tar|app|tmp|shot|profile)\b/.test(design), "nothing inside a designer folder is chmodded by the service");
+  assert.match(preview, /const own = fs\.mkdtempSync\([^;]*\);\s*fs\.chmodSync\(own, 0o700\);\s*const tar = path\.join\(own,/, "the branch archive is written only in a folder the service alone can use");
+  assert.match(preview, /tar -xf - -C/, "the designer unpacks the archive from standard input");
+});
+
 test("the design loop is capped, builds only through engineers, and never merges or skips review", () => {
   const jobs = src("jobs.ts");
   assert.match(src("design.ts"), /export const MAX_DESIGN_ROUNDS = [1-5];/, "design rounds must stay capped at a small number");

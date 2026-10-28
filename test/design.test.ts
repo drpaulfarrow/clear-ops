@@ -326,3 +326,80 @@ test("the browser's account is never root; with no designer user, root refuses t
   d.lockDown([dir, path.join(dir, "missing")]);
   assert.equal(fs.statSync(dir).mode & 0o777, 0o700, "the data folder is closed to other accounts");
 });
+
+/* ---------- The service never trusts what the browser's account leaves behind ---------- */
+
+/** Whether chromiumCapture can run here: root with no designer account rightly refuses to launch. */
+const canLaunch = await d.designIdentity().then(() => true, () => false);
+const launchSkip = canLaunch ? false : "running as root with no designer account, so the browser rightly refuses to launch";
+
+async function captureWithFakeChromium(script: string): Promise<{ err: unknown; out: string }> {
+  const { config } = await import("../src/config.js");
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-fakechrome-"));
+  const fake = path.join(bin, "chromium");
+  fs.writeFileSync(fake, `#!/bin/sh\nfor a in "$@"; do case "$a" in --screenshot=*) shot="\${a#--screenshot=}";; esac; done\n${script}\n`, { mode: 0o755 });
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-out-"));
+  const out = path.join(outDir, "x-desktop.png");
+  const before = config.design.chromiumPath;
+  config.design.chromiumPath = fake;
+  try {
+    await d.chromiumCapture({ url: "https://a.example/", out, width: 10, height: 10, scale: 1, proxy: "http://127.0.0.1:1" });
+    return { err: undefined, out };
+  } catch (err) {
+    return { err, out };
+  } finally {
+    config.design.chromiumPath = before;
+  }
+}
+
+test("a screenshot the browser swaps for a link is refused, and the linked file is never copied", { skip: launchSkip }, async () => {
+  const secret = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-secret-")), "environ");
+  fs.writeFileSync(secret, "\x89PNG\r\n\x1a\nSECRET-MARKER-7731");
+  const { err, out } = await captureWithFakeChromium(`ln -s '${secret}' "$shot"`);
+  assert.match(String(err), /not a plain file/);
+  assert.ok(!fs.existsSync(out) || !fs.readFileSync(out, "utf8").includes("SECRET-MARKER-7731"));
+});
+
+test("a screenshot that is not a PNG, or is hard-linked elsewhere, is refused", { skip: launchSkip }, async () => {
+  const notPng = await captureWithFakeChromium(`printf 'SECRET-MARKER-7731' > "$shot"`);
+  assert.match(String(notPng.err), /not a PNG/);
+  assert.ok(!fs.existsSync(notPng.out));
+  const other = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-secret-")), "f");
+  fs.writeFileSync(other, "\x89PNG\r\n\x1a\nSECRET-MARKER-7731");
+  const linked = await captureWithFakeChromium(`ln '${other}' "$shot"`);
+  assert.match(String(linked.err), /linked elsewhere/);
+  assert.ok(!fs.existsSync(linked.out));
+  const fifo = await captureWithFakeChromium(`mkfifo "$shot"`);
+  assert.match(String(fifo.err), /not a plain file/);
+  const none = await captureWithFakeChromium(`true`);
+  assert.match(String(none.err), /produced no screenshot/);
+});
+
+test("a real PNG from the browser is copied across", { skip: launchSkip }, async () => {
+  const { err, out } = await captureWithFakeChromium(`printf '\\211PNG\\r\\n\\032\\nREST' > "$shot"`);
+  assert.equal(err, undefined);
+  assert.equal(fs.readFileSync(out).subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+});
+
+test("copyScreenshot refuses links, FIFOs, hard links, other owners and non-PNGs, and copies a real PNG", () => {
+  const me = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-copy-"));
+  const secret = path.join(dir, "secret");
+  fs.writeFileSync(secret, "\x89PNG\r\n\x1a\nSECRET-MARKER-7731");
+  const out = path.join(dir, "out.png");
+  const shot = (n: string) => path.join(dir, n);
+  fs.symlinkSync(secret, shot("link.png"));
+  assert.throws(() => d.copyScreenshot(shot("link.png"), out, me), /not a plain file/);
+  fs.linkSync(secret, shot("hard.png"));
+  assert.throws(() => d.copyScreenshot(shot("hard.png"), out, me), /linked elsewhere/);
+  fs.writeFileSync(shot("text.png"), "SECRET-MARKER-7731");
+  assert.throws(() => d.copyScreenshot(shot("text.png"), out, me), /not a PNG/);
+  assert.throws(() => d.copyScreenshot(shot("text.png"), out, { uid: me.uid + 1, gid: me.gid }), /not owned by the browser's account/);
+  fs.mkdirSync(shot("dir.png"));
+  assert.throws(() => d.copyScreenshot(shot("dir.png"), out, me), /not a plain file/);
+  assert.throws(() => d.copyScreenshot(shot("none.png"), out, me), /produced no screenshot/);
+  assert.ok(!fs.existsSync(out), "nothing was copied from a refused screenshot");
+  fs.writeFileSync(shot("real.png"), Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.from("REST")]));
+  d.copyScreenshot(shot("real.png"), out, me);
+  assert.equal(fs.readFileSync(out).toString("hex"), "89504e470d0a1a0a52455354");
+});

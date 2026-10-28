@@ -123,6 +123,46 @@ export function chromiumArgs(r: CaptureRequest, profile: string, shot: string, s
   ];
 }
 
+/** Largest screenshot the service will take back from the browser. */
+export const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Takes the browser's screenshot out of its designer-owned folder without trusting that folder. The
+ * file is opened without following links (and without blocking on a FIFO), checked through the open
+ * descriptor to be a plain, singly linked file owned by the designer, under the size cap and starting
+ * with the PNG signature, and its bytes are read from that descriptor, never from the path again.
+ * Anything else is refused, so a compromised browser cannot make the service copy a secret for it.
+ */
+export function copyScreenshot(shot: string, out: string, who: Identity): void {
+  let fd: number;
+  try {
+    fd = fs.openSync(shot, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    throw new Error(code === "ENOENT" ? "the browser produced no screenshot" : `refusing the browser's screenshot: it is not a plain file (${code})`);
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error("refusing the browser's screenshot: it is not a plain file");
+    if (st.uid !== who.uid) throw new Error("refusing the browser's screenshot: it is not owned by the browser's account");
+    if (st.nlink !== 1) throw new Error("refusing the browser's screenshot: it is linked elsewhere");
+    if (st.size > MAX_SCREENSHOT_BYTES) throw new Error("refusing the browser's screenshot: it is too large");
+    const buf = Buffer.alloc(st.size);
+    let got = 0;
+    while (got < buf.length) {
+      const n = fs.readSync(fd, buf, got, buf.length - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    const bytes = buf.subarray(0, got);
+    if (bytes.length < PNG_SIGNATURE.length || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) throw new Error("refusing the browser's screenshot: it is not a PNG");
+    fs.writeFileSync(out, bytes, { mode: 0o600 });
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /**
  * Headless Chromium from its command line: no npm dependency. It runs as the unprivileged designer
  * with a scrubbed environment, writes only into its own temporary folder (the screenshot is copied
@@ -151,8 +191,7 @@ export const chromiumCapture: Capture = async (r) => {
       console.warn(`[design] Chromium's sandbox would not start, so screenshots run without it from now on (still as ${config.design.user}, behind the proxy): ${stderr.split("\n").find((l) => SANDBOX_FAILURE.test(l))?.trim() ?? ""}`);
       await run(false);
     }
-    if (!fs.existsSync(shot)) throw new Error("the browser produced no screenshot");
-    fs.copyFileSync(shot, r.out);
+    copyScreenshot(shot, r.out, who);
   } finally {
     fs.rmSync(profile, { recursive: true, force: true });
   }
@@ -404,17 +443,22 @@ export async function previewBranch(branch: string): Promise<Served> {
   checkBranch(branch);
   const who = await designIdentity();
   const tmp = designerTemp("clear-design-preview-", who);
-  const tar = path.join(tmp, "src.tar");
+  // The archive lives in a folder only the service can use: root never writes, chmods or reads
+  // through a path inside the designer's folder, where a designer process could plant a link.
+  const own = fs.mkdtempSync(path.join(os.tmpdir(), "clear-design-archive-"));
+  fs.chmodSync(own, 0o700);
+  const tar = path.join(own, "src.tar");
   const app = path.join(tmp, "app");
   const remote = `refs/remotes/origin/${branch}`;
   try {
     await exec("git", ["-C", config.repoDir, "fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`], { timeout: 120_000 });
     await exec("git", ["-C", config.repoDir, "archive", "--format=tar", "-o", tar, remote], { timeout: 60_000 });
-    fs.chmodSync(tar, 0o644);
-    await exec("sh", ["-c", 'mkdir "$1" && tar -xf "$2" -C "$1"', "unpack", app, tar], { timeout: 60_000, uid: who.uid, gid: who.gid });
+    await unpackAsDesigner(tar, app, who);
   } catch (err) {
     fs.rmSync(tmp, { recursive: true, force: true });
     throw err;
+  } finally {
+    fs.rmSync(own, { recursive: true, force: true });
   }
   const port = await freePort();
   const child = spawn(process.execPath, [PREVIEW_ENTRY], {
@@ -436,6 +480,23 @@ export async function previewBranch(branch: string): Promise<Served> {
     throw err;
   }
   return { base: `http://127.0.0.1:${port}`, stop };
+}
+
+/** Unpacks an archive the service opened itself into `app`, as the designer, fed on standard input. */
+async function unpackAsDesigner(tar: string, app: string, who: Identity): Promise<void> {
+  const fd = fs.openSync(tar, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const untar = spawn("sh", ["-c", 'mkdir "$1" && tar -xf - -C "$1"', "unpack", app], { stdio: [fd, "ignore", "pipe"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, uid: who.uid, gid: who.gid });
+      let stderr = "";
+      untar.stderr?.on("data", (c: Buffer) => (stderr = (stderr + c.toString()).slice(-2000)));
+      const timer = setTimeout(() => untar.kill("SIGKILL"), 60_000);
+      untar.on("error", (err) => (clearTimeout(timer), reject(err)));
+      untar.on("close", (code) => (clearTimeout(timer), code === 0 ? resolve() : reject(new Error(`could not unpack the branch: ${stderr.trim() || `exit ${code}`}`))));
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml", ".css": "text/css", ".png": "image/png", ".json": "application/json", ".md": "text/plain; charset=utf-8", ".txt": "text/plain; charset=utf-8" };
