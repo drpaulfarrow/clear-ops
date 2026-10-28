@@ -25,6 +25,12 @@ export interface Job {
   waitingFor?: string;
   /** Position in its target's queue, increasing. Persisted so FIFO order survives a restart. */
   queuePos?: number;
+  /** The pull request this job opened or is fixing (engineering kinds), as a URL or "#<number>". */
+  pr?: string;
+  /** Engineer jobs started automatically to address a review: 1 for the first round, and so on. */
+  fixRound?: number;
+  /** Maintainer jobs started automatically after an engineering job: the id of that job. */
+  reviewOf?: string;
   createdAt: string;
   finishedAt?: string;
   summary?: string;
@@ -108,8 +114,9 @@ export class Store {
   }
 
   // Jobs
-  createJob(kind: JobKind, brief: string, requestedBy: string, target?: JobTarget, replyTo?: string): Job {
+  createJob(kind: JobKind, brief: string, requestedBy: string, target?: JobTarget, replyTo?: string, extra: Partial<Job> = {}): Job {
     const job: Job = {
+      ...extra,
       id: shortId(),
       kind,
       target,
