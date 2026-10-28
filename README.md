@@ -34,6 +34,7 @@ Prep me for my 10am.
 connect Google   /google   /google disconnect
 show job 93137e
 /jobs   /pending   /reset   /help   /uploads
+/resume   retry 3552e7
 YES 1f3a9c
 ```
 
@@ -214,6 +215,7 @@ See `.env.example`. The important ones:
 - A deploy restarts the service. Jobs that were running are re-queued on start with a note to inspect the working folder and carry on, since the clones live on the volume. After three interruptions a job is stopped and you are told.
 - Reviews close themselves. If the maintainer requests changes on a pull request, an engineer is sent back to fix it on the same branch and the maintainer reviews it again, up to three rounds. You hear about it only if it is still stuck after that, or if the blocker is something only you can do (a secret, a GitHub setting, account access, a product decision), and then once, with exactly what to do. Engineers and the maintainer bring branches up to date with main themselves, by merging, so nobody has to click "Update branch".
 - Only one engineering job (engineer or agent-creator) works on each repository at a time, so two never fight over the same checkout. Ask for another while one is running and it is queued behind it: `/jobs` shows `queued behind <title> (<id>)`, and it starts by itself, in the order you asked, when the running one finishes or fails. The product and the workforce queue separately, and the queue survives restarts. Research, writing, analysis and the maintainer's reviews never wait.
+- A job that ends in an API or SDK error instead of real work (no Anthropic credit, a rejected API key, rate limits or overload after the retries, an execution error, or no output at all) is recorded as failed, never done, with the reason in `/jobs` (`failed: out of Anthropic credit`), in job_status and in its saved output. Nothing follows a failed job: no review, no fix round, no "Finished". You get one short message saying which job failed, why and what to do; when an outage fails several jobs at once they come in a single message, and more of the same within 15 minutes are gathered into one follow-up. A credit or key failure also pauses both engineering queues, so queued jobs are not burned one after another (`/jobs` shows `held until /resume`). Once you have topped up or fixed the key, send `/resume` (or tell the chief): the pause lifts, the jobs that failed rerun under the same ids, and the queues start again. `retry <id>` reruns one failed job.
 
 ## Development
 ```bash
