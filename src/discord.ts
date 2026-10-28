@@ -1,4 +1,4 @@
-import { ChannelType, Client, GatewayIntentBits, Partials, type Message, type TextBasedChannel } from "discord.js";
+import { ChannelType, Client, GatewayIntentBits, Partials, ThreadAutoArchiveDuration, type Message, type TextBasedChannel } from "discord.js";
 import { config } from "./config.js";
 import { chunk, type Messenger } from "./whatsapp.js";
 import type { HandleContext } from "./orchestrator.js";
@@ -11,6 +11,17 @@ export const dcUser = (id: string) => `${DC_USER}${id}`;
 export const dcChannel = (id: string) => `${DC_CHANNEL}${id}`;
 
 const DISCORD_MAX = 1900; // Discord's limit is 2000 characters per message
+
+/**
+ * How long a quiet job thread stays in the channel's thread list. A day hid threads Paul still
+ * needed (a queued engineering job, a review the next morning, a design loop waiting on a deploy),
+ * so a week. An archived thread is still reachable, and posting to it reopens it.
+ */
+export const JOB_THREAD_ARCHIVE_MINUTES = ThreadAutoArchiveDuration.OneWeek;
+/** How many message ids we remember as already carrying a job thread. */
+const CLAIMED_MAX = 500;
+
+const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** The fields of a Discord attachment we use. */
 export interface DiscordFile {
@@ -36,10 +47,22 @@ export function discordAttachment(f: DiscordFile, fetchImpl: typeof fetch = fetc
   };
 }
 
+/** The parts of a channel that opening a job thread uses (a text channel, or a thread inside one). */
+interface ThreadHome {
+  type: ChannelType;
+  isThread?: () => boolean;
+  parent?: ThreadHome | null;
+  messages: { fetch(id: string): Promise<{ hasThread: boolean; startThread(o: { name: string; autoArchiveDuration: ThreadAutoArchiveDuration; reason?: string }): Promise<{ id: string }> }> };
+  threads: { create(o: { name: string; autoArchiveDuration: ThreadAutoArchiveDuration; type: ChannelType.PublicThread; reason?: string }): Promise<{ id: string }> };
+}
+
 /** Sends to a channel, thread or user through the Discord gateway client, and opens job threads. */
 export class DiscordMessenger implements Messenger {
   /** Status messages that may still be edited or deleted, by handle (the message id). */
   private editable = new Map<string, { edit: (t: string) => Promise<unknown>; delete: () => Promise<unknown> }>();
+
+  /** Message ids that already carry a job thread. */
+  private claimed = new Set<string>();
 
   constructor(private readonly client: Client) {}
 
@@ -85,13 +108,42 @@ export class DiscordMessenger implements Messenger {
     for (const part of chunk(text, DISCORD_MAX)) await target.send(part);
   }
 
-  async openThread(replyTo: string, messageId: string, name: string): Promise<string | undefined> {
+  /**
+   * Opens a thread for one job and returns its address, or undefined where Discord has no threads
+   * (DMs, group DMs, forum or voice channels). Discord allows one thread per message, so only the
+   * first job started from a message gets a thread under it; every other job (a batch from one
+   * message, a message that already has a thread, a job started from inside a thread) gets a
+   * standalone thread in the text channel, named after the job. Failures to thread under the
+   * message are logged and fall back to a standalone thread; failure to open any thread throws.
+   */
+  async openThread(replyTo: string, messageId: string | undefined, name: string): Promise<string | undefined> {
     if (!replyTo.startsWith(DC_CHANNEL)) return undefined;
-    const channel = await this.client.channels.fetch(replyTo.slice(DC_CHANNEL.length));
-    if (!channel || channel.type !== ChannelType.GuildText) return undefined; // already a thread, or a DM
-    const message = await channel.messages.fetch(messageId);
-    const thread = await message.startThread({ name: name.slice(0, 100), autoArchiveDuration: 1440 });
+    const channel = (await this.client.channels.fetch(replyTo.slice(DC_CHANNEL.length))) as ThreadHome | null;
+    if (!channel) return undefined;
+    const fromThread = channel.isThread?.() ?? false;
+    const home = fromThread ? channel.parent : channel;
+    if (!home || home.type !== ChannelType.GuildText) return undefined; // a DM, or a thread under a forum or announcement channel
+    const threadName = name.trim().slice(0, 100) || "Job";
+    if (!fromThread && messageId && !this.claimed.has(messageId)) {
+      this.claim(messageId);
+      try {
+        const message = await home.messages.fetch(messageId);
+        if (!message.hasThread) {
+          const thread = await message.startThread({ name: threadName, autoArchiveDuration: JOB_THREAD_ARCHIVE_MINUTES, reason: "Clear Ops job" });
+          return dcChannel(thread.id);
+        }
+      } catch (err) {
+        console.warn(`discord: could not open "${threadName}" under message ${messageId}, opening a standalone thread instead: ${errText(err)}`);
+      }
+    }
+    const thread = await home.threads.create({ name: threadName, autoArchiveDuration: JOB_THREAD_ARCHIVE_MINUTES, type: ChannelType.PublicThread, reason: "Clear Ops job" });
     return dcChannel(thread.id);
+  }
+
+  /** Remembers a message as taken (before any await, so parallel start_job calls cannot both use it). */
+  private claim(messageId: string): void {
+    this.claimed.add(messageId);
+    if (this.claimed.size > CLAIMED_MAX) this.claimed.delete(this.claimed.values().next().value as string);
   }
 
   private async resolve(to: string): Promise<{ send: (text: string) => Promise<unknown> }> {
@@ -102,6 +154,10 @@ export class DiscordMessenger implements Messenger {
     const id = to.startsWith(DC_CHANNEL) ? to.slice(DC_CHANNEL.length) : to;
     const channel = await this.client.channels.fetch(id);
     if (!channel || !channel.isTextBased() || !("send" in channel)) throw new Error(`Discord channel ${id} cannot receive messages`);
+    // A job thread that went quiet for a week is archived; reopen it so its next report lands there.
+    if (channel.isThread() && channel.archived && !channel.locked) {
+      await channel.setArchived(false, "Clear Ops job report").catch((err) => console.warn(`discord: could not reopen thread ${id}: ${errText(err)}`));
+    }
     return channel as TextBasedChannel & { send: (text: string) => Promise<unknown> };
   }
 }

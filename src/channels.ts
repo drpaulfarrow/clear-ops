@@ -1,5 +1,11 @@
 import type { Messenger } from "./whatsapp.js";
 
+/** How to point Paul at a conversation in chat: a clickable mention for a Discord channel or thread, else undefined. */
+export function threadMention(address: string): string | undefined {
+  const id = address.match(/^dc:c:(\d+)$/)?.[1];
+  return id ? `<#${id}>` : undefined;
+}
+
 /**
  * One messenger that routes by address prefix, so the orchestrator never knows which channel a
  * conversation lives on. "tg:" goes to Telegram, "dc:" to Discord, anything else to WhatsApp.
@@ -18,7 +24,7 @@ export class RouterMessenger implements Messenger {
     await this.pick(to).send(to, text);
   }
 
-  async openThread(replyTo: string, messageId: string, name: string): Promise<string | undefined> {
+  async openThread(replyTo: string, messageId: string | undefined, name: string): Promise<string | undefined> {
     const m = this.pick(replyTo);
     return m.openThread ? m.openThread(replyTo, messageId, name) : undefined;
   }
