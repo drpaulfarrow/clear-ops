@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 
-export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent";
+export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "design";
 /** Which codebase an engineering job works in: the product, or this workforce itself. */
 export type JobTarget = "product" | "self";
 export type JobStatus = "queued" | "running" | "done" | "failed";
@@ -31,6 +31,18 @@ export interface Job {
   fixRound?: number;
   /** Maintainer jobs started automatically after an engineering job: the id of that job. */
   reviewOf?: string;
+  /**
+   * Design loop: the id of the loop's first design job. Set on every design, engineer and fix job the
+   * loop starts, so a merge leads to the next round. designRound counts from 1.
+   */
+  designLoop?: string;
+  designRound?: number;
+  /** The founder's goal for the loop, on the loop's first design job. */
+  designGoal?: string;
+  /** The loop's closing critique: report to the founder, start no more engineering. */
+  designFinal?: boolean;
+  /** A design round that must wait for the product's deploy of the merge before it looks. */
+  awaitDeploy?: boolean;
   createdAt: string;
   finishedAt?: string;
   summary?: string;

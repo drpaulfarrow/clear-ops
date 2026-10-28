@@ -160,3 +160,49 @@ test("the review loop is capped and goes back to an engineer, never straight to 
   assert.match(jobs, /if \(round > MAX_FIX_ROUNDS\)/);
   assert.match(jobs, /private afterReview[\s\S]*?this\.start\(\s*"engineer"/, "a requested change goes to an engineer, who opens no merge");
 });
+
+/* ---------- The design worker and its loop (extends the rules above, weakens none) ---------- */
+
+test("the design worker is read-only plus its own scoped tools: no Edit, Write, Bash, merging or sending", async () => {
+  const { workerSpec, PR_KINDS } = await import("../src/agents.js");
+  const { lockKey } = await import("../src/jobs.js");
+  const { DESIGN_TOOLS } = await import("../src/design.js");
+  for (const target of ["product", "self"] as const) {
+    const s = workerSpec("design", target);
+    const allowed = new Set(["WebSearch", "WebFetch", "Read", "Glob", "Grep", ...DESIGN_TOOLS]);
+    for (const t of s.allowedTools) assert.ok(allowed.has(t), `design must not be allowed ${t}`);
+    for (const t of s.tools ?? []) assert.ok(["WebSearch", "WebFetch", "Read", "Glob", "Grep"].includes(t), `design must not see built-in ${t}`);
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops__)/.test(t)), "design gets no Edit, Write, Bash or the chief's tools");
+    assert.match(s.prompt, /never edit the repositories, open or merge pull requests, send email or messages, post publicly, sign anything or spend money/);
+    assert.match(s.prompt, /not production code/);
+    assert.ok(!s.prompt.includes("This task is on the workforce itself"), "design never works on the workforce as an engineer");
+  }
+  assert.ok(!PR_KINDS.includes("design"), "design opens no pull requests");
+  assert.equal(lockKey({ kind: "design", target: "product" }), undefined, "design never holds the engineering lock");
+  const server = workerSpec("design").perJob!("inv001").mcpServers!.design as any;
+  assert.deepEqual(Object.keys(server.instance._registeredTools).sort(), ["save_asset", "screenshot"], "the design server has no tool that sends, posts, signs or pays");
+});
+
+test("the design worker's browser can never be pointed at local files or the private network", async () => {
+  const { checkPublicUrl, takeScreenshots, saveAsset } = await import("../src/design.js");
+  for (const bad of ["file:///proc/self/environ", "http://127.0.0.1:8080/", "http://localhost/", "http://169.254.169.254/", "http://[::1]/", "http://x.internal/"]) {
+    await assert.rejects(checkPublicUrl(bad, async () => ["93.184.216.34"]), `${bad} must be refused`);
+  }
+  await assert.rejects(takeScreenshots("inv002", { url: "file:///etc/passwd" }, { capture: async () => assert.fail("must not capture") }));
+  assert.throws(() => saveAsset("inv002", "../../state.json", "{}"), "assets stay in the job's folder");
+  const design = src("design.ts");
+  assert.match(design, /env: \{ PATH: process\.env\.PATH \?\? "\/usr\/bin:\/bin", HOME: profile \}/, "the browser runs with a scrubbed environment");
+  assert.match(design, /env: \{ PATH: process\.env\.PATH \?\? "\/usr\/bin:\/bin", HOME: tmp, HOST: "127\.0\.0\.1"/, "branch previews run with a scrubbed environment on loopback");
+});
+
+test("the design loop is capped, builds only through engineers, and never merges or skips review", () => {
+  const jobs = src("jobs.ts");
+  assert.match(src("design.ts"), /export const MAX_DESIGN_ROUNDS = [1-5];/, "design rounds must stay capped at a small number");
+  const after = jobs.slice(jobs.indexOf("private afterDesign"), jobs.indexOf("private nextDesignRound"));
+  assert.match(after, /this\.start\(\s*"engineer"/, "a design spec is built by an engineer, whose pull request the maintainer reviews");
+  assert.ok(!/this\.start\(\s*"maintain"/.test(after), "the design loop never starts a review or merge itself");
+  const next = jobs.slice(jobs.indexOf("private nextDesignRound"), jobs.indexOf("private async sendImages"));
+  assert.match(next, /const final = round > MAX_DESIGN_ROUNDS;/);
+  assert.match(jobs, /if \(verdict\.outcome === "merged"\) return reviewed\.designLoop \? this\.nextDesignRound/, "a new round starts only after the maintainer merged");
+  assert.match(jobs, /if \(job\.designFinal \|\| verdict\?\.outcome === "done"\)/, "the closing round starts no more engineering");
+});

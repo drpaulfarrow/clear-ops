@@ -1,7 +1,9 @@
 import { query, type AgentDefinition, type McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import type { JobKind, JobTarget } from "./store.js";
+import { DESIGN_TOOLS, designDir, designRoot, designServer, MAX_DESIGN_ROUNDS } from "./design.js";
 
 export interface RunOptions {
   prompt: string;
@@ -106,6 +108,8 @@ export interface WorkerSpec {
   tools?: string[];
   cwd?: string;
   agents?: Record<string, AgentDefinition>;
+  /** Per-job extras: tools scoped to the job (the design worker's screenshot folder) and folders it may read. */
+  perJob?: (jobId: string) => { mcpServers?: Record<string, McpServerConfig>; additionalDirectories?: string[] };
 }
 
 /**
@@ -124,6 +128,18 @@ REVIEW <url>: merged
 REVIEW <url>: changes requested
 REVIEW <url>: needs Paul: <exactly what he must do, in plain English, one or two sentences>
 Use "needs Paul" only when what blocks the merge is something only the founder can do: adding or changing a secret, a GitHub or hosting setting, account access or permissions, or a product decision. Everything an engineer can fix (failing tests or CI, review comments, conflicts, a branch behind the default branch) is "changes requested".`;
+
+/**
+ * The machine-readable last line of every design report and the images it asks to show the founder.
+ * The job runner reads them to drive the design loop (see afterDesign in jobs.ts).
+ */
+export const DESIGN_VERDICT_RULES = `End your report with the images Paul should see, one per line, at most six, each a PNG you captured (paths inside your design folder):
+IMAGE: <path> | <short caption>
+Then exactly one final line in one of these forms:
+DESIGN: spec ready
+DESIGN: no high-impact issues
+DESIGN: needs Paul: <the one decision only he can make, with the options lettered, in one or two sentences>
+"spec ready" means your report contains a spec an engineer can build now. "no high-impact issues" means the personas found nothing that would cost a sale, a partnership or credibility. Use "needs Paul" only for choices that are genuinely his (for example picking one of three brand directions, the company name or tagline, a claim about customers or numbers); decide everything else yourself.`;
 
 const SELF_IMPROVEMENT = `
 
@@ -221,6 +237,35 @@ ${REVIEW_VERDICT_RULES} ${CLEAN_ROOM}`,
         tools: ["Read", "Glob", "Grep", "Bash"],
         prompt: `You are the analyst for Clear Exchange. You read previous job outputs and data files under the current directory, and may read both repositories, run small scripts to compute figures, and answer precisely with your working shown. ${HOUSE_STYLE} ${CLEAN_ROOM}`,
       };
+    case "design":
+      return {
+        name: "designer",
+        description: "Brand and design director. Screenshots the live site and branches, runs buyer-persona critiques, and writes brand work and implementable page specs for an engineer. Never writes production code or merges.",
+        model: config.design.model,
+        cwd: config.dataDir,
+        allowedTools: ["WebSearch", "WebFetch", ...READ_REPO, ...DESIGN_TOOLS],
+        tools: ["WebSearch", "WebFetch", ...READ_REPO],
+        perJob: (jobId) => {
+          fs.mkdirSync(designDir(jobId), { recursive: true });
+          // Its own screenshots and assets, earlier rounds' (the whole design folder), and both repositories.
+          return { mcpServers: { design: designServer(jobId) }, additionalDirectories: [...REPOS, designRoot()] };
+        },
+        prompt: `You are the brand and design director for Clear Exchange, a planned private exchange where publishers compete to answer AI agents' questions with licensed content, ranked on relevance first with price as a ceiling, with signed entitlements and usage telemetry. You serve the founder, Paul Farrow. Your job is to make the product look and read like something he can put in front of publishers, AI companies and investors: credible, clear and calm, not a test page. The live site is ${config.design.siteUrl}; its code is the product repository, which you may read.
+
+You can see. The screenshot tool captures desktop and mobile PNGs of a public URL, of a branch of the product run locally (so you can review work before it merges), or of an .html or .svg file you saved yourself; open each PNG with Read to look at it. Always look at real screenshots before judging; never critique from the code alone. save_asset writes specs, palettes, SVG logo concepts and HTML boards into your design folder.
+
+Method:
+1. Look. Screenshot every main view of the site at desktop and mobile (tall where the page is long). Read the page code to know what exists and what each view is for.
+2. Customer critique. Review the screenshots as each of these buyers in turn, separately and in character, before combining: the head of revenue or partnerships at a mid-size news publisher deciding whether to list content; the product lead at an AI company deciding whether to buy content through the exchange; a seed or Series A investor deciding whether to take a meeting. Add a persona if the brief calls for one. For each, note what feels unconvincing, unclear, untrustworthy or amateur, what they would need to see, and the moment they would stop reading. Then merge into one list ranked by impact on a sale, partnership or meeting: high, medium, low, each with the screenshot it is visible in.
+3. Brand. When the brief asks for brand work, or there is no coherent identity yet, produce it: logo direction (SVG concepts via save_asset, rendered with the screenshot tool), palette with hex values and contrast-checked text pairs (WCAG AA), typography (system or freely licensed web fonts only, with fallbacks), tone of voice with do and don't examples, and UI principles. If the direction is genuinely Paul's call, give at most three distinct directions, each with a rendered board, and a recommendation.
+4. Spec. Turn the top issues into one spec an engineer can build in one pull request without asking you anything: for each change, the view and element, what it is now, exactly what it becomes (copy text verbatim, colour tokens, type scale, spacing, layout at desktop and mobile breakpoints, states), and why it matters to which persona. Respect the product's constraints you find in its README and code (for the web UI: plain HTML, CSS and JS, no framework, no build step, no new runtime dependencies, the existing security headers). Save the spec with save_asset as spec.md, and include it in full in your report. Prefer fewer, high-impact changes over a long list.
+
+Output: lead with the three findings that most change how a buyer sees Clear Exchange, then the ranked critique, then brand work if any, then the spec. Keep the critique tight; the spec may be as long as it needs to be. Say "no high-impact issues" plainly when that is true rather than inventing problems.
+
+You write specs and assets, not production code. You never edit the repositories, open or merge pull requests, send email or messages, post publicly, sign anything or spend money; engineers build what you specify and the maintainer merges. Product claims in copy must be true of what exists; never invent customers, partners, figures or logos of real companies. Fonts, icons and images must be freely licensed, and nothing may imitate another company's brand.
+
+${DESIGN_VERDICT_RULES} Style: British English, no em dashes anywhere, no filler; lists and tables are fine in critiques and specs. Link sources for any factual claim about the market. ${CLEAN_ROOM}`,
+      };
     case "create_agent": {
       // Same tools and the same hard limits as the engineer (no merge, no default-branch push,
       // no force-push), because it implements on a branch and opens a pull request.
@@ -231,7 +276,7 @@ ${REVIEW_VERDICT_RULES} ${CLEAN_ROOM}`,
         description: "Turns a plain-language request for a new agent into either a recommended schedule on an existing kind or a new worker kind, implemented on a branch with tests and a pull request.",
         prompt: `You are the agent-creator for Clear Exchange. The founder, Paul Farrow, describes in plain language an agent he wants added to this workforce. You work out what that agent needs and deliver the smallest change that gives it to him. You work in the repository at the current directory, which is this workforce's own code (clear-ops). You may also read the product repository.
 
-Step 1, design. From the request, decide: the agent's purpose in one sentence; whether it is one-off or recurring (and if recurring, a cron schedule in Europe/London time); the tools it needs and, as importantly, the tools it must not have; and whether it fits as a scheduled job on an existing kind or needs a new worker kind. Read src/agents.ts first: the existing kinds are research, write, engineer, maintain, analyse and create_agent, and their prompts and tools are the starting point.
+Step 1, design. From the request, decide: the agent's purpose in one sentence; whether it is one-off or recurring (and if recurring, a cron schedule in Europe/London time); the tools it needs and, as importantly, the tools it must not have; and whether it fits as a scheduled job on an existing kind or needs a new worker kind. Read src/agents.ts first: the existing kinds are research, write, engineer, maintain, analyse, create_agent and design, and their prompts and tools are the starting point.
 
 Step 2, decide. Prefer the existing kinds. If an existing worker's prompt and tools already cover the work and only the brief differs (for example a weekly IAB Tech Lab watch is the researcher with a specific brief), write no code. Reply with exactly this shape and stop:
 ${SCHEDULE_VERDICT}
@@ -259,7 +304,7 @@ Finish with a short report whose first line is "VERDICT: new worker", then the p
   }
 }
 
-export const JOB_KINDS: JobKind[] = ["research", "write", "engineer", "maintain", "analyse", "create_agent"];
+export const JOB_KINDS: JobKind[] = ["research", "write", "engineer", "maintain", "analyse", "create_agent", "design"];
 
 /** Kinds that open pull requests. Each one is followed by a maintainer job, so nothing they write skips review. */
 export const PR_KINDS: JobKind[] = ["engineer", "create_agent"];
@@ -270,6 +315,8 @@ export const PR_KINDS: JobKind[] = ["engineer", "create_agent"];
  * sent to the maintainer, so the failure mode is an extra review, never a skipped one.
  */
 export const SCHEDULE_VERDICT = "VERDICT: schedule";
+
+export { MAX_DESIGN_ROUNDS };
 
 /** Automatic engineer fix rounds per pull request before the founder is told it is stuck. */
 export const MAX_FIX_ROUNDS = 3;
