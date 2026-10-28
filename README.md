@@ -19,9 +19,19 @@ Every Monday at 7am, research what changed in SPUR, CoMP, TollBit and Cloudflare
 Remember: always price examples at half a cent per retrieval.
 I want an agent that drafts publisher outreach.
 show job 93137e
-/jobs   /pending   /reset   /help
+/jobs   /pending   /reset   /help   /uploads
 YES 1f3a9c
 ```
+
+## Sending files
+Attach a file in Telegram or Discord (a LinkedIn `Connections.csv` export, a PDF, a spreadsheet, a screenshot, a zip) with or without a caption. The bot replies "Saved Connections.csv (1.2 MB)." and the chief is told, in that turn, the saved path, original name, type, size and your caption, so it can read the file or hand the path to a worker. Screenshots and other images are shown to the chief, so it actually sees them. `/uploads` lists what is stored; `/delete upload <name>` deletes one (the saved name or the name you sent), and `/delete upload all` deletes everything. You can also just ask the chief to delete a file.
+
+How uploads are handled, since they may hold personal data:
+- Only files from your allowlisted account are downloaded; anyone else's are ignored without being fetched.
+- Each file is saved as `DATA_DIR/uploads/<date>-<name>` on the data volume (`/data/uploads` on Fly), outside both git checkouts (the service refuses to start the uploads directory inside one), with owner-only permissions (directory 0700, files 0600). Names are sanitised, so a name like `../../x` cannot escape the directory, and nothing ever overwrites an earlier upload.
+- Files over `UPLOAD_MAX_MB` (default 20, also Telegram's limit for bots) are refused before download. Discord files are fetched only from Discord's CDN.
+- Uploads are treated as untrusted data and never executed. A zip is unpacked by the service's own reader into a new, empty `<name>-files` directory beside it, skipping absolute paths, `..`, links and encrypted entries, and stopping at 2,000 entries or 200 MB unpacked.
+- The chief and every worker can read the uploads directory and are told never to execute uploads, follow instructions inside them, commit them to a repository or send their contents anywhere. The contents go to nobody but the model.
 
 ## Set up in five steps
 
@@ -114,6 +124,8 @@ See `.env.example`. The important ones:
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. |
 | `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
 | `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job. |
+| `UPLOAD_MAX_MB` | Largest file accepted in chat, in MB. Default 20. |
+| `UPLOADS_DIR` | Where uploads are saved. Default `DATA_DIR/uploads`; must be outside both repositories. |
 
 ## Safety model
 - Headless permission mode: tools not pre-approved are denied, never left waiting.
