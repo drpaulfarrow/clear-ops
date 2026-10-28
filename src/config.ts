@@ -6,6 +6,12 @@ function req(name: string): string {
   return v;
 }
 
+/** A positive number from the environment, or the default when it is unset, zero or not a number. */
+function positive(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export type Channel = "telegram" | "discord" | "whatsapp";
 
 const channels = (process.env.CHANNELS ?? process.env.CHANNEL ?? "telegram")
@@ -101,6 +107,10 @@ export const config = {
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */
   deepResearchBudgetUsd: Number(process.env.DEEP_RESEARCH_BUDGET_USD ?? 20),
+  /** Minutes a running job may show no activity from its worker before it is stopped as stalled. */
+  jobStallMinutes: positive(process.env.JOB_STALL_MINUTES, 30),
+  /** The longest any job may run, in minutes, before it is stopped. */
+  jobMaxRuntimeMinutes: positive(process.env.JOB_MAX_RUNTIME_MINUTES, 240),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */
   maxMessageChars: 3900,
 };

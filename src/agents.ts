@@ -27,6 +27,13 @@ export interface RunOptions {
   additionalDirectories?: string[];
   /** Called for each tool the agent calls (top level only), so the founder can see what it is doing. */
   onToolUse?: (name: string, input: Record<string, unknown>) => void;
+  /**
+   * The heartbeat: called for every message the agent produces (its own and its subagents'), so the
+   * job runner can tell a working job from a stalled one. Must be cheap; it is called often.
+   */
+  onActivity?: () => void;
+  /** Aborting it stops the run and its process: a stalled, timed-out or cancelled job. */
+  abortController?: AbortController;
 }
 
 export interface RunResult {
@@ -66,6 +73,7 @@ export const sdkRunner: AgentRunner = async (o) => {
         agents: o.agents,
         maxTurns: o.maxTurns,
         maxBudgetUsd: o.maxBudgetUsd,
+        abortController: o.abortController,
         additionalDirectories: o.additionalDirectories ?? readableDirs(),
         // Headless: anything not pre-approved is denied rather than left waiting for a prompt.
         permissionMode: "dontAsk",
@@ -77,6 +85,13 @@ export const sdkRunner: AgentRunner = async (o) => {
         },
       },
     })) {
+      if (o.onActivity) {
+        try {
+          o.onActivity();
+        } catch {
+          // A heartbeat must never break the run.
+        }
+      }
       if (message.type === "assistant" && message.error && !message.parent_tool_use_id) sdkError = message.error;
       if (message.type === "assistant" && o.onToolUse && !message.parent_tool_use_id) {
         for (const block of message.message.content) {

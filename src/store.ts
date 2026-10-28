@@ -63,6 +63,18 @@ export interface Job {
   /** Research jobs: "deep" gets more turns and budget and writes a long, structured report. */
   depth?: "standard" | "deep";
   createdAt: string;
+  /** When the current attempt's worker started (after any wait for a deploy). */
+  startedAt?: string;
+  /**
+   * The worker's heartbeat: when it last did anything (a message, a tool call, a result). Written at
+   * most once a minute; the job runner holds the exact time in memory while the worker is alive.
+   */
+  lastActivityAt?: string;
+  /**
+   * An engineering job that was stopped (stalled, over its maximum runtime, or cancelled): the branch
+   * it was on and the stash holding its uncommitted work, so a retry carries on and nothing is lost.
+   */
+  savedWork?: SavedWork;
   finishedAt?: string;
   summary?: string;
   outputPath?: string;
@@ -73,6 +85,16 @@ export interface Job {
    * overload, no output) or threw. A failed job did no work, and nothing follows it automatically.
    */
   failure?: FailureKind;
+}
+
+/** Where a stopped engineering job's work was kept. */
+export interface SavedWork {
+  /** The checkout it worked in. */
+  dir: string;
+  /** The branch checked out when it stopped. */
+  branch?: string;
+  /** The stash message, when there was uncommitted work to keep. */
+  stash?: string;
 }
 
 /**
