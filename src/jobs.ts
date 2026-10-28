@@ -7,6 +7,7 @@ import { MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, SCHEDULE_VER
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
+import { shortText, splitReport } from "./messages.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 
 const exec = promisify(execFile);
@@ -234,76 +235,77 @@ export class JobRunner {
         maxTurns: PR_KINDS.includes(job.kind) ? 200 : job.kind === "maintain" || job.kind === "design" ? 80 : 40,
         maxBudgetUsd: PR_KINDS.includes(job.kind) || job.kind === "maintain" ? config.engineerBudgetUsd : job.kind === "design" ? config.design.budgetUsd : config.jobBudgetUsd,
       });
-      const outputPath = this.store.writeOutput(id, result.text);
-      const summary = firstLines(result.text, 1200);
+      // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
+      const { report, message } = splitReport(result.text);
+      const outputPath = this.store.writeOutput(id, report);
       this.store.updateJob(id, {
         status: "done",
         finishedAt: new Date().toISOString(),
-        summary,
+        summary: message,
         outputPath,
         costUsd: result.costUsd,
       });
-      const cost = result.costUsd != null ? ` Cost $${result.costUsd.toFixed(2)}.` : "";
       // An engineer's pull request is reviewed by the maintainer without anyone asking. The
       // maintainer is not an engineering kind, so it runs at once and never waits for the lock.
       let chained = "";
       let escalation: string | undefined;
       if (job.kind === "engineer") {
         // A fix round already knows its pull request; a fresh job's is read from its report.
-        const pr = job.pr ?? findPrUrl(result.text);
+        const pr = job.pr ?? findPrUrl(report);
         if (pr && !job.pr) this.store.updateJob(id, { pr });
         const which = pr ? `the pull request ${pr}, which the engineer just ${job.fixRound ? "updated to address your last review" : "opened for this task"}` : "the pull request just opened by the engineer for this task";
         const m = this.start(
           "maintain",
-          `Review ${which}, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${result.text}`,
+          `Review ${which}, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${report}`,
           job.requestedBy,
           job.target,
           job.replyTo,
           { title: reviewTitle(job), reviewOf: id, pr },
         );
-        chained = `\nStarted ${jobLabel(m)} to review and merge.`;
+        chained = `Started ${jobLabel(m)} to review and merge.`;
       }
       // So is the agent-creator's, on the workforce repo. Only an explicit schedule verdict (no code
       // written) skips the maintainer; a missing or garbled verdict still gets a review.
       if (job.kind === "create_agent") {
-        if (isScheduleVerdict(result.text)) {
-          chained = `\nNo code needed: it fits an existing kind. Say "set it up" and I will schedule it.`;
+        if (isScheduleVerdict(report)) {
+          const rec = scheduleRecommendation(report);
+          chained = `No code needed: it fits ${rec.kind ? `a ${rec.kind} job` : "an existing kind"}${rec.cron ? ` on the schedule ${rec.cron}` : ""}. Say "set it up" and I will schedule it.`;
         } else {
           const m = this.start(
             "maintain",
-            `Review the pull request just opened by the agent-creator, which adds a new worker kind to this workforce, and any other open pull requests. Check in particular that the new kind's prompt carries the clean-room rule, its tools are least-privilege (no Edit, Write or unrestricted Bash unless it is an engineer, nothing that sends, posts, signs or pays), and the invariant tests were extended, not weakened:\n\n${job.brief}\n\nAgent-creator's report:\n${result.text}`,
+            `Review the pull request just opened by the agent-creator, which adds a new worker kind to this workforce, and any other open pull requests. Check in particular that the new kind's prompt carries the clean-room rule, its tools are least-privilege (no Edit, Write or unrestricted Bash unless it is an engineer, nothing that sends, posts, signs or pays), and the invariant tests were extended, not weakened:\n\n${job.brief}\n\nAgent-creator's report:\n${report}`,
             job.requestedBy,
             "self",
             job.replyTo,
-            { title: reviewTitle(job), reviewOf: id, pr: findPrUrl(result.text) },
+            { title: reviewTitle(job), reviewOf: id, pr: findPrUrl(report) },
           );
-          chained = `\nStarted ${jobLabel(m)} to review and merge.`;
+          chained = `Started ${jobLabel(m)} to review and merge.`;
         }
       }
       // Close the review loop: changes requested on the reviewed job's pull request go back to an
       // engineer, up to MAX_FIX_ROUNDS; anything only the founder can unblock is put to him once.
       if (job.kind === "maintain" && job.reviewOf) {
-        const next = this.afterReview(job, result.text);
+        const next = this.afterReview(job, report);
         chained = next.chained;
         escalation = next.escalation;
       }
       if (job.kind === "design" && job.designLoop) {
-        const next = this.afterDesign(job, result.text);
+        const next = this.afterDesign(job, report);
         chained = next.chained;
         escalation = next.escalation;
       }
       await this.messenger.send(
         job.replyTo ?? job.requestedBy,
-        `Finished: ${jobLabel(job)}.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
+        finishedText(job, message, chained),
       );
-      if (job.kind === "design") await this.sendImages(job, result.text);
+      if (job.kind === "design") await this.sendImages(job, report);
       if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error });
       // A failed round leaves its loop waiting for Paul rather than stalled for good.
       this.pauseLoop(job.designLoop);
-      await this.messenger.send(job.replyTo ?? job.requestedBy, `Failed: ${jobLabel(job)}. ${error}`);
+      await this.messenger.send(job.replyTo ?? job.requestedBy, `Failed: ${jobLabel(job)}. ${shortText(error)}`);
     } finally {
       this.running.delete(id);
       // Success, failure or error: free the repository and start whoever is next in line.
@@ -339,7 +341,7 @@ export class JobRunner {
       this.pauseLoop(reviewed.designLoop);
       return {
         chained: "",
-        escalation: `Action needed from you on ${url}: ${verdict.detail || "the maintainer says only you can unblock it; see its report above."}\nOnce that is done, tell me and I will have it re-reviewed.`,
+        escalation: `Action needed from you on ${url}: ${verdict.detail ? shortText(verdict.detail, 400) : `the maintainer says only you can unblock it (show job ${review.id} has why).`}\nOnce that is done, tell me and I will have it re-reviewed.`,
       };
     }
     const round = (reviewed.kind === "engineer" ? reviewed.fixRound ?? 0 : 0) + 1;
@@ -347,7 +349,7 @@ export class JobRunner {
       this.pauseLoop(reviewed.designLoop);
       return {
         chained: "",
-        escalation: `${url} is still not mergeable after ${MAX_FIX_ROUNDS} automatic fix rounds, so I have stopped. The maintainer's blocking issues are in its report above. What you can do: reply "one more fix round on ${url}" to try again, give a steer on the point it is stuck on, or close the pull request.`,
+        escalation: `${url} is still not mergeable after ${MAX_FIX_ROUNDS} automatic fix rounds, so I have stopped. The blocking issues are in the last review (show job ${review.id}). Reply "one more fix round on ${url}" to try again, give me a steer on where it is stuck, or close the pull request.`,
       };
     }
     const fix = this.start(
@@ -358,7 +360,7 @@ export class JobRunner {
       reviewed.replyTo,
       { title: fixTitle(jobTitle(reviewed), round), pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
     );
-    return { chained: `\nChanges requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
+    return { chained: `Changes requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
   }
 
   /**
@@ -374,14 +376,14 @@ export class JobRunner {
       this.pauseLoop(loop);
       return {
         chained: "",
-        escalation: `Design decision for you on ${this.loopRef(loop)}, round ${round}: ${verdict.detail || "see the report above."}\nReply with your choice and I will carry on from there.`,
+        escalation: `Design decision for you on ${this.loopRef(loop)}, round ${round}: ${verdict.detail ? shortText(verdict.detail, 400) : `show job ${job.id} has the options.`}\nReply with your choice and I will carry on from there.`,
       };
     }
     if (job.designFinal || verdict?.outcome === "done") {
       const clean = verdict?.outcome === "done";
       const built = job.designFinal ? MAX_DESIGN_ROUNDS : round - 1;
       const why = clean ? "the customer critiques found no high-impact issues" : "that was the last round";
-      return { chained: `\nDesign loop ${this.loopRef(loop)} finished after ${built} implemented round${built === 1 ? "" : "s"}: ${why}. The report above is where the site stands now.` };
+      return { chained: `Design loop ${this.loopRef(loop)} finished after ${built} implemented round${built === 1 ? "" : "s"}: ${why}.` };
     }
     if (verdict?.outcome !== "spec") {
       this.pauseLoop(loop);
@@ -395,7 +397,7 @@ export class JobRunner {
       job.replyTo,
       { title: buildTitle(this.loopTitle(loop), round), designLoop: loop, designRound: round },
     );
-    return { chained: `\nSpec ready. Started ${jobLabel(eng)} to build it (design round ${round} of ${MAX_DESIGN_ROUNDS}${this.queuedText(eng)}); after the merge and deploy, the designer reviews the live site again.` };
+    return { chained: `Spec ready. Started ${jobLabel(eng)} to build it (design round ${round} of ${MAX_DESIGN_ROUNDS}${this.queuedText(eng)}); after the merge and deploy, the designer reviews the live site again.` };
   }
 
   /** ", queued behind Fly deploy (16d5d3)" for a job waiting for its repository, otherwise nothing. */
@@ -432,7 +434,7 @@ export class JobRunner {
       designFinal: final || undefined,
       awaitDeploy: true,
     });
-    return { chained: `\n${pr} merged. ${jobLabel(d)} will ${final ? "run the closing customer critique" : `start round ${round}`} once the deploy is live.` };
+    return { chained: `${pr} merged. ${jobLabel(d)} will ${final ? "run the closing customer critique" : `start round ${round}`} once the deploy is live.` };
   }
 
   /** Shows the founder the images the designer picked, where the channel can carry them. */
@@ -490,15 +492,25 @@ export function samePr(a: string, b: string): boolean {
   return n(a) !== undefined && n(a) === n(b);
 }
 
+/** The kind and cron the agent-creator recommends after its schedule verdict ("Kind: research", "Cron: 0 7 * * 1"). */
+export function scheduleRecommendation(text: string): { kind?: string; cron?: string } {
+  const field = (name: string) => text.match(new RegExp(`^[ \\t>*_-]*${name}[ \\t]*:[ \\t]*(.+)$`, "im"))?.[1].replace(/^(?:\*\*|__|`)+|(?:\*\*|__|`)+$/g, "").trim();
+  const kind = field("Kind");
+  return { kind: kind && /^[a-z_]+$/.test(kind) ? kind : undefined, cron: field("Cron") };
+}
+
 /** True only when the agent-creator's output opens with the schedule verdict, i.e. it wrote no code. */
 export function isScheduleVerdict(text: string): boolean {
   return text.trimStart().toLowerCase().startsWith(SCHEDULE_VERDICT.toLowerCase());
 }
 
-function firstLines(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const cut = text.lastIndexOf("\n", max);
-  return text.slice(0, cut > max / 2 ? cut : max).trimEnd() + "\n…";
+/**
+ * What Paul sees when a job finishes: which job, the worker's short plain message, what happens next,
+ * and where the full report is. Never the report itself, its headings, lists or verdict lines.
+ */
+export function finishedText(job: Pick<Job, "id" | "title" | "brief" | "kind" | "target">, message: string, next = ""): string {
+  const body = [message, next, `Full report: show job ${job.id}.`].map((s) => s.trim()).filter(Boolean).join(" ");
+  return `Finished: ${jobLabel(job)}.\n${body}`;
 }
 
 /* ---------- Approved actions ---------- */

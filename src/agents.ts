@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import type { JobKind, JobTarget } from "./store.js";
 import { DESIGN_TOOLS, designDir, designRoot, designServer, MAX_DESIGN_ROUNDS } from "./design.js";
 import { EA_SERVER } from "./ea.js";
+import { REPORT_RULE } from "./messages.js";
 
 export interface RunOptions {
   prompt: string;
@@ -170,7 +171,7 @@ Use "needs Paul" only when what blocks the merge is something only the founder c
  */
 export const DESIGN_VERDICT_RULES = `End your report with the images Paul should see, one per line, at most six, each a PNG you captured (paths inside your design folder):
 IMAGE: <path> | <short caption>
-Then exactly one final line in one of these forms:
+Then, as the last line of your report (before your message to Paul), exactly one line in one of these forms:
 DESIGN: spec ready
 DESIGN: no high-impact issues
 DESIGN: needs Paul: <the one decision only he can make, with the options lettered, in one or two sentences>
@@ -188,10 +189,10 @@ export function workerSpec(kind: JobKind, target: JobTarget = "product"): Worker
   if (kind === "create_agent") target = "self";
   const spec = baseSpec(kind);
   const base = { ...spec, prompt: `${spec.prompt}\n\n${UPLOADS_RULE}` };
-  if ((kind === "engineer" || kind === "maintain" || kind === "create_agent") && target === "self") {
-    return { ...base, cwd: config.selfRepoDir, prompt: base.prompt + SELF_IMPROVEMENT };
-  }
-  return base;
+  const self = (kind === "engineer" || kind === "maintain" || kind === "create_agent") && target === "self";
+  const scoped = self ? { ...base, cwd: config.selfRepoDir, prompt: base.prompt + SELF_IMPROVEMENT } : base;
+  // Paul's messaging rule and the two-part final answer (full report, short message) come last, for every kind.
+  return { ...scoped, prompt: `${scoped.prompt}\n\n${REPORT_RULE}` };
 }
 
 function baseSpec(kind: JobKind): WorkerSpec {
@@ -241,7 +242,7 @@ Your process for every task:
 
 ${UPDATE_BRANCH}
 
-Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with a short report: the pull request URL, what changed, which files, test results, and open questions. ${CLEAN_ROOM}`,
+Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with your report: the pull request URL, what changed, which files, test results, and open questions. ${CLEAN_ROOM}`,
       };
     case "maintain":
       return {
@@ -335,7 +336,7 @@ Questions such as "what did X last say about pricing?": search, read the thread,
 
 Every draft result carries a link that opens it in Gmail: give it to Paul with each draft, and say it is ready for him to review and send.
 
-Output: a short report Paul reads on his phone. Lead with what needs him. Plain sentences, compact lists only where he is choosing between things. Say "nothing needs you" or "nothing found" rather than padding. Quote at most a sentence or two of any email. Do not paste whole emails.
+Output: your report leads with what needs Paul, in plain sentences, with compact lists only where he is choosing between things, ids for follow-ups and a link for every draft. Your message to Paul says in three or four sentences what needs him most (or "nothing needs you") and gives the most important draft link. Say "nothing found" rather than padding. Quote at most a sentence or two of any email, never in the message. Do not paste whole emails.
 
 ${EA_UNTRUSTED_RULE}
 
@@ -363,17 +364,18 @@ The chief of staff will offer to set it up with schedule_job once Paul agrees. A
 
 Step 3, implement a new worker kind, following the engineer process: read README.md and CLAUDE.md, create a branch clear/agent-<slug> from origin's default branch, commit in small conventional commits, run npm run build and npm test until both are green, push, and open a pull request with gh pr create. Never merge, never push the default branch; the maintainer reviews and merges after you finish. The change must be consistent with how existing kinds are defined:
 - Add the kind to JobKind in src/store.ts and to JOB_KINDS in src/agents.ts, and add a case to workerSpec() with name, description, model, allowedTools, tools and prompt. Add any per-kind limits in src/jobs.ts only if the defaults do not fit.
-- Write the system prompt properly: who the agent is and who it serves, its method step by step, its output format and length, what "nothing found" looks like, and what it must not do. Prose-producing agents end with \${HOUSE_STYLE}. Every prompt ends with \${CLEAN_ROOM}; there are no exceptions.
+- Write the system prompt properly: who the agent is and who it serves, its method step by step, its full report's format and length, what "nothing found" looks like, and what it must not do. Prose-producing agents end with \${HOUSE_STYLE}. Every prompt ends with \${CLEAN_ROOM}; there are no exceptions.
+- Paul's messaging rule holds for the new agent too: workerSpec() appends REPORT_RULE (src/messages.ts) to every kind, so the agent writes its full report to the saved output and a three or four sentence plain message for chat. Keep that: do not bypass workerSpec(), do not tell the agent to put headings, bullets, "Outcome:" or verdict lines in its message to Paul, and repeat the rule in the new prompt itself in one sentence ("Your message to Paul is three or four plain sentences: what was done, what he needs to do if anything, and a link; no headings, no Outcome:, no bullet lists; detail goes in the report"). Any machine-readable line the job runner reads goes in the report, never the message.
 - Least privilege. List tools explicitly in both allowedTools and tools. Default to read-only: WebSearch, WebFetch, Read, Glob, Grep. Give Bash only if the job truly needs it, and then as narrow patterns. Never give Edit, Write or unrestricted Bash to anything that is not an engineer. Never add an MCP server or tool that can send email or messages, post publicly, sign anything or move money.
 - Side effects only through propose_action. The new agent produces drafts and reports for Paul; nothing it makes leaves the workforce without his YES. If the request needs a side effect, do not add an executor that sends, posts, signs or pays; design the agent to draft, and say in the pull request what Paul would have to approve separately.
 - Update the chief of staff's prompt in src/orchestrator.ts so it knows the new kind and when to use it, and update the worker list in README.md and CLAUDE.md.
-- Tests: extend test/invariants.test.ts and test/orchestrator.test.ts so the new kind is covered (clean-room rule present, expected tools and no forbidden ones). Tests may be extended, never removed or weakened.
+- Tests: extend test/invariants.test.ts and test/orchestrator.test.ts so the new kind is covered (clean-room rule and messaging rule present, expected tools and no forbidden ones). Tests may be extended, never removed or weakened.
 - If the agent is recurring, do not create the schedule yourself; give the recommended cron and brief in the pull request and in your report so the chief can set it up after the merge.
 - If the request cannot be met within these guardrails, or would need material covered by the clean-room rule, build the safe version or nothing, and say plainly what you left out and why.
 
 The pull request description explains what the new agent does, its tools and why, how Paul would use it with an example message, the recommended schedule if any, and anything you were unsure about.
 
-Finish with a short report whose first line is "VERDICT: new worker", then the pull request URL, the new kind's name, its tools, the recommended schedule if any, and test results. ${CLEAN_ROOM}`,
+Finish with your report, whose first line is "VERDICT: new worker", then the pull request URL, the new kind's name, its tools, the recommended schedule if any, and test results. ${CLEAN_ROOM}`,
       };
     }
   }

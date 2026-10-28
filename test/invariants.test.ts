@@ -357,3 +357,23 @@ test("a design job never gets the Google server and an ea job never gets the des
   assert.match(jobs, /filter\(\(\[name\]\) => name !== "design"\)/);
   assert.match(jobs, /const ownTools = job\.kind === "design" \? perJob\.mcpServers : undefined;/);
 });
+
+test("every agent, including kinds added later, carries Paul's messaging rule, and chat gets the short message, not the report", async () => {
+  const { PAUL_STYLE, REPORT_RULE } = await import("../src/messages.js");
+  const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
+  for (const kind of declaredKinds()) {
+    for (const target of ["product", "self"] as const) {
+      const p = workerSpec(kind as any, target).prompt;
+      assert.ok(p.includes(PAUL_STYLE) && p.includes(REPORT_RULE), `${kind} (${target}) prompt must carry PAUL_STYLE and REPORT_RULE`);
+    }
+  }
+  assert.deepEqual([...JOB_KINDS], declaredKinds());
+  assert.match(src("agents.ts"), /prompt: `\$\{scoped\.prompt\}\\n\\n\$\{REPORT_RULE\}`/, "workerSpec appends the rule to every kind");
+  assert.match(src("orchestrator.ts"), /\$\{PAUL_STYLE\}/, "the chief's prompt carries the rule");
+  assert.match(src("orchestrator.ts"), /tidyReply\(result\.text\)/, "the chief's replies are tidied before they are sent");
+  const jobs = src("jobs.ts");
+  assert.match(jobs, /const \{ report, message \} = splitReport\(result\.text\)/, "each worker's answer is split into report and message");
+  assert.match(jobs, /this\.store\.writeOutput\(id, report\)/, "the full report is saved");
+  assert.match(jobs, /finishedText\(job, message, chained\)/, "Paul is sent the short message");
+  assert.ok(!/\.send\([^;]*result\.text/.test(jobs), "a worker's raw answer is never sent to chat");
+});
