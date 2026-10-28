@@ -22,4 +22,24 @@ export class RouterMessenger implements Messenger {
     const m = this.pick(replyTo);
     return m.openThread ? m.openThread(replyTo, messageId, name) : undefined;
   }
+
+  async sendEditable(to: string, text: string): Promise<string | undefined> {
+    const m = this.pick(to);
+    return m.sendEditable && m.edit ? m.sendEditable(to, text) : undefined;
+  }
+
+  async edit(to: string, handle: string, text: string): Promise<void> {
+    await this.pick(to).edit?.(to, handle, text);
+  }
+
+  async remove(to: string, handle: string): Promise<void> {
+    const m = this.pick(to);
+    if (m.remove) await m.remove(to, handle);
+    else await m.edit?.(to, handle, "Done.");
+  }
+
+  async typing(to: string): Promise<boolean> {
+    const m = this.pick(to);
+    return m.typing ? m.typing(to) : false;
+  }
 }

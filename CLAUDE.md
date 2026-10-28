@@ -24,6 +24,7 @@ The engineer and maintainer may work on this repository (job target "self"). Not
 
 ## Layout
 - `src/index.ts` Express app and webhook. `buildApp()` takes injectable messenger, runner and store so tests run offline.
+- `src/status.ts` what the founder sees while the chief works: a typing indicator and one status line edited in place from the chief's tool calls (`describeToolUse`), removed when the reply lands. Falls back to one "Working on it." where a channel can neither edit nor type.
 - `src/orchestrator.ts` chief-of-staff prompt, its tools (start_job, job_status, get_output, propose_action, schedule_job, list_schedules, cancel_schedule, remember), commands, approval handling.
 - `src/agents.ts` Agent SDK runner and the worker specs.
 - `src/jobs.ts` background job runner and the approved-action executors.

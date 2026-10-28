@@ -4,6 +4,8 @@ An agentic workforce for Clear Exchange that you run from chat: Telegram, Discor
 
 You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to six workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) an analyst (questions about previous outputs and data) and an agent-creator (turns a plain-language request for a new agent into either a recommended schedule on an existing worker or a new worker kind, delivered as a pull request the maintainer reviews). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
 
+While the chief is thinking you see it typing, plus one status line that updates in place with what it is actually doing ("Checking job 39abb7…", "Searching the web: SPUR news…", "Starting an engineer job…") and disappears when the answer arrives. On WhatsApp, which supports neither, you get a single "Working on it." if it takes more than a few seconds.
+
 Everything runs on the Claude Agent SDK. Conversation memory persists per phone number; jobs, approvals, schedules and standing notes persist in a JSON store on a volume.
 
 ## What you can say
