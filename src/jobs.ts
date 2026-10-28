@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { config } from "./config.js";
+import { bookingLink, config } from "./config.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
 import { MAX_FIX_ROUNDS, PR_KINDS, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
@@ -159,7 +159,11 @@ export class JobRunner {
       const resume = job.resumed
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
-      const permits = job.kind === "ea" ? `\n\nThis job may change: ${job.permits?.length ? job.permits.join(" and ") : "nothing (read only)"}.` : "";
+      const link = job.kind === "ea" ? bookingLink(this.store) : undefined;
+      const permits =
+        job.kind === "ea"
+          ? `\n\nThis job may change: ${job.permits?.length ? job.permits.join(" and ") : "nothing (read only)"}.${link ? ` Paul's booking link for scheduling drafts: ${link}` : ""}`
+          : "";
       const result = await this.run({
         prompt: `${job.brief}${permits}${standing}${resume}`,
         systemPrompt: spec.prompt,
