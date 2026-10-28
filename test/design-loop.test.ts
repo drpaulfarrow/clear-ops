@@ -215,3 +215,23 @@ test("design jobs have their own spend cap and turn limit, and plain design jobs
   assert.equal(store.allJobs().length, 1, "a one-off design job never starts an engineer");
   assert.match(designBrief("Goal", 2, { merged: "#4" }), /^Design loop, round 2 of 3\. The previous round's spec was built in #4/);
 });
+
+test("a design job never gets the Google server and an ea job never gets the design server", async () => {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-dl-servers-")));
+  const seen: Record<string, Record<string, unknown> | undefined> = {};
+  const fakeGoogle = { type: "sdk", name: "google" } as any;
+  const fakeDesign = { type: "sdk", name: "planted" } as any;
+  // A service hook that (wrongly) offers both servers to every job: the runner must still keep them apart.
+  const toolsFor = () => ({ google: fakeGoogle, design: fakeDesign });
+  const runner: AgentRunner = async (o) => {
+    seen[isDesigner(o) ? "design" : "ea"] = o.mcpServers as Record<string, unknown> | undefined;
+    return { text: isDesigner(o) ? "Done.\nDESIGN: no high-impact issues" : "ok" };
+  };
+  const jobs = new JobRunner(store, new ConsoleMessenger(), runner, toolsFor, { waitForDeploy: async () => undefined });
+  jobs.start("design", "Three brand directions", FOUNDER);
+  jobs.start("ea", "triage", FOUNDER);
+  await waitFor(() => !!seen.design && !!seen.ea);
+  assert.deepEqual(Object.keys(seen.design!), ["design"], "a design job gets its own design server only");
+  assert.notEqual(seen.design!.design, fakeDesign, "and it is the design spec's own, not one from elsewhere");
+  assert.deepEqual(Object.keys(seen.ea!), ["google"], "an ea job gets the Google server only");
+});

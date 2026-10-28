@@ -201,7 +201,11 @@ export class JobRunner {
       const perJob = spec.perJob?.(id) ?? {};
       // Engineers building a design spec may read the designer's assets.
       const dirs = perJob.additionalDirectories ?? (job.designLoop ? [...readableDirs(), designRoot()] : undefined);
-      const extraTools = this.toolsFor(job);
+      // Each kind's own tool servers only: a design job never gets the ea's Google server, and only a
+      // design job gets the design server (it comes from the design spec alone).
+      const fromService = job.kind === "design" ? undefined : this.toolsFor(job);
+      const extraTools = fromService ? Object.fromEntries(Object.entries(fromService).filter(([name]) => name !== "design")) : undefined;
+      const ownTools = job.kind === "design" ? perJob.mcpServers : undefined;
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
@@ -221,7 +225,7 @@ export class JobRunner {
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        mcpServers: perJob.mcpServers || extraTools ? { ...extraTools, ...perJob.mcpServers } : undefined,
+        mcpServers: ownTools || extraTools ? { ...extraTools, ...ownTools } : undefined,
         additionalDirectories: dirs,
         maxTurns: PR_KINDS.includes(job.kind) ? 200 : job.kind === "maintain" || job.kind === "design" ? 80 : 40,
         maxBudgetUsd: PR_KINDS.includes(job.kind) || job.kind === "maintain" ? config.engineerBudgetUsd : job.kind === "design" ? config.design.budgetUsd : config.jobBudgetUsd,

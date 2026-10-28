@@ -321,3 +321,25 @@ test("Google tokens live encrypted, owner-only, under the data volume's secrets 
   assert.match(g, /mode: 0o700/);
   assert.match(g, /path\.join\(s\.dataDir, "secrets"\)/);
 });
+
+test("the design worker's address check refuses IPv4 written as IPv6, whatever it carries", async () => {
+  const { isPrivateAddress } = await import("../src/design.js");
+  for (const ip of ["::ffff:7f00:1", "::ffff:127.0.0.1", "::ffff:a9fe:a9fe", "::7f00:1", "64:ff9b::7f00:1", "0:0:0:0:0:0:0:1"]) {
+    assert.ok(isPrivateAddress(ip), `${ip} must be refused`);
+  }
+  assert.ok(!src("design.ts").includes('ip.startsWith("::ffff:")'), "IPv6 is checked on the parsed address, not its spelling");
+});
+
+test("the designer can never read the uploads, the secrets or the rest of the data folder", async () => {
+  const design = src("design.ts");
+  assert.match(design, /if \(current\.uid === 0\) lockDown\(\[config\.dataDir, config\.repoDir, config\.selfRepoDir\]\)/, "DATA_DIR, and so DATA_DIR/secrets, is closed to the designer");
+  assert.match(design, /if \(current\.uid === 0\) lockDown\(\[config\.uploadsDir\]\)/, "the uploads directory is closed to the designer even outside DATA_DIR");
+  assert.match(src("google.ts"), /this\.secretsDir = path\.join\(s\.dataDir, "secrets"\)/, "the secrets live inside DATA_DIR");
+});
+
+test("a design job never gets the Google server and an ea job never gets the design server", () => {
+  const jobs = src("jobs.ts");
+  assert.match(jobs, /const fromService = job\.kind === "design" \? undefined : this\.toolsFor\(job\);/);
+  assert.match(jobs, /filter\(\(\[name\]\) => name !== "design"\)/);
+  assert.match(jobs, /const ownTools = job\.kind === "design" \? perJob\.mcpServers : undefined;/);
+});

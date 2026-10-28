@@ -346,5 +346,6 @@ test("every worker can read the uploads directory and is told how to treat uploa
   assert.ok(readableDirs().includes(config.uploadsDir));
   for (const kind of JOB_KINDS) assert.ok(workerSpec(kind).prompt.includes(UPLOADS_RULE), `${kind} prompt carries the uploads rule`);
   assert.match(UPLOADS_RULE, /never copy them into any repository/);
+  assert.ok(workerSpec("design").prompt.includes(UPLOADS_RULE), "the design worker carries the uploads rule");
   assert.match(workerSpec("engineer", "self").prompt, /Clean room rule/);
 });
