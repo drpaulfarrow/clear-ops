@@ -14,10 +14,11 @@ primary_region = "lhr"
   REPO_DIR = "/data/workspace"
   SELF_REPO_DIR = "/data/self"
   SELF_REPO = "drpaulfarrow/clear-ops"
-  CHIEF_MODEL = "opus"
+  CHIEF_MODEL = "sonnet"
   WORKER_MODEL = "sonnet"
-  ENGINEER_MODEL = "opus"
+  ENGINEER_MODEL = "sonnet"
   JOB_BUDGET_USD = "5"
+  ENGINEER_BUDGET_USD = "10"
 
 [[mounts]]
   source = "clear_ops_data"
