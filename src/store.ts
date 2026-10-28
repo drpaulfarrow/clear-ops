@@ -17,6 +17,8 @@ export type JobStatus = "queued" | "running" | "done" | "failed";
 export interface Job {
   id: string;
   kind: JobKind;
+  /** Waiting because the daily spend cap was reached; starts once it is lifted or the London day turns. */
+  capBlocked?: boolean;
   target?: JobTarget;
   /**
    * What Paul sees for this job everywhere: five words or fewer, chosen by the chief or derived by the
@@ -210,6 +212,9 @@ interface State {
   holdGroups: Record<string, HoldGroup>;
   settings: Settings;
   queueHold?: QueueHold;
+  /** London dates (YYYY-MM-DD): the day /resume lifted the daily spend cap, and the day Paul was last told it was hit. */
+  capLiftedOn?: string;
+  capNotifiedOn?: string;
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -440,6 +445,16 @@ export class Store {
   setQueueHold(hold: QueueHold | undefined): void {
     if (hold) this.state.queueHold = hold;
     else delete this.state.queueHold;
+    this.save();
+  }
+
+  // Daily spend cap
+  capDays(): { liftedOn?: string; notifiedOn?: string } {
+    return { liftedOn: this.state.capLiftedOn, notifiedOn: this.state.capNotifiedOn };
+  }
+  setCapDays(patch: { liftedOn?: string; notifiedOn?: string }): void {
+    if (patch.liftedOn) this.state.capLiftedOn = patch.liftedOn;
+    if (patch.notifiedOn) this.state.capNotifiedOn = patch.notifiedOn;
     this.save();
   }
 

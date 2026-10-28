@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { bookingLink, config } from "./config.js";
+import { londonYmd } from "./london.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
 import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
@@ -143,6 +144,7 @@ export class JobRunner {
    */
   private dispatch(job: Job, ignoreHold = false): Job {
     const key = lockKey(job);
+    if (!ignoreHold && this.capReached()) return this.blockForCap(job);
     if (key) {
       const holder = this.holder(key);
       if (holder) return this.store.updateJob(job.id, { waitingFor: holder, queuePos: this.nextQueuePos() });
@@ -153,6 +155,49 @@ export class JobRunner {
     // Fire and forget. The webhook has already been acknowledged.
     void this.execute(job.id);
     return this.store.getJob(job.id) ?? job;
+  }
+
+  /** Spend on jobs that finished today (London), in dollars. */
+  spentToday(): number {
+    const today = londonYmd(new Date(this.now()));
+    return this.store.allJobs().reduce((sum, j) => (j.finishedAt && j.costUsd && londonYmd(new Date(j.finishedAt)) === today ? sum + j.costUsd : sum), 0);
+  }
+
+  /** True when today's spend is at or past the daily cap and /resume has not lifted it for today. */
+  capReached(): boolean {
+    const today = londonYmd(new Date(this.now()));
+    return this.store.capDays().liftedOn !== today && this.spentToday() >= config.dailyBudgetUsd;
+  }
+
+  /** Leaves a job queued because of the cap, and tells Paul the first time each London day. */
+  private blockForCap(job: Job): Job {
+    const key = lockKey(job);
+    const holder = key ? this.holder(key) : undefined;
+    const blocked = this.store.updateJob(job.id, { status: "queued", capBlocked: true, ...(key ? { waitingFor: holder ?? job.id, queuePos: this.nextQueuePos() } : {}) });
+    this.noticeCap(blocked);
+    return blocked;
+  }
+
+  private noticeCap(blocked: Job): void {
+    const today = londonYmd(new Date(this.now()));
+    if (this.store.capDays().notifiedOn !== today) {
+      this.store.setCapDays({ notifiedOn: today });
+      const spent = this.spentToday().toFixed(2);
+      void this.messenger
+        .send(blocked.replyTo ?? blocked.requestedBy, `The daily spend cap of $${config.dailyBudgetUsd} is hit: $${spent} spent today, so new jobs are waiting, starting with ${jobLabel(blocked)}. Send /resume to lift it for the rest of today, or they start tomorrow.`)
+        .catch(() => undefined);
+    }
+  }
+
+  /** Starts jobs the cap was holding that are free to run, once it no longer applies. */
+  private async releaseCapped(): Promise<void> {
+    if (this.capReached()) return;
+    for (const job of this.store.allJobs()) {
+      if (job.status !== "queued" || !job.capBlocked) continue;
+      this.store.updateJob(job.id, { capBlocked: undefined });
+      if (!lockKey(job)) void this.execute(job.id);
+    }
+    for (const key of ["product", "self"] as JobTarget[]) await this.startNext(key);
   }
 
   /** The queue hold, if a credit or key failure has paused the engineering queues. */
@@ -195,6 +240,7 @@ export class JobRunner {
   async resume(ids?: string[]): Promise<{ retried: Job[]; skipped: string[]; released: boolean }> {
     const hold = this.store.queueHold();
     this.store.setQueueHold(undefined);
+    this.store.setCapDays({ liftedOn: londonYmd(new Date(this.now())) });
     const targets = ids?.length ? ids.map((i) => i.trim().toLowerCase()).filter(Boolean) : this.outageFailures(hold).map((j) => j.id);
     const retried: Job[] = [];
     const skipped: string[] = [];
@@ -213,6 +259,7 @@ export class JobRunner {
         retried.push(this.dispatch(this.store.updateJob(id, { ...reset, waitingFor: undefined, queuePos: undefined })));
       }
     });
+    await this.releaseCapped();
     for (const key of ["product", "self"] as JobTarget[]) await this.startNext(key);
     return { retried: retried.map((j) => this.store.getJob(j.id) ?? j), skipped, released: !!hold };
   }
@@ -304,6 +351,12 @@ export class JobRunner {
     if (this.store.queueHold()) return;
     const [next, ...rest] = this.waiting(key);
     if (!next) return;
+    if (this.capReached()) {
+      this.store.updateJob(next.id, { capBlocked: true });
+      this.noticeCap(next);
+      return;
+    }
+    this.store.updateJob(next.id, { capBlocked: undefined });
     this.holders.set(key, next.id);
     this.store.updateJob(next.id, { waitingFor: undefined, queuePos: undefined });
     for (const j of rest) this.store.updateJob(j.id, { waitingFor: next.id });
@@ -653,9 +706,10 @@ export class JobRunner {
       // Before boot has resumed the interrupted jobs, a job marked running is the previous process's.
       if (!this.booted) return;
       for (const job of this.store.allJobs()) {
-        const lost = job.status === "running" || (job.status === "queued" && !job.waitingFor);
+        const lost = job.status === "running" || (job.status === "queued" && !job.waitingFor && !job.capBlocked);
         if (lost && !this.running.has(job.id)) await this.reclaim(this.store.getJob(job.id) ?? job, "orphan");
       }
+      await this.releaseCapped();
       for (const key of ["product", "self"] as JobTarget[]) {
         const held = this.holders.get(key);
         // A lock held by a job nothing is running frees itself.
