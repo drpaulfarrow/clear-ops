@@ -12,18 +12,38 @@ import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
 import { bootstrapRepos } from "./bootstrap.js";
 import type { AgentRunner } from "./agents.js";
+import { GoogleApi, GoogleAuth, GoogleError, type Fetch } from "./google.js";
+import { EA_SERVER, EaTools, eaServer, ensureEaSchedules } from "./ea.js";
 
 export interface AppDeps {
   messenger: Messenger;
   runner: AgentRunner;
   store: Store;
+  /** Paul's Google connection. Built from config when absent; tests inject one with a fake fetch. */
+  google?: GoogleAuth;
+  /** What Google API calls go through. Tests inject a fake. */
+  googleFetch?: Fetch;
 }
+
+export const GOOGLE_CALLBACK_PATH = "/google/callback";
+
+/** A plain page for the browser after consent. Never echoes anything from the request. */
+const page = (title: string, text: string) =>
+  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">${title}</h1><p>${text}</p></body>`;
+const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /** Builds the Express app. Dependencies are injectable so tests can run it without the network. */
 export function buildApp(deps: AppDeps) {
-  const jobs = new JobRunner(deps.store, deps.messenger, deps.runner);
+  const google =
+    deps.google ??
+    new GoogleAuth({ ...config.google, redirectUri: `${config.publicUrl}${GOOGLE_CALLBACK_PATH}`, dataDir: config.dataDir, fetch: deps.googleFetch });
+  const googleApi = new GoogleApi(google, deps.googleFetch);
+  // The executive assistant's Google tools, built per job so its permits (drafts, holds) apply.
+  const toolsFor = (job: { kind: string; brief: string; permits?: Array<"drafts" | "holds"> }) =>
+    job.kind === "ea" ? { [EA_SERVER]: eaServer(new EaTools(googleApi, { permits: job.permits ?? [], brief: job.brief })) } : undefined;
+  const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor);
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner);
+  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google);
   scheduler.boot();
 
   const app = express();
@@ -53,7 +73,29 @@ export function buildApp(deps: AppDeps) {
     for (const m of parseInbound(req.body)) void orchestrator.handle(m.from, m.text);
   });
 
-  return { app, orchestrator, jobs, scheduler };
+  // Google's redirect after Paul consents. The single-use state ties it to the allowlisted chat that
+  // asked for the link; nothing from the request is echoed back to the page.
+  app.get(GOOGLE_CALLBACK_PATH, async (req, res) => {
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    if (!state || !code) {
+      return res.status(400).type("html").send(page("Not connected", "Google did not grant access. Ask for a new link in chat if you want to try again."));
+    }
+    try {
+      const r = await google.completeConsent(state, code);
+      res.type("html").send(page("Connected", "Your assistant can now read your mail and calendars, write drafts and place holds. It can never send email or invite anyone. You can close this tab."));
+      const made = ensureEaSchedules(scheduler, r.requestedBy, r.replyTo);
+      const lines = made.map((m) => `${m.name} ${m.cron} (${m.id}${m.created ? "" : ", already set"})`).join("; ");
+      await deps.messenger
+        .send(r.replyTo, `Google connected as ${r.account}: drafts plus holds, never send. Weekday briefs scheduled: ${lines}. Tell me to move or cancel either.`)
+        .catch(() => undefined);
+    } catch (err) {
+      const msg = err instanceof GoogleError ? err.message : "Something went wrong talking to Google. Ask for a new link in chat.";
+      res.status(400).type("html").send(page("Not connected", escapeHtml(msg)));
+    }
+  });
+
+  return { app, orchestrator, jobs, scheduler, google };
 }
 
 // Entry point when run directly
@@ -77,7 +119,7 @@ if (isMain) {
   app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
 
   if (config.channels.includes("telegram")) {
-    void new TelegramPoller((from, text) => orchestrator.handle(from, text), messenger, isAllowed).start();
+    void new TelegramPoller((from, text, ctx) => orchestrator.handle(from, text, ctx), messenger, isAllowed).start();
   }
   if (discord) await discord.start();
 

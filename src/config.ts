@@ -68,6 +68,35 @@ export const config = {
     model: process.env.DESIGN_MODEL ?? "opus",
     budgetUsd: Number(process.env.DESIGN_BUDGET_USD ?? 10),
   },
+  /**
+   * Files the founder sends in chat. On the data volume, outside every git checkout, owner-only.
+   * Override with UPLOADS_DIR; it must not sit inside REPO_DIR or SELF_REPO_DIR.
+   */
+  uploadsDir: path.resolve(process.env.UPLOADS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "uploads")),
+  /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
+  uploadMaxMb: Number(process.env.UPLOAD_MAX_MB ?? 20),
+  /**
+   * Where this service is reachable from a browser, for the Google consent redirect. Fly sets
+   * FLY_APP_NAME, so on Fly this is https://<app>.fly.dev unless PUBLIC_URL overrides it.
+   */
+  publicUrl: (process.env.PUBLIC_URL || (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : `http://localhost:${process.env.PORT ?? 8080}`)).replace(/\/+$/, ""),
+  /**
+   * Paul's Google Workspace, for the executive assistant: an OAuth client for his own user account
+   * (no service account, no domain-wide delegation). GOOGLE_ACCOUNT, when set, is the only account
+   * that may be connected. GOOGLE_TOKEN_KEY encrypts the stored refresh token; without it the key is
+   * derived from GOOGLE_CLIENT_SECRET, which also lives only in the secrets store, never on the volume.
+   */
+  google: {
+    clientId: process.env.GOOGLE_CLIENT_ID ?? "",
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
+    account: (process.env.GOOGLE_ACCOUNT ?? "").trim().toLowerCase(),
+    tokenKey: process.env.GOOGLE_TOKEN_KEY ?? "",
+  },
+  /**
+   * Paul's appointment-schedule booking link, offered in scheduling drafts. Not a secret, but kept out
+   * of this public repository: set it as the EA_BOOKING_LINK Actions variable (or env var).
+   */
+  eaBookingLink: (process.env.EA_BOOKING_LINK ?? "").trim(),
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */

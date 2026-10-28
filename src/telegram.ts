@@ -2,29 +2,98 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { chunk, type Messenger } from "./whatsapp.js";
+import type { HandleContext } from "./orchestrator.js";
+import { fetchCapped, UploadError, type Attachment } from "./uploads.js";
 
 /** Telegram identities are stored as "tg:<chat id>" so they never collide with phone numbers. */
 export const TG = "tg:";
 export const tgId = (chatId: number | string) => `${TG}${chatId}`;
 
+interface TgFileRef {
+  file_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+  width?: number;
+}
+
 interface Update {
   update_id: number;
-  message?: { message_id: number; text?: string; chat: { id: number; type: string }; from?: { id: number; username?: string } };
+  message?: {
+    message_id: number;
+    text?: string;
+    caption?: string;
+    chat: { id: number; type: string };
+    from?: { id: number; username?: string };
+    document?: TgFileRef;
+    photo?: TgFileRef[];
+    video?: TgFileRef;
+    audio?: TgFileRef;
+    voice?: TgFileRef;
+  };
+}
+
+/** A file on a Telegram message, not yet downloaded. */
+export interface TelegramFile {
+  fileId: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
 }
 
 export interface TelegramInbound {
   from: string; // "tg:<chat id>"
   text: string;
+  /** Present only when the message carries files. */
+  files?: TelegramFile[];
 }
 
-/** Pull text messages from private chats out of a batch of updates. */
+/** The files on one message. Photos come in several sizes; take the largest. */
+function filesOf(m: NonNullable<Update["message"]>): TelegramFile[] {
+  const out: TelegramFile[] = [];
+  if (m.document) out.push({ fileId: m.document.file_id, name: m.document.file_name ?? "document", mimeType: m.document.mime_type, size: m.document.file_size });
+  if (m.photo?.length) {
+    const p = [...m.photo].sort((a, b) => (b.file_size ?? b.width ?? 0) - (a.file_size ?? a.width ?? 0))[0];
+    out.push({ fileId: p.file_id, name: `photo-${m.message_id}.jpg`, mimeType: "image/jpeg", size: p.file_size });
+  }
+  for (const [key, ext] of [["video", ".mp4"], ["audio", ""], ["voice", ".ogg"]] as const) {
+    const f = m[key];
+    if (f) out.push({ fileId: f.file_id, name: f.file_name ?? `${key}-${m.message_id}${ext}`, mimeType: f.mime_type, size: f.file_size });
+  }
+  return out;
+}
+
+/** Pull messages from private chats out of a batch of updates: text, or files with an optional caption. */
 export function parseUpdates(updates: Update[]): TelegramInbound[] {
   const out: TelegramInbound[] = [];
   for (const u of updates) {
     const m = u.message;
-    if (m?.text && m.chat.type === "private") out.push({ from: tgId(m.chat.id), text: m.text });
+    if (!m || m.chat.type !== "private") continue;
+    const files = filesOf(m);
+    const text = m.text ?? m.caption ?? "";
+    if (files.length) out.push({ from: tgId(m.chat.id), text, files });
+    else if (text) out.push({ from: tgId(m.chat.id), text });
   }
   return out;
+}
+
+/**
+ * Turn a Telegram file into an attachment that downloads only when asked (after the allowlist check).
+ * The download URL carries the bot token, so it is never logged or put in an error.
+ */
+export function telegramAttachment(f: TelegramFile, fetchImpl: typeof fetch = fetch): Attachment {
+  return {
+    name: f.name,
+    mimeType: f.mimeType,
+    size: f.size,
+    async download(maxBytes: number) {
+      const res = await fetchImpl(api("getFile"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file_id: f.fileId }) });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { file_path?: string; file_size?: number } };
+      if (!data.ok || !data.result?.file_path) throw new UploadError("Telegram would not hand the file over (bots can fetch files up to 20 MB)");
+      if (data.result.file_size != null && data.result.file_size > maxBytes) throw new UploadError("too large");
+      return fetchCapped(`https://api.telegram.org/file/bot${config.telegram.token}/${data.result.file_path}`, maxBytes, fetchImpl);
+    },
+  };
 }
 
 const api = (method: string) => `https://api.telegram.org/bot${config.telegram.token}/${method}`;
@@ -94,7 +163,7 @@ async function call(method: string, body: Record<string, unknown>): Promise<unkn
 }
 
 /**
- * Long-polls getUpdates and hands each private text message to the handler.
+ * Long-polls getUpdates and hands each private message (text, or files with a caption) to the handler.
  * No public URL needed, which is why Telegram is the quickest channel to run anywhere.
  */
 export class TelegramPoller {
@@ -103,7 +172,7 @@ export class TelegramPoller {
   private hinted = new Set<string>();
 
   constructor(
-    private readonly handle: (from: string, text: string) => Promise<void>,
+    private readonly handle: (from: string, text: string, ctx?: HandleContext) => Promise<void>,
     private readonly messenger: Messenger,
     private readonly isAllowed: (from: string) => boolean,
   ) {}
@@ -130,7 +199,7 @@ export class TelegramPoller {
         for (const u of data.result ?? []) {
           this.offset = u.update_id + 1;
           for (const m of parseUpdates([u])) {
-            if (this.isAllowed(m.from)) void this.handle(m.from, m.text);
+            if (this.isAllowed(m.from)) void this.handle(m.from, m.text, m.files ? { attachments: m.files.map((f) => telegramAttachment(f)) } : {});
             else if (!this.hinted.has(m.from)) {
               // Tell the sender their id once, so the operator can allowlist it. Nothing else leaks.
               this.hinted.add(m.from);

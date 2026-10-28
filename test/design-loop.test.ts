@@ -44,7 +44,7 @@ function loop(designReplies: string[], maintainerReplies: string[] = []) {
   };
   const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-dl-")));
   const messenger = new ConsoleMessenger();
-  const jobs = new JobRunner(store, messenger, runner, { waitForDeploy: async (since) => void deployWaits.push(since) });
+  const jobs = new JobRunner(store, messenger, runner, undefined, { waitForDeploy: async (since) => void deployWaits.push(since) });
   const settled = () => store.allJobs().every((j) => j.status === "done" || j.status === "failed");
   return { runs, deployWaits, store, messenger, jobs, settled };
 }
@@ -110,7 +110,7 @@ test("a decision only Paul can make pauses the loop, shows him only the job's ow
       text: `Three directions.\nIMAGE: ${path.join(designDir(id), "direction-a-desktop.png")} | A: Ledger\nIMAGE: direction-b-desktop.png | B: Signal\nIMAGE: /etc/hosts | nope\nIMAGE: ../other/x.png | other job\nDESIGN: needs Paul: pick a brand direction, A, B or C.`,
     };
   };
-  const jobs = new JobRunner(store, messenger, runner, { waitForDeploy: async () => undefined });
+  const jobs = new JobRunner(store, messenger, runner, undefined, { waitForDeploy: async () => undefined });
   const first = jobs.startDesignLoop("Brand identity, then the site", FOUNDER, "dc:c:t1");
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith("Design decision for you")));
   const ask = messenger.sent.filter((m) => m.text.startsWith("Design decision for you"));
@@ -191,7 +191,7 @@ test("a loop's engineer job waits its turn behind the product's running engineer
     if (o.prompt.startsWith("Other work")) await new Promise<void>((r) => (release = r));
     return { text: "REVIEW https://github.com/acme/clear-exchange/pull/1: merged" };
   };
-  const jobs = new JobRunner(store, messenger, runner, { waitForDeploy: async () => undefined });
+  const jobs = new JobRunner(store, messenger, runner, undefined, { waitForDeploy: async () => undefined });
   const other = jobs.start("engineer", "Other work", FOUNDER, "product");
   jobs.startDesignLoop("Site", FOUNDER);
   await waitFor(() => store.allJobs().some((j) => j.kind === "engineer" && j.designLoop));

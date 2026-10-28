@@ -33,6 +33,10 @@ export function describeToolUse(name: string, input: Record<string, unknown> = {
       return "Cancelling a schedule…";
     case "remember":
       return "Noting that for the future…";
+    case "list_uploads":
+      return "Checking your uploads…";
+    case "delete_upload":
+      return "Deleting an upload…";
     case "WebSearch":
       return input.query ? `Searching the web: ${clip(input.query)}…` : "Searching the web…";
     case "WebFetch": {
