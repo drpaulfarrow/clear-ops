@@ -108,6 +108,8 @@ export const config = {
   /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */
   deepResearchBudgetUsd: Number(process.env.DEEP_RESEARCH_BUDGET_USD ?? 20),
   /** Minutes a running job may show no activity from its worker before it is stopped as stalled. */
+  /** The most the workforce spends on jobs finished in one London day; past it, new jobs wait. */
+  dailyBudgetUsd: positive(process.env.DAILY_BUDGET_USD, 20),
   jobStallMinutes: positive(process.env.JOB_STALL_MINUTES, 30),
   /** The longest any job may run, in minutes, before it is stopped. */
   jobMaxRuntimeMinutes: positive(process.env.JOB_MAX_RUNTIME_MINUTES, 240),

@@ -191,6 +191,7 @@ See `.env.example`. The important ones:
 | `DEEP_RESEARCH_BUDGET_USD` | Spend cap per deep research job (default 20); deep research also gets 200 turns instead of 60. |
 | `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job. |
 | `JOB_STALL_MINUTES` | A running job whose worker shows no activity for this long is stopped, its work kept and its queue moved on. Default 30. |
+| `DAILY_BUDGET_USD` | Cap on the cost of jobs finished in one Europe/London day. Default 20. Once reached, new jobs wait (one message to you per day), and `/resume` lifts it for the rest of that day; they also start when the next day begins. |
 | `JOB_MAX_RUNTIME_MINUTES` | The longest any job may run before it is stopped the same way. Default 240. |
 | `DESIGN_SITE_URL` | The live site the design worker reviews. Default https://clear-exchange.fly.dev. |
 | `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `opus`) and spend cap per design job (default 10). |
