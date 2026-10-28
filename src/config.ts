@@ -59,6 +59,15 @@ export const config = {
     worker: process.env.WORKER_MODEL ?? "sonnet",
     engineer: process.env.ENGINEER_MODEL ?? "opus",
   },
+  /** The design worker: what it looks at, its browser, model and spend cap per job. */
+  design: {
+    siteUrl: process.env.DESIGN_SITE_URL || "https://clear-exchange.fly.dev",
+    chromiumPath: process.env.CHROMIUM_PATH || "chromium",
+    /** The unprivileged account the browser and branch previews run as (created in the Dockerfile). */
+    user: process.env.DESIGN_USER || "designer",
+    model: process.env.DESIGN_MODEL ?? "opus",
+    budgetUsd: Number(process.env.DESIGN_BUDGET_USD ?? 10),
+  },
   /**
    * Files the founder sends in chat. On the data volume, outside every git checkout, owner-only.
    * Override with UPLOADS_DIR; it must not sit inside REPO_DIR or SELF_REPO_DIR.

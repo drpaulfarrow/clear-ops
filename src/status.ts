@@ -19,6 +19,7 @@ export function describeToolUse(name: string, input: Record<string, unknown> = {
     case "get_output":
       return id ? `Reading job ${id} output…` : "Reading job output…";
     case "start_job": {
+      if (input.kind === "design" && (input.loop || input.continueLoop)) return input.continueLoop ? "Carrying on the design loop…" : "Starting the design loop…";
       const kind = KIND_WORDS[String(input.kind)] ?? String(input.kind ?? "worker");
       return `Starting ${article(kind)} ${kind} job${input.target === "self" ? " on the workforce" : ""}…`;
     }

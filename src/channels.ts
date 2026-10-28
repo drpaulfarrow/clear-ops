@@ -38,6 +38,13 @@ export class RouterMessenger implements Messenger {
     else await m.edit?.(to, handle, "Done.");
   }
 
+  /** Images go where the channel carries them; elsewhere the caption is sent as text so nothing is lost. */
+  async sendImage(to: string, file: string, caption: string): Promise<void> {
+    const m = this.pick(to);
+    if (m.sendImage) await m.sendImage(to, file, caption);
+    else if (caption) await m.send(to, caption);
+  }
+
   async typing(to: string): Promise<boolean> {
     const m = this.pick(to);
     return m.typing ? m.typing(to) : false;

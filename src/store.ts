@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 
-export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea";
+export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design";
 /**
  * What an executive-assistant job may change in Paul's Google Workspace, granted per job by the chief
  * only when Paul asked for it in chat. Without a permit the job can only read.
@@ -36,6 +36,20 @@ export interface Job {
   fixRound?: number;
   /** Maintainer jobs started automatically after an engineering job: the id of that job. */
   reviewOf?: string;
+  /**
+   * Design loop: the id of the loop's first design job. Set on every design, engineer and fix job the
+   * loop starts, so a merge leads to the next round. designRound counts from 1.
+   */
+  designLoop?: string;
+  designRound?: number;
+  /** The founder's goal for the loop, on the loop's first design job. */
+  designGoal?: string;
+  /** The loop's closing critique: report to the founder, start no more engineering. */
+  designFinal?: boolean;
+  /** On the loop's first job: the loop is waiting for Paul, so start_job with continueLoop may carry it on. */
+  designPaused?: boolean;
+  /** A design round that must wait for the product's deploy of the merge before it looks. */
+  awaitDeploy?: boolean;
   /** Executive-assistant jobs: what it may change (drafts, holds). Absent means read only. */
   permits?: EaPermit[];
   createdAt: string;

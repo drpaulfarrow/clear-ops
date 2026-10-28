@@ -32,6 +32,12 @@ const fakeRunner: AgentRunner = async (o) => {
       }
       return { text: "Delegated (handler not found)", sessionId: "sess-1" };
     }
+    if (o.prompt.startsWith("design loop:")) {
+      const server = (ops as any).instance;
+      const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
+      const r = await handler({ kind: "design", brief: o.prompt.slice(12).trim(), target: "self", loop: true }, {});
+      return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
+    }
     if (o.prompt.startsWith("new agent:")) {
       // Simulate the chief starting the agent-creator, wrongly asking for the product repo.
       const server = (ops as any).instance;
@@ -255,4 +261,24 @@ test("an agent-creator schedule verdict writes no code and starts no maintainer"
   assert.equal(isScheduleVerdict("  verdict: schedule\nKind: write"), true);
   assert.equal(isScheduleVerdict("VERDICT: new worker\nhttps://github.com/o/r/pull/1"), false);
   assert.equal(isScheduleVerdict("I opened a PR. VERDICT: schedule"), false, "only a leading verdict skips review");
+});
+
+test("the chief knows the design worker and can start the design loop with start_job", async () => {
+  await post(inbound("447700900123", "design loop: make the site something I can show customers"));
+  await waitFor(() => messenger.sent.some((m) => /Design loop [a-f0-9]{6} started: job [a-f0-9]{6} \(design\)/.test(m.text)));
+  const job = store.listJobs(50).find((j) => j.kind === "design" && j.designGoal === "make the site something I can show customers")!;
+  assert.equal(job.target, "product", "design always looks at the product, whatever target was asked for");
+  assert.equal(job.designLoop, job.id);
+  assert.equal(job.designRound, 1);
+  const chief = calls.find((c) => c.prompt.startsWith("design loop:"))!;
+  assert.match(chief.systemPrompt, /design is the brand and design director/);
+  assert.match(chief.systemPrompt, /continueLoop/);
+  const call = await (async () => {
+    await waitFor(() => calls.some((c) => c.systemPrompt.startsWith("You are the brand and design director")));
+    return calls.find((c) => c.systemPrompt.startsWith("You are the brand and design director"))!;
+  })();
+  assert.match(call.prompt, /^Design loop, round 1 of 3\./);
+  assert.ok(call.systemPrompt.includes("Clean room rule"));
+  // The fake designer gives no verdict, so the loop pauses and says so rather than stalling silently.
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Design loop ${job.id} is paused`)));
 });

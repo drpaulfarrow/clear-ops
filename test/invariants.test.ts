@@ -161,6 +161,92 @@ test("the review loop is capped and goes back to an engineer, never straight to 
   assert.match(jobs, /private afterReview[\s\S]*?this\.start\(\s*"engineer"/, "a requested change goes to an engineer, who opens no merge");
 });
 
+/* ---------- The design worker and its loop (extends the rules above, weakens none) ---------- */
+
+test("the design worker is read-only plus its own scoped tools: no Edit, Write, Bash, merging or sending", async () => {
+  const { workerSpec, PR_KINDS } = await import("../src/agents.js");
+  const { lockKey } = await import("../src/jobs.js");
+  const { DESIGN_TOOLS } = await import("../src/design.js");
+  for (const target of ["product", "self"] as const) {
+    const s = workerSpec("design", target);
+    const allowed = new Set(["WebSearch", "WebFetch", "Read", "Glob", "Grep", ...DESIGN_TOOLS]);
+    for (const t of s.allowedTools) assert.ok(allowed.has(t), `design must not be allowed ${t}`);
+    for (const t of s.tools ?? []) assert.ok(["WebSearch", "WebFetch", "Read", "Glob", "Grep"].includes(t), `design must not see built-in ${t}`);
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops__)/.test(t)), "design gets no Edit, Write, Bash or the chief's tools");
+    assert.match(s.prompt, /never edit the repositories, open or merge pull requests, send email or messages, post publicly, sign anything or spend money/);
+    assert.match(s.prompt, /not production code/);
+    assert.ok(!s.prompt.includes("This task is on the workforce itself"), "design never works on the workforce as an engineer");
+  }
+  assert.ok(!PR_KINDS.includes("design"), "design opens no pull requests");
+  assert.equal(lockKey({ kind: "design", target: "product" }), undefined, "design never holds the engineering lock");
+  const server = workerSpec("design").perJob!("inv001").mcpServers!.design as any;
+  assert.deepEqual(Object.keys(server.instance._registeredTools).sort(), ["save_asset", "screenshot"], "the design server has no tool that sends, posts, signs or pays");
+});
+
+test("the design worker's browser can never be pointed at local files or the private network", async () => {
+  const { checkPublicUrl, takeScreenshots, saveAsset } = await import("../src/design.js");
+  for (const bad of ["file:///proc/self/environ", "http://127.0.0.1:8080/", "http://localhost/", "http://169.254.169.254/", "http://[::1]/", "http://x.internal/"]) {
+    await assert.rejects(checkPublicUrl(bad, async () => ["93.184.216.34"]), `${bad} must be refused`);
+  }
+  await assert.rejects(takeScreenshots("inv002", { url: "file:///etc/passwd" }, { capture: async () => assert.fail("must not capture") }));
+  assert.throws(() => saveAsset("inv002", "../../state.json", "{}"), "assets stay in the job's folder");
+  const design = src("design.ts");
+  assert.match(design, /env: \{ PATH: process\.env\.PATH \?\? "\/usr\/bin:\/bin", HOME: profile \}/, "the browser runs with a scrubbed environment");
+  assert.match(design, /env: \{ PATH: process\.env\.PATH \?\? "\/usr\/bin:\/bin", HOME: tmp, HOST: "127\.0\.0\.1"/, "branch previews run with a scrubbed environment on loopback");
+});
+
+test("the design worker's browser checks every request it makes, not only the address it was given", () => {
+  const design = src("design.ts");
+  const capture = design.slice(design.indexOf("export function chromiumArgs"), design.indexOf("/* ---------- What may be screenshotted"));
+  assert.match(capture, /`--proxy-server=\$\{r\.proxy\}`/, "Chromium reaches the network only through the egress proxy");
+  assert.match(capture, /"--proxy-bypass-list=<-loopback>"/, "loopback goes through the proxy too");
+  assert.match(capture, /if \(!r\.proxy\) throw/, "Chromium never runs without a proxy");
+  assert.match(design, /proxy = await startEgressProxy\(\{ allow: served \? new URL\(served\.base\)\.host : undefined/, "each capture gets a proxy allowing only its own local server");
+  assert.match(design, /await capture\(\{[^}]*proxy: proxy\.url \}\)/, "every capture is given that proxy");
+  assert.match(design, /if \(allow && `\$\{host\}:\$\{port\}` === allow\) return host;\n  return \(await publicAddresses\(host, resolve\)\)\[0\];/, "the proxy connects to the address it checked");
+});
+
+test("the design worker's browser and branch previews never run as root", async () => {
+  const { chooseIdentity } = await import("../src/design.js");
+  assert.throws(() => chooseIdentity(undefined, { uid: 0, gid: 0 }), "root with no designer user refuses");
+  assert.throws(() => chooseIdentity({ uid: 0, gid: 0 }, { uid: 0, gid: 0 }), "a designer that is root is refused");
+  const design = src("design.ts");
+  const chromium = design.slice(design.indexOf("export const chromiumCapture"), design.indexOf("/* ---------- What may be screenshotted"));
+  assert.match(chromium, /exec\(config\.design\.chromiumPath, [^)]*\), \{[^}]*uid: who\.uid,\s*gid: who\.gid,/, "Chromium runs as the designer");
+  const preview = design.slice(design.indexOf("export async function previewBranch"), design.indexOf("const TYPES"));
+  assert.match(preview, /spawn\(process\.execPath, \[PREVIEW_ENTRY\], \{[^}]*uid: who\.uid,\s*gid: who\.gid,/, "the branch preview runs as the designer");
+  assert.match(preview, /tar -xf[^\n]*uid: who\.uid, gid: who\.gid/, "the branch is unpacked as the designer");
+  assert.match(design, /const who = await designIdentity\(\);[\s\S]*const who = await designIdentity\(\);/, "both launches look up the designer first");
+  assert.match(design, /if \(current\.uid === 0\) lockDown\(\[config\.dataDir, config\.repoDir, config\.selfRepoDir\]\)/, "the data folder and git credentials are closed to the designer");
+  assert.match(src("../Dockerfile"), /useradd --system[^\n]* designer/, "the image has the unprivileged designer user");
+});
+
+test("the service never writes, chmods or reads through a path the browser's account controls", () => {
+  const design = src("design.ts");
+  const copy = design.slice(design.indexOf("export function copyScreenshot"), design.indexOf("export const chromiumCapture"));
+  assert.match(copy, /fs\.openSync\(shot, [^)]*O_NOFOLLOW/, "the screenshot is opened without following links");
+  assert.match(copy, /fs\.fstatSync\(fd\)/, "the screenshot is checked through the open descriptor");
+  assert.match(copy, /PNG_SIGNATURE/, "only a PNG is taken back");
+  assert.match(design.slice(design.indexOf("export const chromiumCapture"), design.indexOf("/* ---------- What may be screenshotted")), /copyScreenshot\(shot, r\.out, who\)/, "every capture takes its screenshot back that way");
+  assert.ok(!/copyFileSync/.test(design), "no copy follows a path the browser controls");
+  const preview = design.slice(design.indexOf("export async function previewBranch"), design.indexOf("const TYPES"));
+  assert.ok(!/chmodSync\((tar|app|tmp|shot|profile)\b/.test(design), "nothing inside a designer folder is chmodded by the service");
+  assert.match(preview, /const own = fs\.mkdtempSync\([^;]*\);\s*fs\.chmodSync\(own, 0o700\);\s*const tar = path\.join\(own,/, "the branch archive is written only in a folder the service alone can use");
+  assert.match(preview, /tar -xf - -C/, "the designer unpacks the archive from standard input");
+});
+
+test("the design loop is capped, builds only through engineers, and never merges or skips review", () => {
+  const jobs = src("jobs.ts");
+  assert.match(src("design.ts"), /export const MAX_DESIGN_ROUNDS = [1-5];/, "design rounds must stay capped at a small number");
+  const after = jobs.slice(jobs.indexOf("private afterDesign"), jobs.indexOf("private nextDesignRound"));
+  assert.match(after, /this\.start\(\s*"engineer"/, "a design spec is built by an engineer, whose pull request the maintainer reviews");
+  assert.ok(!/this\.start\(\s*"maintain"/.test(after), "the design loop never starts a review or merge itself");
+  const next = jobs.slice(jobs.indexOf("private nextDesignRound"), jobs.indexOf("private async sendImages"));
+  assert.match(next, /const final = round > MAX_DESIGN_ROUNDS;/);
+  assert.match(jobs, /if \(verdict\.outcome === "merged"\) return reviewed\.designLoop \? this\.nextDesignRound/, "a new round starts only after the maintainer merged");
+  assert.match(jobs, /if \(job\.designFinal \|\| verdict\?\.outcome === "done"\)/, "the closing round starts no more engineering");
+});
+
 /* ---------- Files the founder sends (extends the rules above, weakens none) ---------- */
 
 test("uploads are saved only after the allowlist check, and every listener checks before passing files on", () => {
@@ -248,4 +334,26 @@ test("Google tokens live encrypted, owner-only, under the data volume's secrets 
   assert.match(g, /mode: 0o600/);
   assert.match(g, /mode: 0o700/);
   assert.match(g, /path\.join\(s\.dataDir, "secrets"\)/);
+});
+
+test("the design worker's address check refuses IPv4 written as IPv6, whatever it carries", async () => {
+  const { isPrivateAddress } = await import("../src/design.js");
+  for (const ip of ["::ffff:7f00:1", "::ffff:127.0.0.1", "::ffff:a9fe:a9fe", "::7f00:1", "64:ff9b::7f00:1", "0:0:0:0:0:0:0:1"]) {
+    assert.ok(isPrivateAddress(ip), `${ip} must be refused`);
+  }
+  assert.ok(!src("design.ts").includes('ip.startsWith("::ffff:")'), "IPv6 is checked on the parsed address, not its spelling");
+});
+
+test("the designer can never read the uploads, the secrets or the rest of the data folder", async () => {
+  const design = src("design.ts");
+  assert.match(design, /if \(current\.uid === 0\) lockDown\(\[config\.dataDir, config\.repoDir, config\.selfRepoDir\]\)/, "DATA_DIR, and so DATA_DIR/secrets, is closed to the designer");
+  assert.match(design, /if \(current\.uid === 0\) lockDown\(\[config\.uploadsDir\]\)/, "the uploads directory is closed to the designer even outside DATA_DIR");
+  assert.match(src("google.ts"), /this\.secretsDir = path\.join\(s\.dataDir, "secrets"\)/, "the secrets live inside DATA_DIR");
+});
+
+test("a design job never gets the Google server and an ea job never gets the design server", () => {
+  const jobs = src("jobs.ts");
+  assert.match(jobs, /const fromService = job\.kind === "design" \? undefined : this\.toolsFor\(job\);/);
+  assert.match(jobs, /filter\(\(\[name\]\) => name !== "design"\)/);
+  assert.match(jobs, /const ownTools = job\.kind === "design" \? perJob\.mcpServers : undefined;/);
 });
