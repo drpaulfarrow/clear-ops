@@ -727,12 +727,14 @@ export function eaServer(t: EaTools) {
 export const EA_SCHEDULES = [
   {
     name: "morning brief",
+    title: "Morning brief",
     cron: "30 7 * * 1-5",
     brief:
       "EA morning brief for Paul (read only). 1) Today's agenda across all his calendars in London time: each meeting with who and why it matters, clashes, gaps, and invitations he has not answered. 2) Inbox triage since yesterday evening: what needs him today, by urgency, with a suggested action each; the rest in one line. 3) Follow-ups: run scan_followups, then list what is stale or due today first, each with its id: who is waiting on him, what he promised and by when, and who he is waiting on (offer a drafted nudge for those; do not draft). Close anything that clearly needs nothing with resolve_followup. 4) Which of today's meetings need prep, one line each, and offer to prepare them. End with: reply done <id>, snooze <id> 2d, or draft nudge <id>. Keep it to one phone screen.",
   },
   {
     name: "end-of-day wrap",
+    title: "End-of-day wrap",
     cron: "0 18 * * 1-5",
     brief:
       "EA end-of-day wrap for Paul (read only). 1) What came in today that still needs him, by urgency: run scan_followups and list the follow-ups that are stale or due tomorrow, with their ids. 2) Tomorrow's agenda in London time and his first commitment. 3) Anything to prepare tonight, and replies worth drafting (offer, do not draft). Keep it to one phone screen.",
@@ -748,8 +750,8 @@ export const LEGACY_EA_BRIEFS: Record<string, string> = {
 };
 
 type EaScheduler = {
-  list(): Array<{ kind: string; brief: string; id: string; cron: string; timezone?: string; requestedBy?: string; replyTo?: string }>;
-  add(s: { cron: string; timezone: string; kind: "ea"; brief: string; requestedBy: string; replyTo?: string }): { id: string; cron: string };
+  list(): Array<{ kind: string; brief: string; id: string; cron: string; timezone?: string; requestedBy?: string; replyTo?: string; title?: string }>;
+  add(s: { cron: string; timezone: string; kind: "ea"; title?: string; brief: string; requestedBy: string; replyTo?: string }): { id: string; cron: string };
   cancel?(id: string): boolean;
 };
 
@@ -762,7 +764,7 @@ export function upgradeEaSchedules(scheduler: EaScheduler): number {
     const current = name && EA_SCHEDULES.find((d) => d.name === name);
     if (!current) continue;
     scheduler.cancel(s.id);
-    scheduler.add({ cron: s.cron, timezone: s.timezone ?? "Europe/London", kind: "ea", brief: current.brief, requestedBy: s.requestedBy ?? "", replyTo: s.replyTo });
+    scheduler.add({ cron: s.cron, timezone: s.timezone ?? "Europe/London", kind: "ea", title: current.title, brief: current.brief, requestedBy: s.requestedBy ?? "", replyTo: s.replyTo });
     n++;
   }
   return n;
@@ -783,7 +785,7 @@ export function ensureEaSchedules(
   return EA_SCHEDULES.map((d) => {
     const found = existing.find((s) => s.brief === d.brief);
     if (found) return { name: d.name, id: found.id, cron: found.cron, created: false };
-    const s = scheduler.add({ cron: d.cron, timezone: "Europe/London", kind: "ea", brief: d.brief, requestedBy, replyTo });
+    const s = scheduler.add({ cron: d.cron, timezone: "Europe/London", kind: "ea", title: d.title, brief: d.brief, requestedBy, replyTo });
     return { name: d.name, id: s.id, cron: s.cron, created: true };
   });
 }

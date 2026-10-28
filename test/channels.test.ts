@@ -92,7 +92,7 @@ test("a job started from a Discord channel gets its own thread, and the maintain
     const ops = o.mcpServers?.ops as any;
     if (ops) {
       const handler = ops.instance?._registeredTools?.start_job?.callback ?? ops.instance?._registeredTools?.start_job?.handler;
-      const r = await handler({ kind: "engineer", brief: "Build the /offers endpoint", target: "product" }, {});
+      const r = await handler({ kind: "engineer", title: "Offers endpoint", brief: "Build the /offers endpoint", target: "product" }, {});
       return { text: `Delegated. ${r.content[0].text}`, sessionId: "s-thread" };
     }
     return { text: "done", costUsd: 0.01 };
@@ -103,15 +103,15 @@ test("a job started from a Discord channel gets its own thread, and the maintain
 
   const eng = store.listJobs(20).find((j) => j.kind === "engineer")!;
   assert.equal(eng.replyTo, "dc:c:thread-msg9");
-  assert.match(messenger.threads[0], /^dc:c:thread-msg9 engineer: Build the \/offers endpoint/);
+  assert.equal(messenger.threads[0], "dc:c:thread-msg9 Offers endpoint", "the thread is named after the job's title");
   assert.equal(store.getSession(dcChannel("chan1")), "s-thread", "the session is keyed by the conversation, not the user");
   await waitFor(() => store.listJobs(20).some((j) => j.kind === "maintain" && j.status === "done"));
   const maint = store.listJobs(20).find((j) => j.kind === "maintain")!;
   assert.equal(maint.replyTo, "dc:c:thread-msg9", "the maintainer inherits the engineer's thread");
   const inThread = messenger.sent.filter((m) => m.to === "dc:c:thread-msg9").map((m) => m.text);
-  assert.ok(inThread.some((t) => t.startsWith(`Job ${eng.id} (engineer) started`)));
-  assert.ok(inThread.some((t) => t.startsWith(`Job ${eng.id} (engineer) finished`)));
-  assert.ok(inThread.some((t) => t.startsWith(`Job ${maint.id} (maintain) finished`)));
+  assert.ok(inThread.some((t) => t === `Started: Offers endpoint · engineer · ${eng.id}. Reports will land here.`));
+  assert.ok(inThread.some((t) => t.startsWith(`Finished: Offers endpoint · engineer · ${eng.id}.`)));
+  assert.ok(inThread.some((t) => t.startsWith(`Finished: Review: Offers endpoint · maintain · ${maint.id}.`)));
   const inChannel = messenger.sent.filter((m) => m.to === "dc:c:chan1").map((m) => m.text);
   assert.ok(inChannel.some((t) => t.startsWith("Delegated.")), "the chief's reply goes to the channel");
 });
@@ -137,7 +137,7 @@ test("jobs left running by a restart are re-queued with a resume note, and give 
   await waitFor(() => store.getJob(j1.id)?.status === "done");
   assert.equal(store.getJob(j1.id)!.resumed, 1);
   assert.match(prompts[0], /interrupted by a service restart.*check the working directory, git status and branches/s);
-  assert.ok(messenger.sent.some((m) => m.to === "dc:c:t1" && /was interrupted by a restart. Resuming/.test(m.text)));
+  assert.ok(messenger.sent.some((m) => m.to === "dc:c:t1" && new RegExp(`^Interrupted by a restart: Finish the catalogue · engineer · ${j1.id}\\. Resuming`).test(m.text)));
   assert.equal(store.getJob(j2.id)!.status, "failed");
   assert.ok(messenger.sent.some((m) => m.to === "tg:99887766" && /three times/.test(m.text)));
 });

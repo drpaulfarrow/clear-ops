@@ -27,7 +27,7 @@ const fakeRunner: AgentRunner = async (o) => {
       const server = (ops as any).instance;
       const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
       if (handler) {
-        const r = await handler({ kind: "research", brief: o.prompt.slice(9).trim() }, {});
+        const r = await handler({ kind: "research", title: "SPUR news", brief: o.prompt.slice(9).trim() }, {});
         return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
       }
       return { text: "Delegated (handler not found)", sessionId: "sess-1" };
@@ -35,14 +35,14 @@ const fakeRunner: AgentRunner = async (o) => {
     if (o.prompt.startsWith("design loop:")) {
       const server = (ops as any).instance;
       const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
-      const r = await handler({ kind: "design", brief: o.prompt.slice(12).trim(), target: "self", loop: true }, {});
+      const r = await handler({ kind: "design", title: "Customer-ready site", brief: o.prompt.slice(12).trim(), target: "self", loop: true }, {});
       return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
     }
     if (o.prompt.startsWith("new agent:")) {
       // Simulate the chief starting the agent-creator, wrongly asking for the product repo.
       const server = (ops as any).instance;
       const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
-      const r = await handler({ kind: "create_agent", brief: o.prompt.slice(10).trim(), target: "product" }, {});
+      const r = await handler({ kind: "create_agent", title: "Outreach agent", brief: o.prompt.slice(10).trim(), target: "product" }, {});
       return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
     }
     return { text: `chief says: ${o.prompt}`, sessionId: "sess-1" };
@@ -109,9 +109,11 @@ test("unlisted numbers are ignored", async () => {
 
 test("delegation starts a job and the worker reports back", async () => {
   await post(inbound("447700900123", "delegate: find out what SPUR announced this week"));
-  await waitFor(() => messenger.sent.some((m) => /finished/.test(m.text)));
+  await waitFor(() => messenger.sent.some((m) => /^Finished: SPUR news · research · [a-f0-9]{6}\./.test(m.text)));
   const job = store.listJobs(1)[0];
   assert.equal(job.kind, "research");
+  assert.equal(job.title, "SPUR news");
+  assert.equal(job.brief, "find out what SPUR announced this week", "the brief is kept in full");
   assert.equal(job.status, "done");
   assert.ok(store.readOutput(job.id)?.startsWith("worker(sonnet)"));
   const workerCall = calls.find((c) => c.systemPrompt.includes("research analyst"))!;
@@ -129,7 +131,7 @@ test("an engineer job targeted at the workforce itself runs in SELF_REPO_DIR wit
   assert.equal(call.cwd, config.selfRepoDir);
   assert.match(call.systemPrompt, /This task is on the workforce itself/);
   assert.match(call.systemPrompt, /senior engineer/);
-  assert.ok(messenger.sent.some((m) => m.text.startsWith(`Job ${job.id} (engineer, workforce) finished`)));
+  assert.ok(messenger.sent.some((m) => m.text.startsWith(`Finished: Add a /version command · engineer, workforce · ${job.id}.`)));
 });
 
 test("every engineer job is followed by a maintainer job on the same target, and only the maintainer may merge", async () => {
@@ -146,7 +148,7 @@ test("every engineer job is followed by a maintainer job on the same target, and
   const m = workerSpec("maintain");
   assert.ok(!m.disallowedTools!.some((r) => r.includes("gh pr merge")), "maintainer may merge");
   assert.ok(m.disallowedTools!.includes("Edit") && m.disallowedTools!.includes("Write"), "maintainer does not write code");
-  assert.ok(messenger.sent.some((t) => t.text.includes(`Job ${job.id} (engineer, workforce) finished`) && t.text.includes("Maintainer job")));
+  assert.ok(messenger.sent.some((t) => t.text.includes(`Finished: Add a /health detail · engineer, workforce · ${job.id}.`) && t.text.includes(`Started Review: Add a /health detail · maintain, workforce · ${maint.id} to review and merge.`)));
 });
 
 test("approval flow: unknown id, reject, and executor failure are all reported", async () => {
@@ -169,7 +171,7 @@ test("/reset clears the session and /jobs lists jobs", async () => {
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith("Started a fresh conversation")));
   assert.equal(store.getSession("447700900123"), undefined);
   await post(inbound("447700900123", "/jobs"));
-  await waitFor(() => messenger.sent.some((m) => /research done/.test(m.text)));
+  await waitFor(() => messenger.sent.some((m) => /^SPUR news · research · [a-f0-9]{6} · done$/m.test(m.text)));
 });
 
 test("Telegram: private text messages are parsed, allowlisted ids reach the chief, others get the id hint once", async () => {
@@ -226,7 +228,7 @@ test("verifySignature accepts a correct HMAC and rejects a wrong one", () => {
 test("the chief starts the agent-creator on the workforce repo, and its pull request goes to the maintainer", async () => {
   const { config } = await import("../src/config.js");
   await post(inbound("447700900123", "new agent: an agent that drafts publisher outreach"));
-  await waitFor(() => messenger.sent.some((m) => m.text.includes("(create_agent, on the workforce itself)")));
+  await waitFor(() => messenger.sent.some((m) => m.text.includes("Started: Outreach agent · create_agent · ")));
   const job = store.listJobs(50).find((j) => j.kind === "create_agent" && j.brief.includes("drafts publisher outreach"))!;
   assert.equal(job.target, "self", "create_agent is forced onto the workforce repo");
   await waitFor(() => store.listJobs(50).some((j) => j.kind === "maintain" && j.brief.includes("drafts publisher outreach")));
@@ -240,7 +242,7 @@ test("the chief starts the agent-creator on the workforce repo, and its pull req
   assert.match(call.systemPrompt, /Clean room rule/);
   assert.ok(call.disallowedTools!.includes("Bash(gh pr merge*)"));
   assert.equal(call.maxBudgetUsd, config.engineerBudgetUsd);
-  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Job ${job.id} (create_agent, workforce) finished`) && m.text.includes("Maintainer job")));
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Finished: Outreach agent · create_agent · ${job.id}.`) && m.text.includes("Started Review: Outreach agent · maintain, workforce")));
 });
 
 test("an agent-creator schedule verdict writes no code and starts no maintainer", async () => {
@@ -252,11 +254,11 @@ test("an agent-creator schedule verdict writes no code and starts no maintainer"
   });
   const job = runner.start("create_agent", "Monitor IAB Tech Lab announcements weekly", "447700900123");
   await waitFor(() => store.getJob(job.id)?.status === "done");
-  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Job ${job.id} (create_agent`)));
-  const msg = messenger.sent.find((m) => m.text.startsWith(`Job ${job.id} (create_agent`))!;
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Finished: Monitor IAB Tech Lab announcements · create_agent · ${job.id}.`)));
+  const msg = messenger.sent.find((m) => m.text.startsWith(`Finished: Monitor IAB Tech Lab announcements · create_agent · ${job.id}.`))!;
   assert.match(msg.text, /set it up/);
   assert.match(msg.text, /Cron: 0 7 \* \* 1/);
-  assert.ok(!msg.text.includes("Maintainer job"));
+  assert.ok(!msg.text.includes("to review and merge"));
   assert.ok(!store.listJobs(50).some((j) => j.kind === "maintain" && j.brief.includes("Monitor IAB Tech Lab")));
   assert.equal(isScheduleVerdict("  verdict: schedule\nKind: write"), true);
   assert.equal(isScheduleVerdict("VERDICT: new worker\nhttps://github.com/o/r/pull/1"), false);
@@ -265,7 +267,7 @@ test("an agent-creator schedule verdict writes no code and starts no maintainer"
 
 test("the chief knows the design worker and can start the design loop with start_job", async () => {
   await post(inbound("447700900123", "design loop: make the site something I can show customers"));
-  await waitFor(() => messenger.sent.some((m) => /Design loop [a-f0-9]{6} started: job [a-f0-9]{6} \(design\)/.test(m.text)));
+  await waitFor(() => messenger.sent.some((m) => /Design loop Customer-ready site \([a-f0-9]{6}\) started: Customer-ready site · design · [a-f0-9]{6}\./.test(m.text)));
   const job = store.listJobs(50).find((j) => j.kind === "design" && j.designGoal === "make the site something I can show customers")!;
   assert.equal(job.target, "product", "design always looks at the product, whatever target was asked for");
   assert.equal(job.designLoop, job.id);
@@ -280,5 +282,5 @@ test("the chief knows the design worker and can start the design loop with start
   assert.match(call.prompt, /^Design loop, round 1 of 3\./);
   assert.ok(call.systemPrompt.includes("Clean room rule"));
   // The fake designer gives no verdict, so the loop pauses and says so rather than stalling silently.
-  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Design loop ${job.id} is paused`)));
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Design loop Customer-ready site (${job.id}) is paused`)));
 });

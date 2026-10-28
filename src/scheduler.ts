@@ -38,6 +38,7 @@ export class Scheduler {
       () => {
         // No permits are ever passed here: a scheduled executive-assistant run (the morning brief,
         // the evening wrap) only reads. Drafts and holds need Paul to ask in chat.
+        // The job takes the schedule's title: the store reads the run marker below (derivedJobTitle in titles.ts).
         this.jobs.start(s.kind, `${s.brief}\n\n(This is the scheduled run ${s.id}.)`, s.requestedBy, "product", s.replyTo);
       },
       { timezone: s.timezone },

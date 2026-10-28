@@ -1,4 +1,5 @@
 import type { Messenger } from "./whatsapp.js";
+import { validateTitle } from "./titles.js";
 
 const clip = (s: unknown, max = 60): string => {
   const t = String(s ?? "").replace(/\s+/g, " ").trim();
@@ -19,9 +20,12 @@ export function describeToolUse(name: string, input: Record<string, unknown> = {
     case "get_output":
       return id ? `Reading job ${id} output…` : "Reading job output…";
     case "start_job": {
-      if (input.kind === "design" && (input.loop || input.continueLoop)) return input.continueLoop ? "Carrying on the design loop…" : "Starting the design loop…";
+      if (input.kind === "design" && input.continueLoop) return "Carrying on the design loop…";
+      const checked = validateTitle(input.title);
+      const titled = "title" in checked ? `: ${checked.title}` : "";
+      if (input.kind === "design" && input.loop) return `Starting the design loop${titled}…`;
       const kind = KIND_WORDS[String(input.kind)] ?? String(input.kind ?? "worker");
-      return `Starting ${article(kind)} ${kind} job${input.target === "self" ? " on the workforce" : ""}…`;
+      return `Starting ${article(kind)} ${kind} job${input.target === "self" ? " on the workforce" : ""}${titled}…`;
     }
     case "propose_action":
       return "Preparing an approval request…";

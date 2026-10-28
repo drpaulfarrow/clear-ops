@@ -84,7 +84,7 @@ test("changes requested on an engineer's pull request start a fix round on the s
 
   assert.match(review2.brief, /updated to address your last review/);
   assert.equal(runs.filter((r) => r.systemPrompt.startsWith("You are the maintainer")).length, 2);
-  assert.ok(messenger.sent.some((m) => m.text.includes(`Changes requested on ${PR}. Engineer job ${fix.id} started to fix them (round 1 of 3`)));
+  assert.ok(messenger.sent.some((m) => m.text.includes(`Changes requested on ${PR}. Started Fix round 1: Add the 402 flow · engineer · ${fix.id} to fix them (round 1 of 3`)));
   assert.ok(!messenger.sent.some((m) => m.text.startsWith("Action needed")), "a merged pull request needs nothing from the founder");
 });
 
