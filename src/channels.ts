@@ -55,4 +55,9 @@ export class RouterMessenger implements Messenger {
     const m = this.pick(to);
     return m.typing ? m.typing(to) : false;
   }
+
+  async recent(to: string, limit: number): Promise<Array<{ author: string; text: string }>> {
+    const m = this.pick(to);
+    return m.recent ? m.recent(to, limit) : [];
+  }
 }
