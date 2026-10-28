@@ -1,5 +1,5 @@
 import express from "express";
-import { assertProductionConfig, config } from "./config.js";
+import { assertProductionConfig, bookingLink, config } from "./config.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
 import { Orchestrator } from "./orchestrator.js";
@@ -13,7 +13,10 @@ import { isAllowed } from "./config.js";
 import { bootstrapRepos } from "./bootstrap.js";
 import type { AgentRunner } from "./agents.js";
 import { GoogleApi, GoogleAuth, GoogleError, type Fetch } from "./google.js";
-import { EA_SERVER, EaTools, eaServer, ensureEaSchedules } from "./ea.js";
+import { EA_SERVER, EaTools, eaServer, ensureEaSchedules, upgradeEaSchedules } from "./ea.js";
+import cron from "node-cron";
+import { nudgeStale } from "./followups.js";
+import { HoldWatcher } from "./meetings.js";
 
 export interface AppDeps {
   messenger: Messenger;
@@ -39,12 +42,45 @@ export function buildApp(deps: AppDeps) {
     new GoogleAuth({ ...config.google, redirectUri: `${config.publicUrl}${GOOGLE_CALLBACK_PATH}`, dataDir: config.dataDir, fetch: deps.googleFetch });
   const googleApi = new GoogleApi(google, deps.googleFetch);
   // The executive assistant's Google tools, built per job so its permits (drafts, holds) apply.
-  const toolsFor = (job: { kind: string; brief: string; permits?: Array<"drafts" | "holds"> }) =>
-    job.kind === "ea" ? { [EA_SERVER]: eaServer(new EaTools(googleApi, { permits: job.permits ?? [], brief: job.brief })) } : undefined;
+  const account = () => {
+    try {
+      return google.account();
+    } catch {
+      return undefined;
+    }
+  };
+  const toolsFor = (job: { id: string; kind: string; brief: string; replyTo?: string; permits?: Array<"drafts" | "holds"> }) =>
+    job.kind === "ea"
+      ? {
+          [EA_SERVER]: eaServer(
+            new EaTools(googleApi, { permits: job.permits ?? [], brief: job.brief, store: deps.store, bookingLink: bookingLink(deps.store), account: account(), jobId: job.id, replyTo: job.replyTo }),
+          ),
+        }
+      : undefined;
   const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor);
   const scheduler = new Scheduler(deps.store, jobs);
   const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google);
   scheduler.boot();
+  // Schedules made before follow-ups existed pick up the current brief, on the same cron.
+  upgradeEaSchedules(scheduler);
+  const holdWatcher = new HoldWatcher(deps.store, googleApi, deps.messenger);
+
+  /**
+   * The assistant's background checks, run by the service itself (no model): stale follow-ups are
+   * nudged in chat on weekdays at 11:00 and 16:00, and confirmed meetings release their other holds
+   * every 15 minutes from 07:00 to 21:00. Both do nothing until Google is connected. Started by the
+   * entry point, not by tests.
+   */
+  const startEaTimers = () => {
+    const safely = (what: string, f: () => Promise<unknown>) => () => {
+      if (!google.connected()) return;
+      f().catch((err) => console.error(`${what} failed:`, err instanceof Error ? err.message : err));
+    };
+    return [
+      cron.schedule("0 11,16 * * 1-5", safely("follow-up nudge", () => nudgeStale(deps.store, deps.messenger)), { timezone: "Europe/London" }),
+      cron.schedule("*/15 7-21 * * *", safely("hold watcher", () => holdWatcher.tick()), { timezone: "Europe/London" }),
+    ];
+  };
 
   const app = express();
   // Keep the raw body for signature verification.
@@ -84,6 +120,7 @@ export function buildApp(deps: AppDeps) {
     try {
       const r = await google.completeConsent(state, code);
       res.type("html").send(page("Connected", "Your assistant can now read your mail and calendars, write drafts and place holds. It can never send email or invite anyone. You can close this tab."));
+      deps.store.setSetting("eaReplyTo", r.replyTo);
       const made = ensureEaSchedules(scheduler, r.requestedBy, r.replyTo);
       const lines = made.map((m) => `${m.name} ${m.cron} (${m.id}${m.created ? "" : ", already set"})`).join("; ");
       await deps.messenger
@@ -95,7 +132,7 @@ export function buildApp(deps: AppDeps) {
     }
   });
 
-  return { app, orchestrator, jobs, scheduler, google };
+  return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers };
 }
 
 // Entry point when run directly
@@ -115,7 +152,8 @@ if (isMain) {
   }
   const messenger = new RouterMessenger(routes, config.channels.includes("whatsapp") ? new CloudApiMessenger() : undefined);
 
-  const { app, orchestrator, jobs } = buildApp({ messenger, runner: sdkRunner, store });
+  const { app, orchestrator, jobs, startEaTimers } = buildApp({ messenger, runner: sdkRunner, store });
+  startEaTimers();
   app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
 
   if (config.channels.includes("telegram")) {

@@ -94,6 +94,14 @@ export const config = {
   maxMessageChars: 3900,
 };
 
+/**
+ * Paul's booking link for scheduling drafts: the one he set in chat (/booking), else EA_BOOKING_LINK.
+ * Takes anything with settings() so config stays free of the store.
+ */
+export function bookingLink(store?: { settings(): { eaBookingLink?: string } }): string | undefined {
+  return store?.settings().eaBookingLink || config.eaBookingLink || undefined;
+}
+
 /** Everyone the workforce will answer, across channels. */
 export function isAllowed(from: string): boolean {
   return config.allowedNumbers.includes(from) || config.allowedTelegramIds.includes(from) || config.allowedDiscordIds.includes(from);

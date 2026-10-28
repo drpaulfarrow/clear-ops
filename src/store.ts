@@ -69,15 +69,83 @@ export interface Schedule {
   enabled: boolean;
 }
 
+/**
+ * Something in Paul's mail that needs following up, kept by the executive assistant.
+ * owed: someone is waiting on Paul. promised: Paul said he would do something. waiting: Paul is waiting on someone.
+ * Subject, who and excerpt come from email, so they are untrusted data wherever they are shown to a model.
+ */
+export type FollowUpKind = "owed" | "promised" | "waiting";
+export interface FollowUp {
+  id: string;
+  /** Identifies the thing tracked, so a re-scan updates rather than duplicates: "<kind>:<thread or message id>". */
+  key: string;
+  kind: FollowUpKind;
+  threadId: string;
+  messageId?: string;
+  subject: string;
+  /** The other party: who is waiting, or who Paul is waiting on, as "Name <address>" or an address. */
+  who: string;
+  /** A short quote: the question asked or the commitment made. */
+  excerpt: string;
+  /** When the email this is about was sent. */
+  since: string;
+  /** When it should be done (owed, promised) or chased (waiting). */
+  dueAt: string;
+  /** When it counts as stale and Paul is nudged in chat. */
+  staleAt: string;
+  status: "open" | "snoozed" | "done";
+  snoozedUntil?: string;
+  /** Set when Paul was nudged about it; he is nudged again only after a snooze. */
+  nudgedAt?: string;
+  doneAt?: string;
+  /** Why it was closed: "done" (Paul), "replied" (the thread moved on), or a reason the assistant gave. */
+  closedReason?: string;
+  /** "scan" when found by the detectors, "assistant" when the executive assistant added it. */
+  source: "scan" | "assistant";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Holds placed together as proposed times for one meeting. When a real meeting with one of `with`
+ * appears on Paul's calendar, the hold watcher removes the rest. Only events listed here, and only
+ * while they are still the assistant's own holds, are ever removed.
+ */
+export interface HoldGroup {
+  id: string;
+  title: string;
+  /** Lower-case addresses of the people the meeting is with. Empty means no automatic release. */
+  with: string[];
+  holds: Array<{ eventId: string; start: string; end: string }>;
+  /** The ea job that placed them, which held the holds permit Paul granted. */
+  jobId?: string;
+  replyTo?: string;
+  status: "open" | "confirmed" | "expired";
+  confirmedEventId?: string;
+  createdAt: string;
+  closedAt?: string;
+}
+
+/** Runtime settings Paul sets from chat. */
+export interface Settings {
+  /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */
+  eaBookingLink?: string;
+  /** Where follow-up nudges and hold releases are reported: the chat Google was connected from. */
+  eaReplyTo?: string;
+}
+
 interface State {
   sessions: Record<string, string>; // phone number -> agent session id
   jobs: Record<string, Job>;
   actions: Record<string, PendingAction>;
   schedules: Record<string, Schedule>;
   notes: string[]; // standing instructions the operator asked the workforce to remember
+  followups: Record<string, FollowUp>;
+  holdGroups: Record<string, HoldGroup>;
+  settings: Settings;
 }
 
-const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [] });
+const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
 
 export function shortId(): string {
   // 4 bytes -> 8 hex chars, trimmed to 6 for easy typing on a phone
@@ -227,5 +295,60 @@ export class Store {
   }
   notes(): string[] {
     return [...this.state.notes];
+  }
+
+  // Follow-ups
+  listFollowUps(): FollowUp[] {
+    return Object.values(this.state.followups);
+  }
+  getFollowUp(id: string): FollowUp | undefined {
+    return this.state.followups[id];
+  }
+  findFollowUp(key: string): FollowUp | undefined {
+    return Object.values(this.state.followups).find((f) => f.key === key);
+  }
+  createFollowUp(f: Omit<FollowUp, "id" | "createdAt" | "updatedAt">): FollowUp {
+    let id = shortId();
+    while (this.state.followups[id]) id = shortId();
+    const now = new Date().toISOString();
+    const item: FollowUp = { ...f, id, createdAt: now, updatedAt: now };
+    this.state.followups[id] = item;
+    this.save();
+    return item;
+  }
+  updateFollowUp(id: string, patch: Partial<FollowUp>): FollowUp {
+    const f = this.state.followups[id];
+    if (!f) throw new Error(`No follow-up ${id}`);
+    Object.assign(f, patch, { updatedAt: new Date().toISOString() });
+    this.save();
+    return f;
+  }
+
+  // Hold groups
+  createHoldGroup(g: Omit<HoldGroup, "id" | "createdAt" | "status">): HoldGroup {
+    const group: HoldGroup = { ...g, id: shortId(), status: "open", createdAt: new Date().toISOString() };
+    this.state.holdGroups[group.id] = group;
+    this.save();
+    return group;
+  }
+  listHoldGroups(): HoldGroup[] {
+    return Object.values(this.state.holdGroups);
+  }
+  updateHoldGroup(id: string, patch: Partial<HoldGroup>): HoldGroup {
+    const g = this.state.holdGroups[id];
+    if (!g) throw new Error(`No hold group ${id}`);
+    Object.assign(g, patch);
+    this.save();
+    return g;
+  }
+
+  // Settings
+  settings(): Settings {
+    return { ...this.state.settings };
+  }
+  setSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
+    if (value === undefined) delete this.state.settings[key];
+    else this.state.settings[key] = value;
+    this.save();
   }
 }
