@@ -131,13 +131,14 @@ See `.env.example`. The important ones:
 | `DESIGN_SITE_URL` | The live site the design worker reviews. Default https://clear-exchange.fly.dev. |
 | `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `opus`) and spend cap per design job (default 10). |
 | `CHROMIUM_PATH` | Headless browser for screenshots. The Docker image installs `chromium`. |
+| `DESIGN_USER` | The unprivileged account the browser and branch previews run as. Default `designer`, created in the Docker image. The browser will not run as root. |
 
 ## Safety model
 - Headless permission mode: tools not pre-approved are denied, never left waiting.
 - Engineers work like senior engineers: branch, tests, pull request. They cannot merge, push the default branch, force-push, rewrite shared history, delete recursively or disable failing tests.
 - One maintainer agent reviews and merges. It runs tests, checks CI, reads the diff, and either merges or requests changes. It cannot edit code. Branch protection on `main` is the hard backstop, since both agents use the same GitHub token.
 - The agent-creator has the engineer's tools and limits and works only on this repository. Every worker kind it adds must carry the clean-room rule, get read-only tools unless it is an engineer, and send nothing itself; `test/invariants.test.ts` checks every kind in `JOB_KINDS`, so a new kind that breaks these fails CI. It cannot be scheduled.
-- The design worker is read-only apart from two tools of its own: screenshots (public http(s) pages only, never local files or the private network; branch previews run without any secrets) and saving assets into its own folder. It builds nothing itself: every spec goes to an engineer and through the maintainer, and the loop is capped at three rounds.
+- The design worker is read-only apart from two tools of its own: screenshots and saving assets into its own folder. The browser and branch previews run as an unprivileged `designer` user with no secrets in their environment, and every request the browser makes goes through a small proxy that refuses local files, the machine itself and the private network, including redirects and anything a page loads. It builds nothing itself: every spec goes to an engineer and through the maintainer, and the loop is capped at three rounds.
 - One side effect exists outside that remit (`run_command`, for deploys and migrations) and it needs `YES <id>`.
 - The chief never sends email or messages anyone but you. Drafts come to you. An unlisted Telegram sender is told its own id once and nothing else.
 - Spend is capped per job; subagent nesting is limited.

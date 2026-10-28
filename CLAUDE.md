@@ -13,7 +13,7 @@ The engineer and maintainer may work on this repository (job target "self"). Not
 - WhatsApp webhook signatures are verified before any message is parsed.
 - Every agent prompt carries the clean-room rule, including every kind added to `JOB_KINDS` later. Only engineering kinds (engineer, create_agent) get Edit, Write or unrestricted Bash.
 - Only the maintainer merges. Engineers cannot merge or push the default branch; nobody force-pushes, rewrites shared history or deletes recursively. Branch protection on `main` (require a pull request and the `ci / test` check) is the hard backstop.
-- The design worker gets only read-only tools plus its own `screenshot` (public http(s) only, no file:// or private addresses) and `save_asset` (its own folder only). The design loop builds only through engineer jobs and is capped.
+- The design worker gets only read-only tools plus its own `screenshot` and `save_asset` (its own folder only). The browser and branch previews run as the unprivileged `designer` user, never root, so they cannot read the service's environment, `DATA_DIR` or git credentials. Every request the browser makes, loopback included, goes through a per-capture egress proxy that refuses private addresses, connects only to the address it checked, and allows only that capture's own local server. The design loop builds only through engineer jobs, is capped, and only a paused loop can be carried on.
 - Agents run headless (`permissionMode: "dontAsk"`); spend is capped on every run.
 
 ## Rules for anyone (human or agent) working in this repo
