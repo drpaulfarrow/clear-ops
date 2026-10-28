@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
 import type { AgentRunner } from "./agents.js";
-import { MAX_FIX_ROUNDS, PR_KINDS, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
+import { MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, REPOS, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
+import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 
@@ -25,13 +26,18 @@ export class JobRunner {
   /** Which job holds each repository's engineering lock in this process. */
   private holders = new Map<JobTarget, string>();
 
+  private readonly waitForDeploy: DeployWait;
+
   constructor(
     private readonly store: Store,
     private readonly messenger: Messenger,
     private readonly run: AgentRunner,
-  ) {}
+    opts: { waitForDeploy?: DeployWait } = {},
+  ) {
+    this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
+  }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "pr" | "fixRound" | "reviewOf"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "pr" | "fixRound" | "reviewOf" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy"> = {}): Job {
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
     const key = lockKey(job);
     if (key) {
@@ -42,6 +48,35 @@ export class JobRunner {
     // Fire and forget. The webhook has already been acknowledged.
     void this.execute(job.id);
     return job;
+  }
+
+  /**
+   * Starts a design loop on the product: design round 1 now; each merged spec leads to the next round
+   * once the deploy is live. `continueFrom` (any job of a paused loop) carries on that loop, same round,
+   * with the founder's decision in the brief.
+   */
+  startDesignLoop(goal: string, requestedBy: string, replyTo?: string, continueFrom?: string): Job {
+    const prev = continueFrom ? this.store.getJob(continueFrom) : undefined;
+    if (continueFrom && !prev?.designLoop) throw new Error(`Job ${continueFrom} is not part of a design loop`);
+    if (!prev?.designLoop) {
+      const job = this.store.createJob("design", designBrief(goal, 1), requestedBy, "product", replyTo, { designRound: 1, designGoal: goal });
+      this.store.updateJob(job.id, { designLoop: job.id });
+      void this.execute(job.id);
+      return job;
+    }
+    // Whichever job of the loop was named, carry on from its latest design round.
+    const latest = this.store
+      .allJobs()
+      .filter((j) => j.kind === "design" && j.designLoop === prev.designLoop)
+      .sort((a, b) => (a.designRound ?? 0) - (b.designRound ?? 0) || a.createdAt.localeCompare(b.createdAt))
+      .at(-1) ?? prev;
+    const loopGoal = this.store.getJob(prev.designLoop)?.designGoal ?? goal;
+    const round = latest.designRound ?? 1;
+    return this.start("design", designBrief(loopGoal, round, { decision: goal, previous: latest.id, final: latest.designFinal }), requestedBy, "product", replyTo ?? latest.replyTo, {
+      designLoop: prev.designLoop,
+      designRound: round,
+      designFinal: latest.designFinal,
+    });
   }
 
   /**
@@ -146,7 +181,12 @@ export class JobRunner {
     this.running.add(id);
     this.store.updateJob(id, { status: "running" });
     try {
+      // A design round after a merge looks only once the product's deploy of that merge is live.
+      if (job.awaitDeploy) await this.waitForDeploy(new Date(job.createdAt));
       const spec = workerSpec(job.kind, job.target);
+      const perJob = spec.perJob?.(id) ?? {};
+      // Engineers building a design spec may read the designer's assets.
+      const dirs = perJob.additionalDirectories ?? (job.designLoop ? [...REPOS, designRoot()] : undefined);
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
@@ -161,8 +201,10 @@ export class JobRunner {
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        maxTurns: PR_KINDS.includes(job.kind) ? 200 : job.kind === "maintain" ? 80 : 40,
-        maxBudgetUsd: PR_KINDS.includes(job.kind) || job.kind === "maintain" ? config.engineerBudgetUsd : config.jobBudgetUsd,
+        mcpServers: perJob.mcpServers,
+        additionalDirectories: dirs,
+        maxTurns: PR_KINDS.includes(job.kind) ? 200 : job.kind === "maintain" || job.kind === "design" ? 80 : 40,
+        maxBudgetUsd: PR_KINDS.includes(job.kind) || job.kind === "maintain" ? config.engineerBudgetUsd : job.kind === "design" ? config.design.budgetUsd : config.jobBudgetUsd,
       });
       const outputPath = this.store.writeOutput(id, result.text);
       const summary = firstLines(result.text, 1200);
@@ -217,10 +259,16 @@ export class JobRunner {
         chained = next.chained;
         escalation = next.escalation;
       }
+      if (job.kind === "design" && job.designLoop) {
+        const next = this.afterDesign(job, result.text);
+        chained = next.chained;
+        escalation = next.escalation;
+      }
       await this.messenger.send(
         job.replyTo ?? job.requestedBy,
         `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
       );
+      if (job.kind === "design") await this.sendImages(job, result.text);
       if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -247,7 +295,13 @@ export class JobRunner {
     const verdicts = parseReviewVerdicts(text);
     const pr = review.pr ?? reviewed.pr;
     const verdict = pr ? verdicts.find((v) => samePr(v.pr, pr)) : verdicts.length === 1 ? verdicts[0] : undefined;
-    if (!verdict || verdict.outcome === "merged") return { chained: "" };
+    if (!verdict) {
+      // A design loop must not stall silently.
+      return reviewed.designLoop
+        ? { chained: "", escalation: `Design loop ${reviewed.designLoop} is paused: the maintainer gave no verdict on ${pr ?? "the round's pull request"}. Tell me to re-review it, or to carry on the loop.` }
+        : { chained: "" };
+    }
+    if (verdict.outcome === "merged") return reviewed.designLoop ? this.nextDesignRound(reviewed, verdict.pr) : { chained: "" };
     const url = verdict.pr;
     const target = lockKey(reviewed) ?? reviewed.target ?? "product";
     if (verdict.outcome === "needs_founder") {
@@ -269,11 +323,88 @@ export class JobRunner {
       reviewed.requestedBy,
       target,
       reviewed.replyTo,
-      { pr: url, fixRound: round },
+      { pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
     );
     const queued = fix.waitingFor ? `, queued behind job ${fix.waitingFor}` : "";
     return { chained: `\nChanges requested on ${url}. Engineer job ${fix.id} started to fix them (round ${round} of ${MAX_FIX_ROUNDS}${queued}); it is re-reviewed automatically.` };
   }
+
+  /**
+   * What follows a design-loop round. A spec goes to an engineer on the product (queued like any
+   * engineering job and reviewed by the maintainer as usual); a decision only the founder can make is
+   * put to him once; a clean critique, or the closing round, ends the loop with a report.
+   */
+  private afterDesign(job: Job, text: string): { chained: string; escalation?: string } {
+    const loop = job.designLoop!;
+    const round = job.designRound ?? 1;
+    const verdict = parseDesignVerdict(text);
+    if (verdict?.outcome === "needs_founder") {
+      return {
+        chained: "",
+        escalation: `Design decision for you (loop ${loop}, round ${round}): ${verdict.detail || "see the report above."}\nReply with your choice and I will carry on from there.`,
+      };
+    }
+    if (job.designFinal || verdict?.outcome === "done") {
+      const clean = verdict?.outcome === "done";
+      const built = job.designFinal ? MAX_DESIGN_ROUNDS : round - 1;
+      const why = clean ? "the customer critiques found no high-impact issues" : "that was the last round";
+      return { chained: `\nDesign loop ${loop} finished after ${built} implemented round${built === 1 ? "" : "s"}: ${why}. The report above is where the site stands now.` };
+    }
+    if (verdict?.outcome !== "spec") {
+      return { chained: "", escalation: `Design loop ${loop} is paused: round ${round} ended without a spec or a verdict. Tell me to carry on, or give a steer.` };
+    }
+    const eng = this.start(
+      "engineer",
+      `Implement this design spec on the Clear Exchange product (design loop ${loop}, round ${round} of ${MAX_DESIGN_ROUNDS}). Build exactly what it specifies, keeping the product's existing constraints, tests and security headers; where the spec conflicts with them, keep the constraint and say so in the pull request. Assets the designer saved (SVG, CSS, JSON) are in ${designRoot()}/${job.id}/ and you may copy them into the repository. Put before and after screenshots, desktop and mobile, in the pull request description if you can produce them. Open one pull request; the maintainer reviews and merges it, and the designer then reviews the deployed result.\n\nDesign job ${job.id}'s report and spec:\n${text}`,
+      job.requestedBy,
+      "product",
+      job.replyTo,
+      { designLoop: loop, designRound: round },
+    );
+    const queued = eng.waitingFor ? `, queued behind job ${eng.waitingFor}` : "";
+    return { chained: `\nSpec ready. Engineer job ${eng.id} started to build it (design round ${round} of ${MAX_DESIGN_ROUNDS}${queued}); after the merge and deploy, the designer reviews the live site again.` };
+  }
+
+  /** A design-loop pull request merged: the next round looks at the deployed site once it is live. */
+  private nextDesignRound(reviewed: Job, pr: string): { chained: string } {
+    const loop = reviewed.designLoop!;
+    const round = (reviewed.designRound ?? 1) + 1;
+    const final = round > MAX_DESIGN_ROUNDS;
+    const goal = this.store.getJob(loop)?.designGoal ?? "";
+    const d = this.start("design", designBrief(goal, round, { merged: pr, final }), reviewed.requestedBy, "product", reviewed.replyTo, {
+      designLoop: loop,
+      designRound: round,
+      designFinal: final || undefined,
+      awaitDeploy: true,
+    });
+    return { chained: `\n${pr} merged. Design job ${d.id} will ${final ? "run the closing customer critique" : `start round ${round}`} once the deploy is live.` };
+  }
+
+  /** Shows the founder the images the designer picked, where the channel can carry them. */
+  private async sendImages(job: Job, text: string): Promise<void> {
+    if (!this.messenger.sendImage) return;
+    const to = job.replyTo ?? job.requestedBy;
+    for (const img of reportImages(job.id, text)) {
+      await this.messenger.sendImage(to, img.file, img.caption).catch((err) => console.warn(`image not sent: ${err instanceof Error ? err.message : err}`));
+    }
+  }
+}
+
+/**
+ * The brief for one design-loop round. Round 1 starts from the founder's goal; later rounds look at
+ * what was merged and deployed; the closing round critiques only. Exported for tests.
+ */
+export function designBrief(goal: string, round: number, o: { merged?: string; final?: boolean; decision?: string; previous?: string } = {}): string {
+  const head = o.final
+    ? `Design loop, closing review after ${MAX_DESIGN_ROUNDS} implemented rounds. The last change (${o.merged ?? "the latest pull request"}) has merged and deployed.`
+    : round === 1
+      ? `Design loop, round 1 of ${MAX_DESIGN_ROUNDS}.`
+      : `Design loop, round ${round} of ${MAX_DESIGN_ROUNDS}. The previous round's spec was built in ${o.merged ?? "a pull request"}, which has merged and deployed.`;
+  const task = o.final
+    ? `Screenshot the live site at desktop and mobile and run the customer-persona critique. Write no new spec. Report to Paul: what changed across the loop, how each persona now sees the site, and any remaining issues ranked by impact, with the best before and after images. End with DESIGN: no high-impact issues, or DESIGN: needs Paul: <decision> if something remaining is genuinely his call.`
+    : `Screenshot the live site at desktop and mobile, run the customer-persona critique, and write a spec for the highest-impact issues that one engineer can build in one pull request. Earlier rounds' reports are in the outputs folder and their screenshots in the design folder; compare against them and do not re-raise what is fixed. If the critiques find no high-impact issues, say so and end with DESIGN: no high-impact issues.`;
+  const decision = o.decision ? `\n\nPaul has answered the open question from job ${o.previous}: ${o.decision}\nApply his choice and carry on.` : "";
+  return `${head} ${task}${decision}\n\nGoal from Paul:\n${goal}`;
 }
 
 export interface ReviewVerdict {
