@@ -127,3 +127,36 @@ test("the agent-creator cannot be put on a schedule", () => {
   assert.match(src("orchestrator.ts"), /JOB_KINDS\.filter\(\(k\) => k !== "create_agent"\)/);
   assert.match(src("orchestrator.ts"), /kind: scheduleKind/);
 });
+
+/* ---------- Bringing a pull request up to date without force (extends the rules above, weakens none) ---------- */
+
+/** Claude Code's Bash(prefix*) deny rules, as prefix matches. */
+const denied = (rules: string[], command: string) =>
+  rules.some((r) => {
+    const m = r.match(/^Bash\((.*)\*\)$/);
+    return m ? command.startsWith(m[1]) : r === "Bash";
+  });
+
+test("engineers can bring a pull request branch up to date with main, but only by merging, never by force", async () => {
+  const { workerSpec } = await import("../src/agents.js");
+  for (const kind of ["engineer", "create_agent"] as const) {
+    const s = workerSpec(kind);
+    assert.ok(s.allowedTools.includes("Bash"), `${kind} needs Bash to update its branch`);
+    for (const ok of ["gh pr update-branch 12", "git pull --no-rebase origin main", "git fetch origin"]) {
+      assert.ok(!denied(s.disallowedTools!, ok), `${kind} must be able to run: ${ok}`);
+    }
+    for (const no of ["gh pr update-branch --rebase 12", "git push --force", "git push -f origin x", "git push origin main", "git merge origin/main", "gh pr merge 12"]) {
+      assert.ok(denied(s.disallowedTools!, no), `${kind} must not be able to run: ${no}`);
+    }
+  }
+  assert.match(workerSpec("engineer").prompt, /gh pr update-branch <number>/, "the engineer is told how to update a branch");
+  const m = workerSpec("maintain");
+  for (const no of ["gh pr update-branch --rebase 12", "git push --force", "git push -f"]) assert.ok(denied(m.disallowedTools!, no), `maintainer must not run: ${no}`);
+});
+
+test("the review loop is capped and goes back to an engineer, never straight to a merge", () => {
+  const jobs = src("jobs.ts");
+  assert.match(src("agents.ts"), /export const MAX_FIX_ROUNDS = [1-5];/, "fix rounds must stay capped at a small number");
+  assert.match(jobs, /if \(round > MAX_FIX_ROUNDS\)/);
+  assert.match(jobs, /private afterReview[\s\S]*?this\.start\(\s*"engineer"/, "a requested change goes to an engineer, who opens no merge");
+});

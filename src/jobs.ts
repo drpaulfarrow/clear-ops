@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
 import type { AgentRunner } from "./agents.js";
-import { PR_KINDS, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
+import { MAX_FIX_ROUNDS, PR_KINDS, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 
@@ -31,8 +31,8 @@ export class JobRunner {
     private readonly run: AgentRunner,
   ) {}
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string): Job {
-    const job = this.store.createJob(kind, brief, requestedBy, target, replyTo);
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "pr" | "fixRound" | "reviewOf"> = {}): Job {
+    const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
     const key = lockKey(job);
     if (key) {
       const holder = this.holder(key);
@@ -177,13 +177,19 @@ export class JobRunner {
       // An engineer's pull request is reviewed by the maintainer without anyone asking. The
       // maintainer is not an engineering kind, so it runs at once and never waits for the lock.
       let chained = "";
+      let escalation: string | undefined;
       if (job.kind === "engineer") {
+        // A fix round already knows its pull request; a fresh job's is read from its report.
+        const pr = job.pr ?? findPrUrl(result.text);
+        if (pr && !job.pr) this.store.updateJob(id, { pr });
+        const which = pr ? `the pull request ${pr}, which the engineer just ${job.fixRound ? "updated to address your last review" : "opened for this task"}` : "the pull request just opened by the engineer for this task";
         const m = this.start(
           "maintain",
-          `Review the pull request just opened by the engineer for this task, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${result.text}`,
+          `Review ${which}, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${result.text}`,
           job.requestedBy,
           job.target,
           job.replyTo,
+          { reviewOf: id, pr },
         );
         chained = `\nMaintainer job ${m.id} started to review and merge.`;
       }
@@ -199,14 +205,23 @@ export class JobRunner {
             job.requestedBy,
             "self",
             job.replyTo,
+            { reviewOf: id, pr: findPrUrl(result.text) },
           );
           chained = `\nMaintainer job ${m.id} started to review and merge.`;
         }
+      }
+      // Close the review loop: changes requested on the reviewed job's pull request go back to an
+      // engineer, up to MAX_FIX_ROUNDS; anything only the founder can unblock is put to him once.
+      if (job.kind === "maintain" && job.reviewOf) {
+        const next = this.afterReview(job, result.text);
+        chained = next.chained;
+        escalation = next.escalation;
       }
       await this.messenger.send(
         job.replyTo ?? job.requestedBy,
         `Job ${id} (${job.kind}${job.target === "self" ? ", workforce" : ""}) finished.${cost}${chained}\n\n${summary}\n\n${result.text.length > summary.length ? `Full output saved. Ask "show job ${id}" for the rest or ask me questions about it.` : ""}`.trim(),
       );
+      if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error });
@@ -221,6 +236,72 @@ export class JobRunner {
       }
     }
   }
+
+  /**
+   * Decides what follows a maintainer review of an engineering job's pull request. Only the reviewed
+   * job's own pull request counts; other pull requests the maintainer looked at are reported as usual.
+   */
+  private afterReview(review: Job, text: string): { chained: string; escalation?: string } {
+    const reviewed = review.reviewOf ? this.store.getJob(review.reviewOf) : undefined;
+    if (!reviewed) return { chained: "" };
+    const verdicts = parseReviewVerdicts(text);
+    const pr = review.pr ?? reviewed.pr;
+    const verdict = pr ? verdicts.find((v) => samePr(v.pr, pr)) : verdicts.length === 1 ? verdicts[0] : undefined;
+    if (!verdict || verdict.outcome === "merged") return { chained: "" };
+    const url = verdict.pr;
+    const target = lockKey(reviewed) ?? reviewed.target ?? "product";
+    if (verdict.outcome === "needs_founder") {
+      return {
+        chained: "",
+        escalation: `Action needed from you on ${url}: ${verdict.detail || "the maintainer says only you can unblock it; see its report above."}\nOnce that is done, tell me and I will have it re-reviewed.`,
+      };
+    }
+    const round = (reviewed.kind === "engineer" ? reviewed.fixRound ?? 0 : 0) + 1;
+    if (round > MAX_FIX_ROUNDS) {
+      return {
+        chained: "",
+        escalation: `${url} is still not mergeable after ${MAX_FIX_ROUNDS} automatic fix rounds, so I have stopped. The maintainer's blocking issues are in its report above. What you can do: reply "one more fix round on ${url}" to try again, give a steer on the point it is stuck on, or close the pull request.`,
+      };
+    }
+    const fix = this.start(
+      "engineer",
+      `Address the maintainer's review on the existing pull request ${url} (automatic fix round ${round} of ${MAX_FIX_ROUNDS}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${reviewed.brief}\n\nMaintainer's review (job ${review.id}):\n${text}`,
+      reviewed.requestedBy,
+      target,
+      reviewed.replyTo,
+      { pr: url, fixRound: round },
+    );
+    const queued = fix.waitingFor ? `, queued behind job ${fix.waitingFor}` : "";
+    return { chained: `\nChanges requested on ${url}. Engineer job ${fix.id} started to fix them (round ${round} of ${MAX_FIX_ROUNDS}${queued}); it is re-reviewed automatically.` };
+  }
+}
+
+export interface ReviewVerdict {
+  pr: string;
+  outcome: "merged" | "changes_requested" | "needs_founder";
+  detail?: string;
+}
+
+/** Reads the maintainer's "REVIEW <url>: ..." lines (see REVIEW_VERDICT_RULES in agents.ts). */
+export function parseReviewVerdicts(text: string): ReviewVerdict[] {
+  const out: ReviewVerdict[] = [];
+  for (const m of text.matchAll(/^[ \t>*`_-]*REVIEW[ \t]+<?(\S+?)>?[ \t]*:[ \t]*(merged|changes requested|needs Paul)\b[ \t:]*(.*)$/gim)) {
+    const word = m[2].toLowerCase();
+    const outcome = word === "merged" ? "merged" : word === "changes requested" ? "changes_requested" : "needs_founder";
+    out.push({ pr: m[1], outcome, detail: m[3].replace(/[*`_]+$/, "").trim() || undefined });
+  }
+  return out;
+}
+
+/** The first GitHub pull request URL in a report. */
+export function findPrUrl(text: string): string | undefined {
+  return text.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/)?.[0];
+}
+
+/** Two references to the same pull request, by number ("#12", ".../pull/12"). */
+export function samePr(a: string, b: string): boolean {
+  const n = (s: string) => s.match(/(?:\/pull\/|#)(\d+)/)?.[1];
+  return n(a) !== undefined && n(a) === n(b);
 }
 
 /** True only when the agent-creator's output opens with the schedule verdict, i.e. it wrote no code. */

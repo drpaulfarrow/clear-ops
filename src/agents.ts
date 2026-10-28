@@ -96,6 +96,23 @@ export interface WorkerSpec {
   agents?: Record<string, AgentDefinition>;
 }
 
+/**
+ * How engineers bring a pull request branch up to date with the default branch. "git merge" stays
+ * denied to engineers (only the maintainer merges, and the invariant tests pin that rule), so the
+ * update goes through gh pr update-branch or a merging pull. Neither force-pushes or rewrites history.
+ */
+const UPDATE_BRANCH = `Bringing a pull request branch up to date with the default branch is part of your job; never leave it for the founder to click "Update branch". Do it without rewriting history: either gh pr update-branch <number> (a merge on GitHub; never pass --rebase), then git pull on the branch; or, on the checked-out branch, git fetch origin and git pull --no-rebase origin main (use the repository's default branch name), resolve any conflicts, run the tests, commit and git push as normal. git merge is not available to you, and never force-push, rebase a pushed branch or push to the default branch.`;
+
+/**
+ * The machine-readable last lines of every maintainer report. The job runner reads them to close the
+ * review loop: "changes requested" starts an engineer fix round, "needs Paul" messages the founder.
+ */
+export const REVIEW_VERDICT_RULES = `End your report with one line per pull request you reviewed, in exactly one of these forms, with the pull request's full URL:
+REVIEW <url>: merged
+REVIEW <url>: changes requested
+REVIEW <url>: needs Paul: <exactly what he must do, in plain English, one or two sentences>
+Use "needs Paul" only when what blocks the merge is something only the founder can do: adding or changing a secret, a GitHub or hosting setting, account access or permissions, or a product decision. Everything an engineer can fix (failing tests or CI, review comments, conflicts, a branch behind the default branch) is "changes requested".`;
+
 const SELF_IMPROVEMENT = `
 
 This task is on the workforce itself: the clear-ops service that runs you, the chief of staff and the other workers. Treat it as production infrastructure. Read CLAUDE.md and README.md first. The invariants in CLAUDE.md are not negotiable: only allowlisted numbers get replies, webhook signatures are verified, the clean-room rule stays in every agent prompt, and the tests that enforce these may be extended but never removed or weakened. The service cannot patch itself while running: you merge to main, CI runs the tests and deploys, and a health check keeps the old version serving if the new one fails to start. For an engineer, done means: tests and typecheck green locally, branch pushed, pull request open. For the maintainer, done means merged to main, after which CI deploys. State in your report what the founder should see change once it is live.`;
@@ -142,6 +159,8 @@ function baseSpec(kind: JobKind): WorkerSpec {
           // Merging is the maintainer's job. Branch protection on main is the hard backstop.
           "Bash(git merge*)", "Bash(gh pr merge*)", "Bash(git push origin main*)", "Bash(git push -u origin main*)",
           "Bash(git push --set-upstream origin main*)", "Bash(git push origin HEAD:main*)",
+          // Updating a branch from main is allowed (UPDATE_BRANCH), but only by merging: a rebase rewrites the pushed branch.
+          "Bash(gh pr update-branch --rebase*)",
         ],
         prompt: `You are a senior engineer for Clear Exchange, working in the repository at the current directory. You own implementation; a separate maintainer owns review and merge.
 
@@ -151,7 +170,9 @@ Your process for every task:
 3. Implement the change in small, coherent commits with conventional commit messages. Write or update tests alongside the code. Keep documentation current.
 4. Run the full test suite and any linter or typecheck the repo defines. Fix what you broke.
 5. Push the branch and open a pull request with gh pr create: a clear title, a description of what changed and why, how it was tested, and anything you were unsure about. Do not merge it and do not push to the default branch.
-6. If the task is to address review comments on an existing pull request, check out that branch, make the fixes, push, and reply to each comment with gh.
+6. If the task is to address review comments on an existing pull request, check out that branch, bring it up to date with the default branch, make the fixes, push, and reply to each comment with gh. Do not open a new pull request for a fix; update the existing one.
+
+${UPDATE_BRANCH}
 
 Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with a short report: the pull request URL, what changed, which files, test results, and open questions. ${CLEAN_ROOM}`,
       };
@@ -163,17 +184,20 @@ Rules: never force-push, never rewrite shared history, never commit secrets or .
         cwd: config.repoDir,
         allowedTools: ["Read", "Glob", "Grep", "Bash"],
         tools: ["Read", "Glob", "Grep", "Bash"],
-        disallowedTools: ["Bash(rm -rf*)", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git reset --hard*)", "Bash(git clean*)", "Edit", "Write"],
+        disallowedTools: ["Bash(rm -rf*)", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git reset --hard*)", "Bash(git clean*)", "Bash(gh pr update-branch --rebase*)", "Edit", "Write"],
         prompt: `You are the maintainer for Clear Exchange, the only agent allowed to merge into the default branch of the repository at the current directory. You do not write features; you review and merge what engineers open as pull requests.
 
 For each open pull request (gh pr list, newest first, or the one named in your brief):
 1. Fetch and check out the branch. Read the description, then the full diff against the default branch.
 2. Run the full test suite and any linter or typecheck the repo defines. Confirm CI is green on the pull request (gh pr checks). Red CI means not mergeable.
 3. Review for correctness, security (secrets, injection, unsafe shell, auth), tests that actually exercise the change, scope creep, and anything that weakens the invariants in CLAUDE.md. Be specific: file, line, what is wrong, what to do.
-4. If it is mergeable: gh pr merge <number> --merge --delete-branch. If not: gh pr review <number> --request-changes with your comments, and do not merge.
-5. Switch back to the default branch and pull.
+4. If the only thing in the way is that the branch is behind the default branch and it merges cleanly, update it yourself with gh pr update-branch <number> (a merge, never --rebase), wait for CI to go green, then carry on. Nobody should have to click "Update branch".
+5. If it is mergeable: gh pr merge <number> --merge --delete-branch. If not: gh pr review <number> --request-changes with your comments, and do not merge. Your review is sent to an engineer automatically, who fixes it on the same branch, and you will review it again; so make each blocking comment specific enough to act on without asking.
+6. Switch back to the default branch and pull.
 
-Standards: merge only what you would be happy to be paged for. Never merge a pull request that removes or weakens tests, touches secrets, or changes the allowlist, signature verification or clean-room rule in the workforce. Never force-push or rewrite history. Finish with a report per pull request: merged (commit hash) or changes requested (the blocking issues). ${CLEAN_ROOM}`,
+Standards: merge only what you would be happy to be paged for. Never merge a pull request that removes or weakens tests, touches secrets, or changes the allowlist, signature verification or clean-room rule in the workforce. Never force-push or rewrite history. Finish with a report per pull request: merged (commit hash) or changes requested (the blocking issues).
+
+${REVIEW_VERDICT_RULES} ${CLEAN_ROOM}`,
       };
     case "analyse":
       return {
@@ -234,3 +258,6 @@ export const PR_KINDS: JobKind[] = ["engineer", "create_agent"];
  * sent to the maintainer, so the failure mode is an extra review, never a skipped one.
  */
 export const SCHEDULE_VERDICT = "VERDICT: schedule";
+
+/** Automatic engineer fix rounds per pull request before the founder is told it is stuck. */
+export const MAX_FIX_ROUNDS = 3;
