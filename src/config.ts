@@ -59,6 +59,13 @@ export const config = {
     worker: process.env.WORKER_MODEL ?? "sonnet",
     engineer: process.env.ENGINEER_MODEL ?? "opus",
   },
+  /**
+   * Files the founder sends in chat. On the data volume, outside every git checkout, owner-only.
+   * Override with UPLOADS_DIR; it must not sit inside REPO_DIR or SELF_REPO_DIR.
+   */
+  uploadsDir: path.resolve(process.env.UPLOADS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "uploads")),
+  /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
+  uploadMaxMb: Number(process.env.UPLOAD_MAX_MB ?? 20),
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */
