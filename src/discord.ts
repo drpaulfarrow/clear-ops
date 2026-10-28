@@ -2,6 +2,7 @@ import { ChannelType, Client, GatewayIntentBits, Partials, type Message, type Te
 import { config } from "./config.js";
 import { chunk, type Messenger } from "./whatsapp.js";
 import type { HandleContext } from "./orchestrator.js";
+import { fetchCapped, UploadError, type Attachment } from "./uploads.js";
 
 /** Discord addresses: "dc:u:<user id>" for a person, "dc:c:<channel or thread id>" for a place. */
 export const DC_USER = "dc:u:";
@@ -10,6 +11,30 @@ export const dcUser = (id: string) => `${DC_USER}${id}`;
 export const dcChannel = (id: string) => `${DC_CHANNEL}${id}`;
 
 const DISCORD_MAX = 1900; // Discord's limit is 2000 characters per message
+
+/** The fields of a Discord attachment we use. */
+export interface DiscordFile {
+  name: string;
+  contentType?: string | null;
+  size: number;
+  url: string;
+}
+
+/** Discord serves attachments from its own CDN only; anything else is refused. */
+const DISCORD_CDN = /^https:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\//i;
+
+/** A Discord attachment that downloads only when asked (after the allowlist check), from Discord's CDN only. */
+export function discordAttachment(f: DiscordFile, fetchImpl: typeof fetch = fetch): Attachment {
+  return {
+    name: f.name,
+    mimeType: f.contentType ?? undefined,
+    size: f.size,
+    async download(maxBytes: number) {
+      if (!DISCORD_CDN.test(f.url)) throw new UploadError("refused a download from outside Discord");
+      return fetchCapped(f.url, maxBytes, fetchImpl);
+    },
+  };
+}
 
 /** Sends to a channel, thread or user through the Discord gateway client, and opens job threads. */
 export class DiscordMessenger implements Messenger {
@@ -77,7 +102,7 @@ export class DiscordMessenger implements Messenger {
 
 /**
  * Listens on the Discord gateway (a WebSocket; no public URL needed). Every message from an
- * allowlisted user in a server channel, thread or DM goes to the handler. Replies go back to
+ * allowlisted user in a server channel, thread or DM goes to the handler, with any attached files. Replies go back to
  * the same place, so a thread is its own conversation.
  */
 export class DiscordListener {
@@ -109,8 +134,14 @@ export class DiscordListener {
   }
 
   /** Exposed for tests: route one message without the gateway. */
-  async onMessage(m: Pick<Message, "author" | "content" | "channelId" | "id"> & { channel?: { send?: (t: string) => Promise<unknown> } }): Promise<void> {
-    if (m.author.bot || !m.content?.trim()) return;
+  async onMessage(
+    m: Pick<Message, "author" | "content" | "channelId" | "id"> & {
+      channel?: { send?: (t: string) => Promise<unknown> };
+      attachments?: { values(): Iterable<DiscordFile> };
+    },
+  ): Promise<void> {
+    const files = m.attachments ? [...m.attachments.values()] : [];
+    if (m.author.bot || (!m.content?.trim() && !files.length)) return;
     const from = dcUser(m.author.id);
     const replyTo = dcChannel(m.channelId);
     if (!this.isAllowed(from)) {
@@ -120,6 +151,6 @@ export class DiscordListener {
       }
       return;
     }
-    await this.handle(from, m.content, { replyTo, messageId: m.id });
+    await this.handle(from, m.content ?? "", { replyTo, messageId: m.id, ...(files.length ? { attachments: files.map((f) => discordAttachment(f)) } : {}) });
   }
 }

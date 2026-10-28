@@ -77,7 +77,7 @@ if (isMain) {
   app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
 
   if (config.channels.includes("telegram")) {
-    void new TelegramPoller((from, text) => orchestrator.handle(from, text), messenger, isAllowed).start();
+    void new TelegramPoller((from, text, ctx) => orchestrator.handle(from, text, ctx), messenger, isAllowed).start();
   }
   if (discord) await discord.start();
 
