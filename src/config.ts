@@ -59,6 +59,13 @@ export const config = {
     worker: process.env.WORKER_MODEL ?? "sonnet",
     engineer: process.env.ENGINEER_MODEL ?? "opus",
   },
+  /** The design worker: what it looks at, its browser, model and spend cap per job. */
+  design: {
+    siteUrl: process.env.DESIGN_SITE_URL || "https://clear-exchange.fly.dev",
+    chromiumPath: process.env.CHROMIUM_PATH || "chromium",
+    model: process.env.DESIGN_MODEL ?? "opus",
+    budgetUsd: Number(process.env.DESIGN_BUDGET_USD ?? 10),
+  },
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */
