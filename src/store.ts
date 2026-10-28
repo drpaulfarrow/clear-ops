@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
+import type { FailureKind } from "./failures.js";
 
 export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design";
 /**
@@ -67,6 +68,24 @@ export interface Job {
   outputPath?: string;
   costUsd?: number;
   error?: string;
+  /**
+   * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,
+   * overload, no output) or threw. A failed job did no work, and nothing follows it automatically.
+   */
+  failure?: FailureKind;
+}
+
+/**
+ * Set when a job failed on something that would fail every run until Paul acts (no Anthropic credit, a
+ * rejected key). While it is set no queued engineering job starts; /resume or the chief's resume_jobs
+ * clears it, reruns the jobs that failed and restarts the queues.
+ */
+export interface QueueHold {
+  kind: FailureKind;
+  /** The job whose failure set the hold. */
+  jobId: string;
+  since: string;
+  detail: string;
 }
 
 export interface PendingAction {
@@ -168,6 +187,7 @@ interface State {
   followups: Record<string, FollowUp>;
   holdGroups: Record<string, HoldGroup>;
   settings: Settings;
+  queueHold?: QueueHold;
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -389,6 +409,16 @@ export class Store {
     Object.assign(g, patch);
     this.save();
     return g;
+  }
+
+  // Queue hold
+  queueHold(): QueueHold | undefined {
+    return this.state.queueHold ? { ...this.state.queueHold } : undefined;
+  }
+  setQueueHold(hold: QueueHold | undefined): void {
+    if (hold) this.state.queueHold = hold;
+    else delete this.state.queueHold;
+    this.save();
   }
 
   // Settings

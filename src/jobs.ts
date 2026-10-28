@@ -8,6 +8,7 @@ import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, typ
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
+import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 
 const exec = promisify(execFile);
@@ -30,6 +31,8 @@ export class JobRunner {
   private holders = new Map<JobTarget, string>();
 
   private readonly waitForDeploy: DeployWait;
+  /** Batches failure messages so an outage that fails many jobs sends Paul one message, not a flood. */
+  readonly failures: FailureNotifier;
 
   constructor(
     private readonly store: Store,
@@ -37,9 +40,10 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait } = {},
+    opts: { waitForDeploy?: DeployWait; failureNotices?: FailureNotifierOptions } = {},
   ) {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
+    this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
   start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth"> = {}): Job {
@@ -51,15 +55,98 @@ export class JobRunner {
     if (kind !== "research") delete extra.depth;
     else extra.depth = extra.depth === "deep" || extra.depth === "standard" ? extra.depth : detectDepth(brief);
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
+    return this.dispatch(job);
+  }
+
+  /**
+   * Runs a queued job now, or puts an engineering job in its repository's queue: behind the job holding
+   * the lock, or, while the queues are held after a credit or key failure, behind the job that failed.
+   * `ignoreHold` is for a job Paul explicitly asked to retry.
+   */
+  private dispatch(job: Job, ignoreHold = false): Job {
     const key = lockKey(job);
     if (key) {
       const holder = this.holder(key);
       if (holder) return this.store.updateJob(job.id, { waitingFor: holder, queuePos: this.nextQueuePos() });
+      const hold = this.store.queueHold();
+      if (hold && !ignoreHold) return this.store.updateJob(job.id, { waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
       this.holders.set(key, job.id);
     }
     // Fire and forget. The webhook has already been acknowledged.
     void this.execute(job.id);
-    return job;
+    return this.store.getJob(job.id) ?? job;
+  }
+
+  /** The queue hold, if a credit or key failure has paused the engineering queues. */
+  hold() {
+    return this.store.queueHold();
+  }
+
+  /** True when a queued job is waiting for the hold to be lifted rather than for a running job. */
+  isHeld(job: Pick<Job, "status" | "waitingFor">): boolean {
+    const hold = this.store.queueHold();
+    return !!hold && job.status === "queued" && !!job.waitingFor && this.store.getJob(job.waitingFor)?.status !== "running";
+  }
+
+  /** The sentence the failure message carries about the hold: how many queued jobs are waiting. */
+  private holdSentence(kind: FailureKind): string {
+    if (!HOLD_KINDS.includes(kind) || !this.store.queueHold()) return "";
+    const n = this.waiting("product").length + this.waiting("self").length;
+    return n
+      ? `I have paused the engineering queue so the ${n === 1 ? "job" : `${n} jobs`} waiting in it ${n === 1 ? "does" : "do"} not fail the same way.`
+      : "I have paused the engineering queue so nothing else fails the same way.";
+  }
+
+  /**
+   * Puts a failed job back to work under the same id, title and links (pull request, review, loop), as
+   * if it had just been started. Paul asked for it, so it runs even while the queues are held.
+   */
+  retry(id: string): Job {
+    const job = this.store.getJob(id);
+    if (!job) throw new Error(`No job ${id}.`);
+    if (job.status !== "failed") throw new Error(`${jobRef(job, id)} is ${job.status}, not failed, so there is nothing to retry.`);
+    const reset = this.store.updateJob(id, { status: "queued", error: undefined, failure: undefined, finishedAt: undefined, waitingFor: undefined, queuePos: undefined, resumed: undefined });
+    return this.dispatch(reset, true);
+  }
+
+  /**
+   * Lifts the queue hold once Paul has fixed the cause, reruns the jobs that failed (those named, or by
+   * default every job that failed on credit or a rejected key during this outage) and restarts both
+   * repositories' queues. Retried engineering jobs go to the front of their queue, oldest first.
+   */
+  async resume(ids?: string[]): Promise<{ retried: Job[]; skipped: string[]; released: boolean }> {
+    const hold = this.store.queueHold();
+    this.store.setQueueHold(undefined);
+    const targets = ids?.length ? ids.map((i) => i.trim().toLowerCase()).filter(Boolean) : this.outageFailures(hold).map((j) => j.id);
+    const retried: Job[] = [];
+    const skipped: string[] = [];
+    const front = Math.min(0, ...this.store.allJobs().map((j) => j.queuePos ?? 0)) - targets.length - 1;
+    targets.forEach((id, i) => {
+      const job = this.store.getJob(id);
+      if (!job || job.status !== "failed") {
+        skipped.push(id);
+        return;
+      }
+      const reset = { status: "queued" as const, error: undefined, failure: undefined, finishedAt: undefined, resumed: undefined };
+      if (lockKey(job)) {
+        // Line up first; startNext below hands each repository to the first in line.
+        retried.push(this.store.updateJob(id, { ...reset, waitingFor: hold?.jobId ?? id, queuePos: front + i }));
+      } else {
+        retried.push(this.dispatch(this.store.updateJob(id, { ...reset, waitingFor: undefined, queuePos: undefined })));
+      }
+    });
+    for (const key of ["product", "self"] as JobTarget[]) await this.startNext(key);
+    return { retried: retried.map((j) => this.store.getJob(j.id) ?? j), skipped, released: !!hold };
+  }
+
+  /** Jobs that failed on the hold's cause during this outage (or on credit or a key in the last day). */
+  private outageFailures(hold: ReturnType<Store["queueHold"]>): Job[] {
+    const since = hold ? Date.parse(hold.since) - 60_000 : Date.now() - 24 * 3_600_000;
+    const kinds: FailureKind[] = hold ? [hold.kind] : HOLD_KINDS;
+    return this.store
+      .allJobs()
+      .filter((j) => j.status === "failed" && j.failure && kinds.includes(j.failure) && Date.parse(j.finishedAt ?? j.createdAt) >= since)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   /**
@@ -135,13 +222,16 @@ export class JobRunner {
   /** Hands a free repository lock to the first job in its queue and starts it. */
   private async startNext(key: JobTarget, finished?: string): Promise<void> {
     if (this.holders.has(key)) return;
+    // Held after a credit or key failure: the queue waits for /resume instead of failing job after job.
+    if (this.store.queueHold()) return;
     const [next, ...rest] = this.waiting(key);
     if (!next) return;
     this.holders.set(key, next.id);
     this.store.updateJob(next.id, { waitingFor: undefined, queuePos: undefined });
     for (const j of rest) this.store.updateJob(j.id, { waitingFor: next.id });
     void this.execute(next.id);
-    const after = finished ? `, now that ${jobRef(this.store.getJob(finished), finished)} has finished` : "";
+    const done = finished ? this.store.getJob(finished) : undefined;
+    const after = finished ? `, now that ${jobRef(done, finished)} has ${done?.status === "failed" ? "stopped" : "finished"}` : "";
     await this.messenger
       .send(next.replyTo ?? next.requestedBy, `Starting: ${jobLabel(next)} (was queued)${after}.`)
       .catch(() => undefined);
@@ -169,6 +259,13 @@ export class JobRunner {
       }
       const key = lockKey(job);
       const holder = key && this.holders.get(key);
+      const hold = this.store.queueHold();
+      if (key && !holder && hold) {
+        // The queues are held after a credit or key failure: wait for /resume rather than fail again.
+        this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
+        await this.messenger.send(job.replyTo ?? job.requestedBy, `Interrupted by a restart: ${jobLabel(job)}. The engineering queue is paused because ${failureReason(hold)}, so it waits; send /resume once that is fixed.`);
+        continue;
+      }
       if (key && holder) {
         // Another job on this repository has already reclaimed it: wait behind it.
         this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: holder, queuePos: this.nextQueuePos() });
@@ -241,6 +338,13 @@ export class JobRunner {
         maxTurns: limits.maxTurns,
         maxBudgetUsd: limits.maxBudgetUsd,
       });
+      // An API or SDK error (no credit, a rejected key, overload after retries, no output) is not work:
+      // it is recorded as failed, and nothing follows it (no review, no fix round, no "Finished").
+      const failed = runFailure(result);
+      if (failed) {
+        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
+        throw new RunFailedError(failed);
+      }
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
       const { report, message } = splitReport(result.text);
       const outputPath = this.store.writeOutput(id, report);
@@ -307,11 +411,7 @@ export class JobRunner {
       if (job.kind === "design") await this.sendImages(job, report);
       if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error });
-      // A failed round leaves its loop waiting for Paul rather than stalled for good.
-      this.pauseLoop(job.designLoop);
-      await this.messenger.send(job.replyTo ?? job.requestedBy, `Failed: ${jobLabel(job)}. ${shortText(error)}`);
+      await this.recordFailure(job, failureFromError(err));
     } finally {
       this.running.delete(id);
       // Success, failure or error: free the repository and start whoever is next in line.
@@ -321,6 +421,30 @@ export class JobRunner {
         await this.startNext(key, id);
       }
     }
+  }
+
+  /**
+   * A job that did no work: marked failed with the reason (job_status, /jobs and its saved output say
+   * why), its design loop paused, and Paul told. API failures are batched into one message per burst;
+   * credit and key failures also hold the engineering queues until Paul says /resume.
+   */
+  private async recordFailure(job: Job, failure: RunFailure): Promise<void> {
+    const finishedAt = new Date().toISOString();
+    const reason = failureReason(failure);
+    const outputPath = this.store.writeOutput(job.id, `This job failed and did no work, because ${reason}.\n\nError: ${failure.detail}\n`);
+    this.store.updateJob(job.id, { status: "failed", finishedAt, error: failure.detail, failure: failure.kind, outputPath, summary: `Failed (${failureLabel(failure.kind)}): ${shortText(failure.detail, 200)}` });
+    // A failed round leaves its loop waiting for Paul rather than stalled for good.
+    this.pauseLoop(job.designLoop);
+    if (HOLD_KINDS.includes(failure.kind) && !this.store.queueHold()) {
+      this.store.setQueueHold({ kind: failure.kind, jobId: job.id, since: finishedAt, detail: failure.detail });
+    }
+    const current = this.store.getJob(job.id) ?? job;
+    if (failure.kind === "error") {
+      // Something in the service threw (not the API): one job, said at once, as before.
+      await this.messenger.send(job.replyTo ?? job.requestedBy, `Failed: ${jobLabel(current)}. ${shortText(failure.detail)}`).catch(() => undefined);
+      return;
+    }
+    this.failures.add(current, failure);
   }
 
   /**

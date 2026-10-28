@@ -15,6 +15,7 @@ import { FOLLOWUP_COMMANDS, FollowUps, parseWhen } from "./followups.js";
 import { validBookingLink } from "./meetings.js";
 import { fmt } from "./london.js";
 import { PAUL_STYLE, shortText, tidyReply } from "./messages.js";
+import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { jobLabel, jobRef, jobTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
@@ -22,6 +23,8 @@ const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company b
 You talk to Paul over a chat app on his phone. ${PAUL_STYLE} That holds for your own replies too: three or four plain sentences, direct and honest, no flattery, and when you relay a job's result, say what it did and what he needs to do in your own words with its link rather than pasting its report. The only exception is steps Paul must follow himself (such as the Google setup steps), which may stay numbered. Each worker's finish message already reached him, so do not repeat it unless he asks; when he wants the detail, read it with get_output and answer the question he asked.
 
 You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), design (brand and design director, see below), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data), create_agent (the agent-creator, see below). Every agent can read both repositories. Research has a depth: pass depth "deep" when Paul wants deep, thorough or multi-part research (a market and competitor landscape, several questions at once, "go deep"); the researcher then writes a long, structured report with an executive summary at the top, with more turns and budget, and still sends Paul only a short message. Leave it out, or pass "standard", for a quick brief. Give the engineer a clear outcome, not instructions on how; it decides the approach. The review loop closes itself: when the maintainer requests changes on an engineer's or agent-creator's pull request, an engineer job to address that review on the same pull request starts automatically (queued like any engineering job), and the update is re-reviewed automatically, up to 3 fix rounds per pull request. Engineers and the maintainer bring branches up to date with main themselves. If it is still not mergeable after 3 rounds, or the blocker is something only Paul can do (a secret, a GitHub or hosting setting, account access, a product decision), Paul is messaged once with exactly what he must do. So never ask Paul whether to merge or fix a pull request, and do not start fix jobs by hand unless he asks for another round after the loop has stopped. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. When Paul asks for a new kind of agent in plain language ("I want an agent that monitors IAB Tech Lab announcements weekly", "an agent that drafts publisher outreach"), start a create_agent job and pass his request on in his words, plus any context from the conversation; do not design it yourself or tell him how it will be built. The agent-creator decides whether it is a scheduled job on an existing kind (it then recommends a brief and cron and writes no code) or a new worker kind (it opens a pull request on this workforce, which the maintainer reviews and merges like any other). When it recommends a schedule and Paul agrees, read the job with get_output and call schedule_job with the kind, cron and brief it gave. Use engineer with target "self" for other changes to the workforce, and create_agent only for adding an agent. design is the brand and design director: it screenshots the live site (https://clear-exchange.fly.dev) and branches with a headless browser and looks at them, runs critiques as buyer personas (a publisher's head of revenue, an AI company's product lead, an investor), and writes brand work (logo direction, palette, type, tone, UI principles) and page specs an engineer can build. It writes no production code and never merges. Use a single design job for a one-off critique, brand directions or a spec. Use the design loop (start_job with kind design and loop true) when Paul wants the site improved until it is customer-ready ("make the site look like something I can show customers"): the designer critiques and writes a spec, an engineer builds it on the product (queued like any engineer job), the maintainer reviews and merges, and after CI deploys the designer looks at the live site again; up to 3 implemented rounds, or fewer if the critiques find no high-impact issues, then a closing report to Paul. The loop runs itself; do not start its engineer or design jobs by hand. When it pauses for a decision only Paul can make (for example one of three brand directions), the images and the question go to him; when he answers, call start_job with kind design, continueLoop set to the id of the job that asked, and his answer as the brief. Pass his goal on in his words. Only one engineering job (engineer or create_agent) runs per repository at a time, product and workforce counted separately. Queueing is automatic: if one is already running on that repository, start_job queues the new one and tells you which job it is waiting behind, and it starts by itself when that finishes, in the order requested. So start engineer jobs whenever they are needed, without checking job_status first, and tell Paul when one is queued. The maintainer and the other kinds never wait. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
+
+A job whose status is "failed" did no work: it never finished, whatever its output says, and nothing followed it (no review, no fix round, no merge). Never tell Paul a failed job ran or is done, and never act on it as if it had (do not start or expect a review of a pull request it was meant to open). job_status gives its failure and reason; Paul has already been told in one short message, so do not repeat it unless he asks. When jobs fail because the Anthropic account is out of credit or the API key was rejected, the service pauses the engineering queue so queued jobs are not burned one after another, and the failed jobs and the queue wait for Paul to fix it. Once he says it is fixed (credit topped up, key replaced), call resume_jobs: it lifts the pause, reruns the jobs that failed and restarts the queue. Paul can also send /resume himself, or retry <id> for one job. For a failure from rate limits, overload or no output, nothing waits; call resume_jobs with the ids when he wants them rerun.
 
 Every job you start or schedule needs a title: ${TITLE_MAX_WORDS} words or fewer, specific enough that Paul knows which job it is at a glance among a dozen others, e.g. "Fly deploy", "Web UI restyle", "TollBit research", "Publisher pitch deck", "Inbox triage". Name the thing, not the worker or the process: no "Engineer job", "Task", "Research on", ids or dates. It is what Paul sees in the thread name, /jobs, queue messages and every report, so when you mention a job to him, use its title (and the id when he may need to type it). The brief stays complete and self-contained; the title does not replace it.
 
@@ -93,6 +96,9 @@ export class Orchestrator {
       return this.messenger.send(from, "Started a fresh conversation. Jobs, schedules and notes are kept.");
     }
     if (/^\/jobs$/i.test(trimmed)) return this.messenger.send(from, this.jobsText());
+    if (/^\/resume$/i.test(trimmed)) return this.messenger.send(from, await this.resumeJobs());
+    const retry = trimmed.match(/^\/?retry\s+((?:[a-f0-9]{6}[\s,]*)+)$/i);
+    if (retry) return this.messenger.send(from, await this.resumeJobs(retry[1].split(/[\s,]+/).filter(Boolean)));
     if (/^\/pending$/i.test(trimmed)) return this.messenger.send(from, this.pendingText());
     if (/^\/(help|start)$/i.test(trimmed)) return this.messenger.send(from, HELP);
     if (/^\/uploads$/i.test(trimmed)) return this.messenger.send(from, this.uploadsText());
@@ -157,6 +163,10 @@ export class Orchestrator {
         onToolUse: (name, input) => status.update(describeToolUse(name, input)),
       });
       await status.finish();
+      if (result.error) {
+        // The chief itself hit the API error (no credit, a rejected key): say so plainly, not the raw text.
+        return this.messenger.send(from, chiefFailureText(result.error));
+      }
       if (result.sessionId) this.store.setSession(from, result.sessionId);
       await this.messenger.send(from, tidyReply(result.text) || "(no reply)");
     } catch (err) {
@@ -236,7 +246,22 @@ export class Orchestrator {
 
   private standingNotes(): string {
     const notes = this.store.notes();
-    return notes.length ? `\n\nStanding instructions from Paul:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
+    const hold = this.store.queueHold();
+    const paused = hold
+      ? `\n\nRight now the engineering queue is paused: job ${hold.jobId} failed because ${failureReason(hold)} (since ${hold.since}). Queued engineering jobs wait, and jobs that failed are not done. When Paul says it is fixed, call resume_jobs.`
+      : "";
+    return (notes.length ? `\n\nStanding instructions from Paul:\n${notes.map((n) => `- ${n}`).join("\n")}` : "") + paused;
+  }
+
+  /** /resume, retry <id> and the chief's resume_jobs: lift the pause, rerun failed jobs, restart the queues. */
+  private async resumeJobs(ids?: string[]): Promise<string> {
+    const { retried, skipped, released } = await this.jobs.resume(ids);
+    const parts: string[] = [];
+    if (released) parts.push("The engineering queue is running again.");
+    if (retried.length) parts.push(`Rerunning ${retried.length === 1 ? jobRef(retried[0], retried[0].id) : `${retried.length} jobs: ${retried.map((j) => jobRef(j, j.id)).join(", ")}`}.`);
+    if (skipped.length) parts.push(`Nothing to retry for ${skipped.join(", ")} (not a failed job).`);
+    if (!parts.length) return "Nothing is paused and no jobs failed recently, so there is nothing to resume.";
+    return parts.join(" ");
   }
 
   private async handleApproval(from: string, verb: string, id: string): Promise<void> {
@@ -266,12 +291,19 @@ export class Orchestrator {
 
   private jobsText(): string {
     const jobs = this.store.listJobs(10);
-    if (!jobs.length) return "No jobs yet.";
-    return jobs.map((j) => `${jobLabel(j)} · ${this.statusText(j)}`).join("\n");
+    const hold = this.store.queueHold();
+    const paused = hold ? `Engineering queue paused: ${failureReason(hold)}. Send /resume once it is fixed.\n` : "";
+    if (!jobs.length) return `${paused}No jobs yet.`;
+    return paused + jobs.map((j) => `${jobLabel(j)} · ${this.statusText(j)}`).join("\n");
   }
 
   private statusText(j: Job): string {
+    if (j.status === "failed") return `failed: ${j.failure ? failureLabel(j.failure) : shortText(j.error ?? "error", 60)}`;
     if (j.status !== "queued" || !j.waitingFor) return j.status;
+    if (this.jobs.isHeld(j)) {
+      const pos = this.jobs.queuePosition(j.id);
+      return `held until /resume${pos ? `, #${pos} on ${lockKey(j)}` : ""}`;
+    }
     const pos = this.jobs.queuePosition(j.id);
     return `queued behind ${jobRef(this.store.getJob(j.waitingFor), j.waitingFor)}${pos ? `, #${pos} on ${lockKey(j)}` : ""}`;
   }
@@ -350,6 +382,12 @@ export class Orchestrator {
             }
             const job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(kind === "ea" && permits?.length ? { permits: permits as EaPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}) });
             const label = jobLabel(job);
+            if (job.waitingFor && jobs.isHeld(job)) {
+              const hold = jobs.hold();
+              const why = `The engineering queue is paused because ${hold ? failureReason(hold) : "jobs failed"}`;
+              if (replyTo !== from) await this.messenger.send(replyTo, `Queued: ${label}. ${why}, so it starts once that is fixed and Paul sends /resume.`);
+              return { content: [{ type: "text", text: `Queued but held: ${label}. ${why}; it starts after resume_jobs or /resume.` }] };
+            }
             if (job.waitingFor) {
               const behind = `queued behind ${jobRef(store.getJob(job.waitingFor), job.waitingFor)}, the ${target === "self" ? "workforce" : "product"} repository's running engineering job`;
               if (replyTo !== from) await this.messenger.send(replyTo, `Queued: ${label}, ${behind}. It starts automatically when that finishes. Reports will land here.`);
@@ -364,18 +402,26 @@ export class Orchestrator {
         ),
         tool(
           "job_status",
-          "List recent jobs with their status, or one job by id. A queued engineering job shows the job it is waiting behind and its place in that repository's queue.",
+          'List recent jobs with their status, or one job by id. A queued engineering job shows the job it is waiting behind and its place in that repository\'s queue. Status "failed" means the job did no work (its failure and reason say why); it is not finished.',
           { id: z.string().optional() },
           async ({ id }) => {
             if (id) {
               const j = store.getJob(id);
               if (!j) return { content: [{ type: "text", text: `No job ${id}` }] };
-              const queue = j.waitingFor ? { queuedBehind: jobRef(store.getJob(j.waitingFor), j.waitingFor), queuePosition: jobs.queuePosition(j.id) } : {};
-              return { content: [{ type: "text", text: JSON.stringify({ title: jobTitle(j), ...j, ...queue }, null, 2) }] };
+              const held = jobs.isHeld(j);
+              const queue = j.waitingFor ? { ...(held ? { heldUntilResume: true } : { queuedBehind: jobRef(store.getJob(j.waitingFor), j.waitingFor) }), queuePosition: jobs.queuePosition(j.id) } : {};
+              const failed = j.status === "failed" ? { failedReason: `This job failed and did no work, because ${failureReason({ kind: j.failure ?? "error", detail: j.error ?? "" })}. Treat it as not done.` } : {};
+              return { content: [{ type: "text", text: JSON.stringify({ title: jobTitle(j), ...failed, ...j, ...queue }, null, 2) }] };
             }
             return { content: [{ type: "text", text: this.jobsText() }] };
           },
           { annotations: { readOnlyHint: true } },
+        ),
+        tool(
+          "resume_jobs",
+          "After Paul has fixed what made jobs fail (topped up Anthropic credit, replaced the API key), lift the engineering queue pause, rerun the failed jobs and restart the queues. With no ids it reruns every job that failed during the outage; with ids it reruns just those failed jobs. Only when Paul says it is fixed or asks for a rerun.",
+          { ids: z.array(z.string()).optional().describe("Failed job ids to rerun. Omit to rerun every job that failed on credit or a rejected key in this outage.") },
+          async ({ ids }) => ({ content: [{ type: "text", text: await this.resumeJobs(ids) }] }),
         ),
         tool(
           "get_output",
@@ -516,6 +562,8 @@ const HELP = `Talk to me normally. I answer quick things myself and delegate the
 
 Commands:
 /jobs: recent jobs
+/resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
+retry <id>: rerun one failed job
 /pending: actions waiting for your approval
 show job <id>: full output of a job
 Send a file (CSV, PDF, screenshot, zip) and I save it privately for me and the workers
@@ -527,6 +575,17 @@ YES <id> or NO <id>: approve or reject an action
 done <id>, snooze <id> 2d, draft nudge <id>: manage a follow-up
 /booking <link>: your booking link for scheduling drafts
 /reset: start a fresh conversation (jobs and notes are kept)`;
+
+/** What Paul sees when the chief itself could not run (no credit, a rejected key, the API down). */
+export function chiefFailureText(f: RunFailure): string {
+  const fix =
+    f.kind === "credit"
+      ? "Please top up the Anthropic credit at console.anthropic.com, then message me again."
+      : f.kind === "auth"
+        ? "Please check the ANTHROPIC_API_KEY in the workforce secrets is valid, then message me again."
+        : "Try again in a few minutes.";
+  return `I could not answer because ${failureReason(f)}. ${fix}`;
+}
 
 /** The brief for a drafted chaser or reply on a follow-up. The thread's content stays untrusted inside the job. */
 export function nudgeBrief(f: FollowUp): string {

@@ -6,6 +6,7 @@ import type { JobKind, JobTarget } from "./store.js";
 import { DESIGN_TOOLS, designDir, designRoot, designServer, MAX_DESIGN_ROUNDS } from "./design.js";
 import { EA_SERVER } from "./ea.js";
 import { REPORT_RULE } from "./messages.js";
+import { classifyError, type RunFailure } from "./failures.js";
 
 export interface RunOptions {
   prompt: string;
@@ -32,6 +33,11 @@ export interface RunResult {
   text: string;
   sessionId?: string;
   costUsd?: number;
+  /**
+   * Set when the run ended in an API or SDK error rather than real work (no credit, a rejected key,
+   * rate limits or overload after the retries, an execution error). The job runner records it as failed.
+   */
+  error?: RunFailure;
 }
 
 /** Anything that runs an agent turn. The real one wraps the Agent SDK; tests inject a fake. */
@@ -42,6 +48,9 @@ export const sdkRunner: AgentRunner = async (o) => {
   let text = "";
   let sessionId: string | undefined;
   let costUsd: number | undefined;
+  let error: RunFailure | undefined;
+  // The SDK's code for the last API error it hit (billing_error, rate_limit, ...), the best classifier.
+  let sdkError: string | undefined;
   try {
     for await (const message of query({
       prompt: o.images?.length ? withImages(o.prompt, o.images) : o.prompt,
@@ -68,6 +77,7 @@ export const sdkRunner: AgentRunner = async (o) => {
         },
       },
     })) {
+      if (message.type === "assistant" && message.error && !message.parent_tool_use_id) sdkError = message.error;
       if (message.type === "assistant" && o.onToolUse && !message.parent_tool_use_id) {
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;
@@ -81,15 +91,23 @@ export const sdkRunner: AgentRunner = async (o) => {
       if (message.type === "result") {
         sessionId = message.session_id;
         costUsd = message.total_cost_usd;
-        if (message.subtype === "success") text = message.result;
-        else text = `The agent stopped early (${message.subtype}).`;
+        if (message.subtype === "success") {
+          text = message.result;
+          // An API error (no credit, a bad key, overload after retries) arrives as a "success" whose
+          // result is the error text. That is not work: say so, so it is never recorded as done.
+          if (message.is_error) error = { kind: classifyError(text, sdkError, message.api_error_status), detail: text.trim() || "The API returned an error." };
+        } else if (message.subtype === "error_during_execution") {
+          const detail = message.errors?.join("; ").trim() || "The agent stopped with an execution error.";
+          text = `The agent stopped early (${message.subtype}).`;
+          error = { kind: classifyError(detail, sdkError), detail };
+        } else text = `The agent stopped early (${message.subtype}).`;
       }
     }
   } catch (err) {
     // A single-shot query() throws after yielding an error result; keep whatever we captured.
-    if (!text) throw err;
+    if (!text && !error) throw err;
   }
-  return { text, sessionId, costUsd };
+  return { text, sessionId, costUsd, ...(error ? { error } : {}) };
 };
 
 /**
