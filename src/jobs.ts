@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { bookingLink, config } from "./config.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
-import { MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
+import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobTarget, PendingAction, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
@@ -42,11 +42,14 @@ export class JobRunner {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth"> = {}): Job {
     // Only the executive assistant has permits, and only drafts and holds exist.
     extra = { ...extra };
     if (kind !== "ea") delete extra.permits;
     else if (extra.permits) extra.permits = [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds");
+    // Only research has a depth; unlabelled research (a scheduled run, say) takes it from the brief.
+    if (kind !== "research") delete extra.depth;
+    else extra.depth = extra.depth === "deep" || extra.depth === "standard" ? extra.depth : detectDepth(brief);
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
     const key = lockKey(job);
     if (key) {
@@ -221,8 +224,11 @@ export class JobRunner {
         job.kind === "ea"
           ? `\n\nThis job may change: ${job.permits?.length ? job.permits.join(" and ") : "nothing (read only)"}.${link ? ` Paul's booking link for scheduling drafts: ${link}` : ""}`
           : "";
+      const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
+      // Every run is capped; deep research gets more turns and budget than the default.
+      const limits = runLimits(job.kind, job.depth);
       const result = await this.run({
-        prompt: `${job.brief}${permits}${standing}${resume}`,
+        prompt: `${job.brief}${permits}${depth}${standing}${resume}`,
         systemPrompt: spec.prompt,
         model: spec.model,
         cwd: spec.cwd,
@@ -232,8 +238,8 @@ export class JobRunner {
         agents: spec.agents,
         mcpServers: ownTools || extraTools ? { ...extraTools, ...ownTools } : undefined,
         additionalDirectories: dirs,
-        maxTurns: PR_KINDS.includes(job.kind) ? 200 : job.kind === "maintain" || job.kind === "design" ? 80 : 40,
-        maxBudgetUsd: PR_KINDS.includes(job.kind) || job.kind === "maintain" ? config.engineerBudgetUsd : job.kind === "design" ? config.design.budgetUsd : config.jobBudgetUsd,
+        maxTurns: limits.maxTurns,
+        maxBudgetUsd: limits.maxBudgetUsd,
       });
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
       const { report, message } = splitReport(result.text);

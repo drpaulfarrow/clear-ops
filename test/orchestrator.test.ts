@@ -32,6 +32,12 @@ const fakeRunner: AgentRunner = async (o) => {
       }
       return { text: "Delegated (handler not found)", sessionId: "sess-1" };
     }
+    if (o.prompt.startsWith("deep research:")) {
+      const server = (ops as any).instance;
+      const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
+      const r = await handler({ kind: "research", title: "Market map", brief: o.prompt.slice(14).trim(), depth: "deep" }, {});
+      return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
+    }
     if (o.prompt.startsWith("design loop:")) {
       const server = (ops as any).instance;
       const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
@@ -119,6 +125,21 @@ test("delegation starts a job and the worker reports back", async () => {
   const workerCall = calls.find((c) => c.systemPrompt.includes("research analyst"))!;
   assert.deepEqual(workerCall.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
   assert.ok(workerCall.systemPrompt.includes("Clean room rule"));
+});
+
+test("the chief can ask for deep research: the job gets the deep depth, more turns and budget, and the deep note", async () => {
+  const { config } = await import("../src/config.js");
+  const { DEEP_RESEARCH_NOTE } = await import("../src/agents.js");
+  await post(inbound("447700900123", "deep research: who buys licensed content for AI answers"));
+  await waitFor(() => messenger.sent.some((m) => /^Finished: Market map · research · [a-f0-9]{6}\./.test(m.text)));
+  const job = store.allJobs().find((j) => j.title === "Market map")!;
+  assert.equal(job.depth, "deep");
+  const run = calls.find((c) => c.systemPrompt.includes("research analyst") && c.prompt.startsWith("who buys licensed content"))!;
+  assert.ok(run.prompt.includes(DEEP_RESEARCH_NOTE));
+  assert.equal(run.maxTurns, 200);
+  assert.equal(run.maxBudgetUsd, config.deepResearchBudgetUsd);
+  const chiefReply = messenger.sent.find((m) => m.text.startsWith("Delegated.") && m.text.includes("Market map"));
+  assert.match(chiefReply?.text ?? "", /Depth: deep/);
 });
 
 test("an engineer job targeted at the workforce itself runs in SELF_REPO_DIR with the self-improvement brief", async () => {
