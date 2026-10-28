@@ -8,6 +8,8 @@ While the chief is thinking you see it typing, plus one status line that updates
 
 Every job has a short title of five words or fewer ("Fly deploy", "TollBit research"), and that is how it appears everywhere: the Discord thread, `/jobs`, queue messages and every report, as `Fly deploy · engineer · 16d5d3`. The chief picks it; jobs the workforce starts itself are named after the job they follow ("Review: Fly deploy", "Fix round 2: Fly deploy", "Design round 2: Customer-ready site"), scheduled runs take their schedule's title, and the worker still gets the full brief.
 
+Everything the workforce sends you reads like a colleague on WhatsApp, not like a pull request: three or four plain sentences saying what was done, what you need to do if anything, and a link. No headings, "Outcome:", bullet lists or tables. Each worker writes two things: its full report, saved as the job's output (with any lines the workforce reads, such as the maintainer's verdicts), and a short message, which is all you see when the job finishes. Say `show job <id>` or ask the chief for the detail. The rule (`PAUL_STYLE` in `src/messages.ts`) is in every agent's prompt, and `src/messages.ts` strips anything that slips through before it reaches chat.
+
 Everything runs on the Claude Agent SDK. Conversation memory persists per phone number; jobs, approvals, schedules and standing notes persist in a JSON store on a volume.
 
 ## What you can say
