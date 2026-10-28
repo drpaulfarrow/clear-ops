@@ -2,7 +2,7 @@
 
 An agentic workforce for Clear Exchange that you run from chat: Telegram, Discord or WhatsApp, any or all at once.
 
-You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to six workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) an analyst (questions about previous outputs and data) and an agent-creator (turns a plain-language request for a new agent into either a recommended schedule on an existing worker or a new worker kind, delivered as a pull request the maintainer reviews). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
+You message a bot. A chief-of-staff agent answers quick questions itself and delegates longer work to seven workers: a researcher (web research, sourced briefs), a writer (specs, posts, emails in your voice), a senior engineer (implements on a branch with tests and opens a pull request), a maintainer (the one agent that reviews and merges, which runs automatically after every engineer job) an analyst (questions about previous outputs and data) and an agent-creator (turns a plain-language request for a new agent into either a recommended schedule on an existing worker or a new worker kind, delivered as a pull request the maintainer reviews) and a brand and design director (looks at the live site in a headless browser, critiques it as your buyers would, and writes brand work and page specs for an engineer to build). Every agent can read both repositories. Workers run in the background and message you when they finish. You direct; they deliver. The one thing that still waits for a `YES <id>` is a command run outside the engineer's normal remit, such as a deploy. Recurring jobs run on a schedule you set in chat.
 
 While the chief is thinking you see it typing, plus one status line that updates in place with what it is actually doing ("Checking job 39abb7…", "Searching the web: SPUR news…", "Starting an engineer job…") and disappears when the answer arrives. On WhatsApp, which supports neither, you get a single "Working on it." if it takes more than a few seconds.
 
@@ -18,6 +18,8 @@ Engineer: scaffold a Fastify service in the repo with a /health route and tests.
 Every Monday at 7am, research what changed in SPUR, CoMP, TollBit and Cloudflare.
 Remember: always price examples at half a cent per retrieval.
 I want an agent that drafts publisher outreach.
+Design: give me three brand directions for Clear Exchange.
+Run the design loop: make the site something I can show customers.
 show job 93137e
 /jobs   /pending   /reset   /help
 YES 1f3a9c
@@ -99,6 +101,18 @@ You: set it up
 
 If the agent needs its own role, method or tools (for example "an agent that drafts publisher outreach"), the agent-creator writes the new worker kind with a proper prompt, least-privilege tools and tests, and opens a pull request on this repository. The maintainer reviews and merges it as usual, CI deploys it, and a few minutes later you can use the new kind by name. If it should run on a schedule, the report includes the recommended cron for the chief to set up once it is live.
 
+## Design loop
+The design worker can see. It takes desktop and mobile screenshots of the live site (`DESIGN_SITE_URL`, by default https://clear-exchange.fly.dev), of any branch of the product (it runs that branch locally, so it can review work before it merges) and of its own boards, and looks at them. It critiques the screenshots as three buyers in turn: a publisher's head of revenue or partnerships, the product lead at an AI company buying content, and an investor. It writes brand work (logo direction, palette, type, tone of voice, UI principles) and specs precise enough for an engineer to build without asking. It writes no production code, opens no pull requests and merges nothing.
+
+Ask for one piece of design work ("Design: critique the publisher page as a news publisher would") and you get one report. Ask for the loop ("make the site something I can show customers") and it runs itself:
+
+1. The designer screenshots the site, runs the persona critiques and writes a spec for the highest-impact issues.
+2. An engineer builds it on the product, queued behind any engineering job already running there, and the maintainer reviews and merges as usual (with automatic fix rounds if it requests changes).
+3. Once CI has deployed the merge, the designer screenshots the live site again and writes the next spec.
+4. After three implemented rounds, or sooner if the critiques find no high-impact issues, it sends a closing report with before and after images.
+
+You hear from it only when something is your call, such as picking one of three brand directions: the boards arrive as images in Telegram or Discord with a lettered question. Reply with your choice ("B, but warmer") and the loop carries on. Screenshots and assets live under `DATA_DIR/design/<job id>`.
+
 ## Configuration
 See `.env.example`. The important ones:
 
@@ -114,12 +128,16 @@ See `.env.example`. The important ones:
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. |
 | `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
 | `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job. |
+| `DESIGN_SITE_URL` | The live site the design worker reviews. Default https://clear-exchange.fly.dev. |
+| `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `opus`) and spend cap per design job (default 10). |
+| `CHROMIUM_PATH` | Headless browser for screenshots. The Docker image installs `chromium`. |
 
 ## Safety model
 - Headless permission mode: tools not pre-approved are denied, never left waiting.
 - Engineers work like senior engineers: branch, tests, pull request. They cannot merge, push the default branch, force-push, rewrite shared history, delete recursively or disable failing tests.
 - One maintainer agent reviews and merges. It runs tests, checks CI, reads the diff, and either merges or requests changes. It cannot edit code. Branch protection on `main` is the hard backstop, since both agents use the same GitHub token.
 - The agent-creator has the engineer's tools and limits and works only on this repository. Every worker kind it adds must carry the clean-room rule, get read-only tools unless it is an engineer, and send nothing itself; `test/invariants.test.ts` checks every kind in `JOB_KINDS`, so a new kind that breaks these fails CI. It cannot be scheduled.
+- The design worker is read-only apart from two tools of its own: screenshots (public http(s) pages only, never local files or the private network; branch previews run without any secrets) and saving assets into its own folder. It builds nothing itself: every spec goes to an engineer and through the maintainer, and the loop is capped at three rounds.
 - One side effect exists outside that remit (`run_command`, for deploys and migrations) and it needs `YES <id>`.
 - The chief never sends email or messages anyone but you. Drafts come to you. An unlisted Telegram sender is told its own id once and nothing else.
 - Spend is capped per job; subagent nesting is limited.
