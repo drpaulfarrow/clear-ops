@@ -13,7 +13,7 @@ import { GoogleAuth, setupSteps } from "./google.js";
 import type { EaPermit, FollowUp } from "./store.js";
 import { FOLLOWUP_COMMANDS, FollowUps, parseWhen } from "./followups.js";
 import { validBookingLink } from "./meetings.js";
-import { fmt } from "./london.js";
+import { addDays, fmt, londonYmd } from "./london.js";
 import { PAUL_STYLE, shortText, tidyReply } from "./messages.js";
 import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
@@ -102,6 +102,8 @@ export class Orchestrator {
       return this.messenger.send(from, "Started a fresh conversation. Jobs, schedules and notes are kept.");
     }
     if (/^\/jobs$/i.test(trimmed)) return this.messenger.send(from, this.jobsText());
+    const spend = trimmed.match(/^\/spend(?:\s+(yesterday|today|\d{4}-\d{2}-\d{2}))?$/i);
+    if (spend) return this.messenger.send(from, this.spendText(spend[1]?.toLowerCase()));
     if (/^\/resume$/i.test(trimmed)) return this.messenger.send(from, await this.resumeJobs());
     const retry = trimmed.match(/^\/?retry\s+((?:[a-f0-9]{6}[\s,]*)+)$/i);
     if (retry) return this.messenger.send(from, await this.resumeJobs(retry[1].split(/[\s,]+/).filter(Boolean)));
@@ -341,6 +343,31 @@ export class Orchestrator {
       this.store.updateAction(id, { status: "failed", result: msg });
       await this.messenger.send(from, `Action ${id} failed: ${shortText(msg)}`);
     }
+  }
+
+  /** /spend [yesterday|YYYY-MM-DD]: spend on jobs for a London day. No model call. */
+  private spendText(arg?: string): string {
+    const today = londonYmd(new Date());
+    const day = !arg || arg === "today" ? today : arg === "yesterday" ? addDays(today, -1) : arg;
+    if (Number.isNaN(Date.parse(`${day}T00:00:00Z`)) || new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) !== day) return "That is not a date. Use /spend, /spend yesterday or /spend YYYY-MM-DD.";
+    const { total, jobs } = this.jobs.spendOn(day);
+    const cap = config.dailyBudgetUsd;
+    const usd = (n: number) => `$${n.toFixed(2)}`;
+    let first = `${day === today ? "Today" : day === addDays(today, -1) ? "Yesterday" : day} (${day}): ${usd(total)} on jobs`;
+    if (day === today) {
+      const lifted = this.store.capDays().liftedOn === today;
+      first += `, cap ${usd(cap)}, ${usd(Math.max(0, cap - total))} left, ${this.jobs.capReached() ? "cap is blocking new jobs" : lifted && total >= cap ? "cap lifted for today, not blocking" : "not blocking jobs"}.`;
+    } else first += `, daily cap ${usd(cap)}.`;
+    const lines = [first];
+    if (jobs.length) {
+      const by = new Map<string, number>();
+      for (const j of jobs) by.set(j.kind, (by.get(j.kind) ?? 0) + (j.costUsd ?? 0));
+      lines.push("By kind: " + [...by].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k} ${usd(c)}`).join(", ") + ".");
+      const top = [...jobs].sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0)).slice(0, 3);
+      lines.push("Top: " + top.map((j) => `${jobTitle(j)} (${j.id}) ${usd(j.costUsd ?? 0)}`).join(", ") + ".");
+    } else lines.push("No jobs with a recorded cost finished that day.");
+    lines.push("Known gap: the chief's own chat replies are not recorded, so they are not counted.");
+    return lines.join("\n");
   }
 
   private jobsText(): string {
@@ -650,6 +677,7 @@ const HELP = `Talk to me normally. I answer quick things myself and delegate the
 
 Commands:
 /jobs: recent jobs
+/spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free
 /resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
 retry <id>: rerun one failed job
 /pending: actions waiting for your approval

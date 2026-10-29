@@ -159,8 +159,13 @@ export class JobRunner {
 
   /** Spend on jobs that finished today (London), in dollars. */
   spentToday(): number {
-    const today = londonYmd(new Date(this.now()));
-    return this.store.allJobs().reduce((sum, j) => (j.finishedAt && j.costUsd && londonYmd(new Date(j.finishedAt)) === today ? sum + j.costUsd : sum), 0);
+    return this.spendOn(londonYmd(new Date(this.now()))).total;
+  }
+
+  /** Jobs that finished on a London day with a recorded cost, and their total in dollars. The one place spend is summed. */
+  spendOn(ymd: string): { total: number; jobs: Job[] } {
+    const jobs = this.store.allJobs().filter((j) => j.finishedAt && j.costUsd && londonYmd(new Date(j.finishedAt)) === ymd);
+    return { total: jobs.reduce((sum, j) => sum + (j.costUsd ?? 0), 0), jobs };
   }
 
   /** True when today's spend is at or past the daily cap and /resume has not lifted it for today. */
