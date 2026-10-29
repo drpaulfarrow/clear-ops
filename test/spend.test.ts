@@ -48,7 +48,7 @@ test("/spend shows today's total, cap, what is left, breakdown and top 3, withou
   add("research", "Research two", 1, now);
   add("research", "Research three", 0.5, now);
   add("engineer", "Yesterday build", 4, new Date(now.getTime() - 36 * 3_600_000));
-  await orch.handle(FOUNDER.replace("tg:", ""), "/spend", { replyTo: FOUNDER });
+  await orch.handle(FOUNDER, "/spend", { replyTo: FOUNDER });
   const out = sent.join("\n");
   assert.equal(calls(), 0, "no model call");
   assert.match(out, /\$10\.00 on jobs, cap \$10\.00, \$0\.00 left, cap is blocking new jobs/);
@@ -66,11 +66,11 @@ test("/spend yesterday and /spend YYYY-MM-DD use that London day; bad dates are 
   add("research", "Old research", 3.25, ago);
   add("research", "Today research", 1, now);
   const day = londonYmd(ago);
-  await orch.handle("99887766", `/spend ${day}`, { replyTo: FOUNDER });
+  await orch.handle(FOUNDER, `/spend ${day}`, { replyTo: FOUNDER });
   assert.match(sent.pop()!, new RegExp(`${day}\\): \\$3\\.25 on jobs, daily cap \\$10\\.00\\.\\nBy kind: research \\$3\\.25`));
-  await orch.handle("99887766", "/spend yesterday", { replyTo: FOUNDER });
+  await orch.handle(FOUNDER, "/spend yesterday", { replyTo: FOUNDER });
   assert.match(sent.pop()!, new RegExp(`Yesterday \\(${addDays(londonYmd(now), -1)}\\): \\$0\\.00`));
-  await orch.handle("99887766", "/spend 2026-02-31", { replyTo: FOUNDER });
+  await orch.handle(FOUNDER, "/spend 2026-02-31", { replyTo: FOUNDER });
   assert.match(sent.pop()!, /not a date/);
 });
 
