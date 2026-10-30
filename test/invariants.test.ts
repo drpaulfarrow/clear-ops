@@ -377,3 +377,23 @@ test("every agent, including kinds added later, carries Paul's messaging rule, a
   assert.match(jobs, /finishedText\(job, message, chained\)/, "Paul is sent the short message");
   assert.ok(!/\.send\([^;]*result\.text/.test(jobs), "a worker's raw answer is never sent to chat");
 });
+
+test("the ideate worker is read-only, lists options only, and starts no jobs", async () => {
+  const { workerSpec, JOB_KINDS, PR_KINDS } = await import("../src/agents.js");
+  const { lockKey } = await import("../src/jobs.js");
+  assert.ok(JOB_KINDS.includes("ideate" as any), "ideate is a job kind");
+  for (const target of ["product", "self"] as const) {
+    const s = workerSpec("ideate" as any, target);
+    assert.deepEqual(s.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"], "ideate gets exactly the read-only tools");
+    assert.deepEqual(s.tools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__)/.test(t)), "ideate gets no Edit, Write, Bash or MCP server");
+    assert.ok(s.prompt.includes("Clean room rule"), "ideate carries the clean-room rule");
+    assert.ok(!s.prompt.includes("This task is on the workforce itself"), "ideate never works on the workforce as an engineer");
+    assert.match(s.prompt, /never start, schedule or request engineer, design, analyse or create_agent jobs/);
+    assert.match(s.prompt, /Your message to Paul is three or four plain sentences/, "the messaging rule is repeated in its own prompt");
+    assert.match(s.prompt, /lead with the service provided/, "messaging ideas lead with the service");
+    assert.ok(s.disallowedTools?.some((t) => t.includes("secrets")), "ideate cannot read stored secrets");
+  }
+  assert.ok(!PR_KINDS.includes("ideate" as any), "ideate opens no pull requests");
+  assert.equal(lockKey({ kind: "ideate", target: "product" } as any), undefined, "ideate never holds the engineering lock");
+});

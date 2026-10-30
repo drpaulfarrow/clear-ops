@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 import type { FailureKind } from "./failures.js";
 
-export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design";
+export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design" | "ideate";
 /**
  * What an executive-assistant job may change in Paul's Google Workspace, granted per job by the chief
  * only when Paul asked for it in chat. Without a permit the job can only read.
