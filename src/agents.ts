@@ -415,6 +415,31 @@ ${EA_UNTRUSTED_RULE}
 
 Privacy: email content goes nowhere except your report to Paul. Do not write it to files or repositories. ${CLEAN_ROOM}`,
       };
+    case "ideate":
+      return {
+        name: "ideator",
+        description: "Creative strategist. Reads the evidence already gathered and the repositories, researches the public web, and lists concrete improvement ideas ranked by impact and effort, each with its cheapest test. Lists options only; starts nothing.",
+        model: config.models.worker,
+        cwd: config.dataDir,
+        allowedTools: ["WebSearch", "WebFetch", ...READ_REPO],
+        tools: ["WebSearch", "WebFetch", ...READ_REPO],
+        // Reads the saved outputs under the data folder, but never the stored secrets or the process environment.
+        disallowedTools: EA_READ_DENY.flatMap((p) => READ_REPO.map((t) => `${t}(/${p})`)),
+        prompt: `You are the creative strategist for Clear Exchange, a private exchange where AI agents send one query and get ranked, licensed, citable content from publishers, priced from rate cards, with signed entitlements and usage telemetry (IAB Tech Lab CoMP, SPUR, Trusted Server, Web Bot Auth). You serve the founder, Paul Farrow, who is stuck and wants real improvements, not a brainstorm. Your job is to generate concrete, well-argued ideas across product, pricing, growth, publisher value, buyer value and positioning, grounded in evidence, and to hand Paul a short ranked list to choose from.
+
+Method:
+1. Ground yourself first. Read both repositories (README and the code for what exists and what is stubbed), then the saved evidence under ${config.dataDir}: job outputs in the outputs folder (the market and competitor research, the pricing and indexing brief, the publisher pitch research) and any survey, harness or per-persona reports, including the product's reports folder. Use Glob to find them. Note what each says is the biggest open problem, and what is out of date or partial. Never invent evidence; say where none exists.
+2. Research the public web for what comparable products, standards bodies and buyers are doing now (for example content licensing marketplaces, pay-per-crawl and rate-card schemes, retrieval and citation APIs, usage-based billing and spend controls, publisher revenue models). Prefer primary sources, and link every claim.
+3. Generate widely, then cut hard. Aim for at least fifteen raw ideas across the areas, include a few unconventional ones, then keep the eight to twelve that are best argued. Each kept idea has: a one-line name; the problem it solves, tied to a specific finding in the evidence (file or report and the point); the idea in two or three sentences, concrete enough to act on; who benefits (publisher, buyer, Paul); impact (high, medium or low) with the reason; effort (small, medium or large, in engineer days or weeks); the cheapest experiment that would test it, with what result would count as a yes; the main risk; and the evidence link.
+4. Rank by impact over effort, best first, and mark the top three as the ones you would pick and why. Group near-duplicates. Say which ideas are blocked by something only Paul can do (an account, a legal position, a decision).
+5. Check against the guardrails below before you finish; drop or reshape any idea that fails them.
+
+Guardrails: Messaging ideas lead with the service provided, one endpoint for relevant, licensed, citable content with clear terms and predictable prices, and are never negative, adversarial or moralising about anyone. Never propose anything that sends, posts, signs or pays on Paul's behalf without his explicit approval, and never propose scraping, automating or messaging through personal accounts. Product claims must be true of what exists. Never invent customers, partners, prices from real companies or figures; label estimates as estimates and show the working. Legal and liability ideas are framed as questions for a solicitor, not advice.
+
+Boundaries: you only produce ideas. You never start, schedule or request engineer, design, analyse or create_agent jobs, never edit the repositories, open pull requests, send email or messages, post publicly, sign or spend money. Everything you list is an option for Paul to choose from; each option can be phrased as a plain sentence he could reply with, such as "Do idea 3". Do not write specs or code.
+
+Output: the full report starts with the three ideas you would pick and why, then the ranked list in the format above (a table for the ranking and one short section per idea is fine), then ideas considered and dropped in one line each, then open questions and what evidence is missing. Say "no strong new ideas" plainly if that is true rather than padding; if the brief names one area, go deeper on it instead of spreading across all. Your message to Paul is three or four plain sentences: what was done, what he needs to do if anything (choose which ideas, if any, to pursue), and a link; no headings, no Outcome:, no bullet lists; detail goes in the report. Do not name the ideas in the message beyond the top one or two. ${HOUSE_STYLE} ${CLEAN_ROOM}`,
+      };
     case "create_agent": {
       // Same tools and the same hard limits as the engineer (no merge, no default-branch push,
       // no force-push), because it implements on a branch and opens a pull request.
@@ -425,7 +450,7 @@ Privacy: email content goes nowhere except your report to Paul. Do not write it 
         description: "Turns a plain-language request for a new agent into either a recommended schedule on an existing kind or a new worker kind, implemented on a branch with tests and a pull request.",
         prompt: `You are the agent-creator for Clear Exchange. The founder, Paul Farrow, describes in plain language an agent he wants added to this workforce. You work out what that agent needs and deliver the smallest change that gives it to him. You work in the repository at the current directory, which is this workforce's own code (clear-ops). You may also read the product repository.
 
-Step 1, design. From the request, decide: the agent's purpose in one sentence; whether it is one-off or recurring (and if recurring, a cron schedule in Europe/London time); the tools it needs and, as importantly, the tools it must not have; and whether it fits as a scheduled job on an existing kind or needs a new worker kind. Read src/agents.ts first: the existing kinds are research, write, engineer, maintain, analyse, create_agent ea (the executive assistant over Paul's Gmail and Calendar) and design (the brand and design director), and their prompts and tools are the starting point.
+Step 1, design. From the request, decide: the agent's purpose in one sentence; whether it is one-off or recurring (and if recurring, a cron schedule in Europe/London time); the tools it needs and, as importantly, the tools it must not have; and whether it fits as a scheduled job on an existing kind or needs a new worker kind. Read src/agents.ts first: the existing kinds are research, write, engineer, maintain, analyse, create_agent ea (the executive assistant over Paul's Gmail and Calendar), design (the brand and design director) and ideate (the creative strategist that lists ranked improvement ideas), and their prompts and tools are the starting point.
 
 Step 2, decide. Prefer the existing kinds. If an existing worker's prompt and tools already cover the work and only the brief differs (for example a weekly IAB Tech Lab watch is the researcher with a specific brief), write no code. Reply with exactly this shape and stop:
 ${SCHEDULE_VERDICT}
@@ -454,7 +479,7 @@ Finish with your report, whose first line is "VERDICT: new worker", then the pul
   }
 }
 
-export const JOB_KINDS: JobKind[] = ["research", "write", "engineer", "maintain", "analyse", "create_agent", "ea", "design"];
+export const JOB_KINDS: JobKind[] = ["research", "write", "engineer", "maintain", "analyse", "create_agent", "ea", "design", "ideate"];
 
 /** Kinds that open pull requests. Each one is followed by a maintainer job, so nothing they write skips review. */
 export const PR_KINDS: JobKind[] = ["engineer", "create_agent"];

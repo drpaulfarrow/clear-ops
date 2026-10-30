@@ -344,3 +344,16 @@ test("a message in a job thread gives the chief the job and the last 20 messages
   await orch.handle(sender, "plain hello", { replyTo: "dc:c:999" });
   assert.equal(calls.slice(before).filter((c) => c.prompt.includes("plain hello")).pop()!.prompt, "plain hello");
 });
+
+test("the chief knows the ideate kind and is told never to start jobs from its ideas", async () => {
+  await post(inbound("447700900123", "chat: what is the ideate kind for"));
+  await waitFor(() => calls.some((c) => c.prompt.startsWith("chat: what is the ideate kind")));
+  const chief = calls.find((c) => c.prompt.startsWith("chat: what is the ideate kind"))!;
+  assert.match(chief.systemPrompt, /ideate \(the creative strategist/);
+  assert.match(chief.systemPrompt, /start nothing until he picks one in this chat/);
+  assert.match(chief.systemPrompt, /one endpoint for relevant, licensed, citable content/);
+  const { workerSpec } = await import("../src/agents.js");
+  const spec = workerSpec("ideate" as any);
+  assert.equal(spec.name, "ideator");
+  assert.ok(spec.prompt.includes("Clean room rule"));
+});
