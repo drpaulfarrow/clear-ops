@@ -1,16 +1,19 @@
 import express from "express";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config } from "./config.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
-import { Store } from "./store.js";
+import { Store, type EaPermit, type JobPermit } from "./store.js";
 import { CloudApiMessenger, parseInbound, verifySignature, type Messenger } from "./whatsapp.js";
 import { TelegramMessenger, TelegramPoller } from "./telegram.js";
 import { DiscordListener } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
-import { bootstrapRepos } from "./bootstrap.js";
+import { bootstrapRepos, repoProblemsMessage } from "./bootstrap.js";
+import { repoRegistry } from "./repos.js";
+import { REPO_SERVER, repoServer } from "./repo-tools.js";
 import type { AgentRunner } from "./agents.js";
 import { GoogleApi, GoogleAuth, GoogleError, type Fetch } from "./google.js";
 import { EA_SERVER, EaTools, eaServer, ensureEaSchedules, upgradeEaSchedules } from "./ea.js";
@@ -24,6 +27,9 @@ export interface AppDeps {
   store: Store;
   /** Paul's Google connection. Built from config when absent; tests inject one with a fake fetch. */
   google?: GoogleAuth;
+  /** GitHub API calls and cloning for repository creation. Tests inject fakes. */
+  repoFetch?: typeof fetch;
+  repoClone?: (slug: string, dir: string) => Promise<void>;
   /** What Google API calls go through. Tests inject a fake. */
   googleFetch?: Fetch;
   /** The time source for follow-up commands. Tests pin it. */
@@ -51,14 +57,19 @@ export function buildApp(deps: AppDeps) {
       return undefined;
     }
   };
-  const toolsFor = (job: { id: string; kind: string; brief: string; replyTo?: string; permits?: Array<"drafts" | "holds"> }) =>
+  // Repositories the workforce created in earlier runs are managed again from the first request.
+  repoRegistry.load(deps.store);
+  const toolsFor = (job: { id: string; kind: string; brief: string; replyTo?: string; permits?: JobPermit[] }): Record<string, McpServerConfig> | undefined =>
     job.kind === "ea"
       ? {
           [EA_SERVER]: eaServer(
-            new EaTools(googleApi, { permits: job.permits ?? [], brief: job.brief, store: deps.store, bookingLink: bookingLink(deps.store), account: account(), jobId: job.id, replyTo: job.replyTo }),
+            new EaTools(googleApi, { permits: (job.permits ?? []).filter((p): p is EaPermit => p === "drafts" || p === "holds"), brief: job.brief, store: deps.store, bookingLink: bookingLink(deps.store), account: account(), jobId: job.id, replyTo: job.replyTo }),
           ),
         }
-      : undefined;
+      : // Only an engineer job the chief gave the create_repo permit (Paul asked in chat) gets the tool.
+        job.kind === "engineer" && job.permits?.includes("create_repo")
+        ? { [REPO_SERVER]: repoServer({ store: deps.store, jobId: job.id, createDeps: { fetch: deps.repoFetch, clone: deps.repoClone } }) }
+        : undefined;
   const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor);
   const scheduler = new Scheduler(deps.store, jobs);
   const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock);
@@ -141,8 +152,9 @@ export function buildApp(deps: AppDeps) {
 const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/").split("/").pop()!);
 if (isMain) {
   assertProductionConfig();
-  await bootstrapRepos();
   const store = new Store(config.dataDir);
+  repoRegistry.load(store);
+  const repoProblems = await bootstrapRepos();
 
   // One messenger per channel, routed by address prefix; one orchestrator behind all of them.
   const routes: Array<{ prefix: string; messenger: Messenger }> = [];
@@ -162,6 +174,14 @@ if (isMain) {
     void new TelegramPoller((from, text, ctx) => orchestrator.handle(from, text, ctx), messenger, isAllowed).start();
   }
   if (discord) await discord.start();
+
+  // A repository that could not be cloned: tell Paul once, in plain English, exactly what to change.
+  const problem = repoProblemsMessage(repoProblems);
+  const told = problem ? repoProblems.map((p) => p.slug).join(",") : "";
+  if (problem && store.settings().repoProblemsTold !== told) {
+    const to = config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? config.allowedNumbers[0];
+    if (to) await messenger.send(to, problem).then(() => store.setSetting("repoProblemsTold", told)).catch(() => undefined);
+  } else if (!problem && store.settings().repoProblemsTold) store.setSetting("repoProblemsTold", undefined);
 
   // Jobs a previous process left running are picked up again, now that channels can deliver.
   const resumed = await jobs.resumeInterrupted();

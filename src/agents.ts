@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import type { JobKind, JobTarget } from "./store.js";
 import { DESIGN_TOOLS, designDir, designRoot, designServer, MAX_DESIGN_ROUNDS } from "./design.js";
 import { EA_SERVER } from "./ea.js";
+import { repoRegistry } from "./repos.js";
 import { REPORT_RULE } from "./messages.js";
 import { classifyError, type RunFailure } from "./failures.js";
 
@@ -144,11 +145,14 @@ async function* withImages(text: string, images: NonNullable<RunOptions["images"
 }
 
 /** Both codebases. Every agent may read them; only engineers write; only the maintainer merges. */
-export const REPOS = [config.repoDir, config.selfRepoDir];
+export function repoDirs(): string[] {
+  return repoRegistry.list().map((r) => r.dir);
+}
 
-/** What every agent may read outside its working directory: both repositories, and the founder's uploads once any exist. */
+/** What every agent may read outside its working directory: every managed repository, and the founder's uploads once any exist. */
 export function readableDirs(): string[] {
-  return fs.existsSync(config.uploadsDir) ? [...REPOS, config.uploadsDir] : REPOS;
+  const repos = repoDirs();
+  return fs.existsSync(config.uploadsDir) ? [...repos, config.uploadsDir] : repos;
 }
 const READ_REPO = ["Read", "Glob", "Grep"];
 
@@ -250,20 +254,38 @@ export function runLimits(kind: JobKind, depth?: ResearchDepth): { maxTurns: num
  * without the paths they cannot find them (a research job once reported the product repo missing).
  */
 export function repoPaths(): string {
-  const product = config.repos.product ? ` (GitHub ${config.repos.product})` : "";
-  const self = config.repos.self ? ` (GitHub ${config.repos.self})` : "";
-  return `Repositories: the product, Clear Exchange${product}, is checked out locally at ${config.repoDir}; this workforce, clear-ops${self}, is checked out at ${config.selfRepoDir}. Both are already on disk and readable: use Read, Glob and Grep with these absolute paths (start with each one's README.md) rather than looking for them elsewhere or fetching them from GitHub. If a path is missing or empty, say so in your report instead of concluding the repository does not exist.`;
+  const list = repoRegistry.list();
+  const where = (r: (typeof list)[number]) => {
+    const what = r.alias === "product" ? "the product, Clear Exchange" : r.alias === "self" ? "this workforce, clear-ops" : `the repository "${r.alias}"${r.names[0] ? ` (Paul calls it ${r.names[0]})` : ""}`;
+    return `${what}${r.slug ? ` (GitHub ${r.slug})` : ""}, is checked out locally at ${r.dir}`;
+  };
+  const [first, ...rest] = list.map(where);
+  const all = rest.length ? `${first}; ${rest.slice(0, -1).map((x) => `${x};`).join(" ")}${rest.length > 1 ? " and " : ""}${rest[rest.length - 1]}` : first;
+  return `Repositories: ${all}. All are already on disk and readable: use Read, Glob and Grep with these absolute paths (start with each one's README.md) rather than looking for them elsewhere or fetching them from GitHub. If a path is missing or empty, say so in your report instead of concluding the repository does not exist.`;
+}
+
+/** Added to a job's prompt when it was started on a repository other than the product: which one it focuses on. */
+export function repoFocus(target: JobTarget | undefined, kind: JobKind): string {
+  const repo = target ? repoRegistry.find(target) : undefined;
+  if (!repo || repo.alias === "product") return "";
+  const work = PR_KINDS.includes(kind) || kind === "maintain" ? "You work in this repository: it is your current directory." : "This job is about this repository; read it first.";
+  return `Repository for this job: "${repo.alias}"${repo.slug ? `, GitHub ${repo.slug}` : ""}, at ${repo.dir}. ${work}`;
 }
 
 export function workerSpec(kind: JobKind, target: JobTarget = "product"): WorkerSpec {
   // The agent-creator only ever works on the workforce itself, whatever target it was given.
   if (kind === "create_agent") target = "self";
-  // Every kind is told where both repositories are on disk.
+  // Every kind is told where every repository is on disk.
   const own = baseSpec(kind);
   const spec = { ...own, prompt: `${own.prompt}\n\n${repoPaths()}` };
   const base = { ...spec, prompt: `${spec.prompt}\n\n${UPLOADS_RULE}` };
   const self = (kind === "engineer" || kind === "maintain" || kind === "create_agent") && target === "self";
-  const scoped = self ? { ...base, cwd: config.selfRepoDir, prompt: base.prompt + SELF_IMPROVEMENT } : base;
+  const other = (kind === "engineer" || kind === "maintain") && target !== "product" && target !== "self" && !!repoRegistry.find(target);
+  const scoped = self
+    ? { ...base, cwd: config.selfRepoDir, prompt: base.prompt + SELF_IMPROVEMENT }
+    : other
+      ? { ...base, cwd: repoRegistry.dir(target), prompt: `${base.prompt}\n\n${repoFocus(target, kind)}` }
+      : base;
   // Paul's messaging rule and the two-part final answer (full report, short message) come last, for every kind.
   return { ...scoped, prompt: `${scoped.prompt}\n\n${REPORT_RULE}` };
 }

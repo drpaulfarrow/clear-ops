@@ -6,12 +6,14 @@ import { bookingLink, config } from "./config.js";
 import { londonYmd } from "./london.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
-import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
+import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
+import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
+import { repoRegistry } from "./repos.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 
 const exec = promisify(execFile);
@@ -126,10 +128,13 @@ export class JobRunner {
   }
 
   start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth"> = {}): Job {
-    // Only the executive assistant has permits, and only drafts and holds exist.
+    // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
+    // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
-    if (kind !== "ea") delete extra.permits;
-    else if (extra.permits) extra.permits = [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds");
+    if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds") : extra.permits;
+    else if (kind === "engineer") extra.permits = extra.permits?.includes("create_repo") ? ["create_repo"] : undefined;
+    else delete extra.permits;
+    if (!extra.permits) delete extra.permits;
     // Only research has a depth; unlabelled research (a scheduled run, say) takes it from the brief.
     if (kind !== "research") delete extra.depth;
     else extra.depth = extra.depth === "deep" || extra.depth === "standard" ? extra.depth : detectDepth(brief);
@@ -202,7 +207,7 @@ export class JobRunner {
       this.store.updateJob(job.id, { capBlocked: undefined });
       if (!lockKey(job)) void this.execute(job.id);
     }
-    for (const key of ["product", "self"] as JobTarget[]) await this.startNext(key);
+    for (const key of this.lockKeys()) await this.startNext(key);
   }
 
   /** The queue hold, if a credit or key failure has paused the engineering queues. */
@@ -219,7 +224,7 @@ export class JobRunner {
   /** The sentence the failure message carries about the hold: how many queued jobs are waiting. */
   private holdSentence(kind: FailureKind): string {
     if (!HOLD_KINDS.includes(kind) || !this.store.queueHold()) return "";
-    const n = this.waiting("product").length + this.waiting("self").length;
+    const n = this.lockKeys().reduce((sum, k) => sum + this.waiting(k).length, 0);
     return n
       ? `I have paused the engineering queue so the ${n === 1 ? "job" : `${n} jobs`} waiting in it ${n === 1 ? "does" : "do"} not fail the same way.`
       : "I have paused the engineering queue so nothing else fails the same way.";
@@ -265,7 +270,7 @@ export class JobRunner {
       }
     });
     await this.releaseCapped();
-    for (const key of ["product", "self"] as JobTarget[]) await this.startNext(key);
+    for (const key of this.lockKeys()) await this.startNext(key);
     return { retried: retried.map((j) => this.store.getJob(j.id) ?? j), skipped, released: !!hold };
   }
 
@@ -328,6 +333,16 @@ export class JobRunner {
     return this.store.allJobs().find((j) => j.status === "running" && lockKey(j) === key && !this.running.has(j.id))?.id;
   }
 
+  /** Every repository that has a lock: all managed repositories, plus any a stored job names. */
+  private lockKeys(): JobTarget[] {
+    const keys = new Set<JobTarget>(repoRegistry.aliases());
+    for (const j of this.store.allJobs()) {
+      const k = lockKey(j);
+      if (k) keys.add(k);
+    }
+    return [...keys];
+  }
+
   /** Jobs waiting for a repository's lock, first in line first. */
   waiting(key: JobTarget): Job[] {
     return this.store
@@ -388,7 +403,7 @@ export class JobRunner {
       .sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || a.createdAt.localeCompare(b.createdAt));
     for (const job of jobs) await this.reclaim(job, "restart");
     // A repository nobody reclaimed (its job gave up, or none was running) starts its queue.
-    for (const key of ["product", "self"] as JobTarget[]) {
+    for (const key of this.lockKeys()) {
       const holder = this.holders.get(key);
       if (!holder) {
         await this.startNext(key);
@@ -495,15 +510,17 @@ export class JobRunner {
         job.kind === "ea"
           ? `\n\nThis job may change: ${job.permits?.length ? job.permits.join(" and ") : "nothing (read only)"}.${link ? ` Paul's booking link for scheduling drafts: ${link}` : ""}`
           : "";
+      const createRepo = job.kind === "engineer" && job.permits?.includes("create_repo") ? `\n\n${CREATE_REPO_NOTE}` : "";
+      const focus = job.kind !== "engineer" && job.kind !== "maintain" && job.kind !== "create_agent" ? repoFocus(job.target, job.kind) : "";
       const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
       // Every run is capped; deep research gets more turns and budget than the default.
       const limits = runLimits(job.kind, job.depth);
       const result = await this.run({
-        prompt: `${job.brief}${permits}${depth}${standing}${resume}${carryOn}`,
+        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${createRepo}${depth}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
         model: spec.model,
         cwd: spec.cwd,
-        allowedTools: spec.allowedTools,
+        allowedTools: createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools,
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
@@ -715,7 +732,7 @@ export class JobRunner {
         if (lost && !this.running.has(job.id)) await this.reclaim(this.store.getJob(job.id) ?? job, "orphan");
       }
       await this.releaseCapped();
-      for (const key of ["product", "self"] as JobTarget[]) {
+      for (const key of this.lockKeys()) {
         const held = this.holders.get(key);
         // A lock held by a job nothing is running frees itself.
         if (held && !this.running.has(held)) this.holders.delete(key);

@@ -397,3 +397,16 @@ test("the ideate worker is read-only, lists options only, and starts no jobs", a
   assert.ok(!PR_KINDS.includes("ideate" as any), "ideate opens no pull requests");
   assert.equal(lockKey({ kind: "ideate", target: "product" } as any), undefined, "ideate never holds the engineering lock");
 });
+
+test("repository creation: a per-job permit only an engineer can hold, creation only, never from schedules or automatic jobs", async () => {
+  const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
+  const tools = src("repo-tools.ts");
+  assert.match(tools, /tool\(\s*"create_repo"/, "the one repository tool is create_repo");
+  assert.doesNotMatch(tools, /tool\(\s*"(delete|archive|set|update|transfer)/, "no tool deletes or changes a repository");
+  assert.match(src("index.ts"), /job\.kind === "engineer" && job\.permits\?\.includes\("create_repo"\)/, "the tool server is built only for an engineer holding the permit");
+  assert.doesNotMatch(src("scheduler.ts"), /permits:/, "scheduled runs never get permits");
+  for (const kind of JOB_KINDS) {
+    for (const t of workerSpec(kind, "site").allowedTools ?? []) assert.ok(!t.startsWith("mcp__repos__"), `${kind} has no repository tool without the permit`);
+  }
+  assert.doesNotMatch(src("repos.ts"), /method: "(DELETE|PATCH|PUT)"/, "creation is a POST and nothing else");
+});

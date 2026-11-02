@@ -3,6 +3,7 @@
  * the product run locally, or of its own HTML/SVG boards, and a save_asset tool confined to the
  * job's own folder. Nothing here sends, posts, merges or touches the repositories' working trees.
  */
+import { repoRegistry } from "./repos.js";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { lookup } from "node:dns/promises";
@@ -75,6 +76,8 @@ export function designIdentity(): Promise<Identity> {
     const current = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
     const who = chooseIdentity(designer && Number.isInteger(designer.uid) && Number.isInteger(designer.gid) ? designer : undefined, current);
     if (current.uid === 0) lockDown([config.dataDir, config.repoDir, config.selfRepoDir]);
+    // Every other managed repository holds git credentials in its config too.
+    if (current.uid === 0) lockDown(repoRegistry.list().map((r) => r.dir));
     // UPLOADS_DIR may sit outside DATA_DIR; uploads can hold personal data and the browser runs untrusted pages.
     if (current.uid === 0) lockDown([config.uploadsDir]);
     return who;

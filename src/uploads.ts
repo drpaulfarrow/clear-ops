@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { repoRegistry } from "./repos.js";
 import path from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { config } from "./config.js";
@@ -136,7 +137,7 @@ export class Uploads {
     private readonly now: () => Date = () => new Date(),
   ) {
     this.dir = path.resolve(dir);
-    for (const repo of [config.repoDir, config.selfRepoDir]) {
+    for (const repo of [config.repoDir, config.selfRepoDir, ...repoRegistry.list().map((r) => r.dir)]) {
       const rel = path.relative(path.resolve(repo), this.dir);
       if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
         throw new Error(`The uploads directory ${this.dir} must not be inside the git checkout ${repo}.`);
