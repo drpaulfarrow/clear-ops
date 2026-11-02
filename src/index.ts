@@ -11,6 +11,7 @@ import { TelegramMessenger, TelegramPoller } from "./telegram.js";
 import { DiscordListener } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
+import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
 import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoProblemsMessage } from "./bootstrap.js";
 import { startTokenRefresher } from "./github-auth.js";
 import { repoRegistry } from "./repos.js";
@@ -38,6 +39,8 @@ export interface AppDeps {
   clock?: () => Date;
   /** The /status line about GitHub auth. Tests inject one; defaults to a live check. */
   githubStatus?: () => Promise<string>;
+  /** Copies each finished job's output to the private outputs repository. Absent in tests. */
+  outputs?: OutputsPublisher;
 }
 
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
@@ -76,7 +79,7 @@ export function buildApp(deps: AppDeps) {
         job.kind === "engineer" && job.permits?.includes("create_repo")
         ? { [REPO_SERVER]: repoServer({ store: deps.store, jobId: job.id, createDeps: { fetch: deps.repoFetch, clone: deps.repoClone } }) }
         : undefined;
-  const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor);
+  const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined });
   const scheduler = new Scheduler(deps.store, jobs);
   const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound);
   scheduler.boot();
@@ -176,7 +179,12 @@ if (isMain) {
   }
   const messenger = new RouterMessenger(routes, config.channels.includes("whatsapp") ? new CloudApiMessenger() : undefined);
 
-  const { app, orchestrator, jobs, startEaTimers } = buildApp({ messenger, runner: sdkRunner, store });
+  const notifyPaul = (text: string) => {
+    const to = config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? config.allowedNumbers[0];
+    if (to) void messenger.send(to, text).catch(() => undefined);
+  };
+  const outputs = new OutputsPublisher(store, { onProblem: notifyPaul });
+  const { app, orchestrator, jobs, startEaTimers } = buildApp({ messenger, runner: sdkRunner, store, outputs });
   startEaTimers();
   app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
 
@@ -204,4 +212,6 @@ if (isMain) {
   if (resumed) console.log(`resumed ${resumed} interrupted job(s)`);
   // From now on, every minute: stalled or over-long jobs are stopped, orphaned ones restarted, queues kept moving.
   jobs.startWatchdog();
+  // One-off: copy every output already on the volume to the outputs repository. In the background; never blocks boot.
+  void backfillOnce(store, outputs).catch((err) => console.warn(`outputs backfill: ${err instanceof Error ? err.message : err}`));
 }

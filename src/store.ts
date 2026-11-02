@@ -248,6 +248,8 @@ export interface Settings {
   repoProblemsTold?: string;
   /** The last GitHub auth problem Paul was told about, so it is sent once. */
   githubProblemTold?: string;
+  /** When the one-off copy of existing job outputs to the outputs repository finished. */
+  outputsBackfilled?: string;
 }
 
 interface State {
