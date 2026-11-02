@@ -41,6 +41,11 @@ jobs:
           flyctl volumes list --app "$FLY_APP" --json | grep -q clear_ops_data || flyctl volumes create clear_ops_data --app "$FLY_APP" --region lhr --size 3 --yes
       - name: Stage runtime secrets from this repository's secrets
         if: steps.check.outputs.ready == 'true'
+        env:
+          # Actions secrets cannot start with GITHUB_, so they are GH_APP_*; the service reads them as GITHUB_APP_*. Passed through the environment, not pasted into the script: the key is multi-line.
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
         run: |
           flyctl secrets set --app "$FLY_APP" --stage \
             ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
@@ -55,7 +60,10 @@ jobs:
             GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
             GOOGLE_ACCOUNT="${{ secrets.GOOGLE_ACCOUNT }}" \
             GOOGLE_TOKEN_KEY="${{ secrets.GOOGLE_TOKEN_KEY }}" \
-            EA_BOOKING_LINK="${{ vars.EA_BOOKING_LINK }}"
+            EA_BOOKING_LINK="${{ vars.EA_BOOKING_LINK }}" \
+            GITHUB_APP_ID="$GITHUB_APP_ID" \
+            GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
+            GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID"
       - name: Deploy
         if: steps.check.outputs.ready == 'true'
         run: flyctl deploy --app "$FLY_APP" --remote-only --strategy rolling

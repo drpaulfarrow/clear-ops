@@ -217,6 +217,8 @@ export interface Settings {
   eaReplyTo?: string;
   /** The repository problems Paul was last told about at start-up, so a restart does not repeat them. */
   repoProblemsTold?: string;
+  /** The last GitHub auth problem Paul was told about, so it is sent once. */
+  githubProblemTold?: string;
 }
 
 interface State {

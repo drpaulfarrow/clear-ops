@@ -2,6 +2,7 @@ import { query, type AgentDefinition, type McpServerConfig, type SDKUserMessage 
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
+import { workerGithubEnv } from "./github-auth.js";
 import type { JobKind, JobTarget } from "./store.js";
 import { DESIGN_TOOLS, designDir, designRoot, designServer, MAX_DESIGN_ROUNDS } from "./design.js";
 import { EA_SERVER } from "./ea.js";
@@ -79,7 +80,7 @@ export const sdkRunner: AgentRunner = async (o) => {
         // Headless: anything not pre-approved is denied rather than left waiting for a prompt.
         permissionMode: "dontAsk",
         env: {
-          ...process.env,
+          ...(await workerGithubEnv()),
           CLAUDE_CONFIG_DIR: path.join(config.dataDir, "claude"),
           CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
           CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "4",

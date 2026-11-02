@@ -11,7 +11,8 @@ import { TelegramMessenger, TelegramPoller } from "./telegram.js";
 import { DiscordListener } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
-import { bootstrapRepos, repoProblemsMessage } from "./bootstrap.js";
+import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoProblemsMessage } from "./bootstrap.js";
+import { startTokenRefresher } from "./github-auth.js";
 import { repoRegistry } from "./repos.js";
 import { REPO_SERVER, repoServer } from "./repo-tools.js";
 import type { AgentRunner } from "./agents.js";
@@ -34,6 +35,8 @@ export interface AppDeps {
   googleFetch?: Fetch;
   /** The time source for follow-up commands. Tests pin it. */
   clock?: () => Date;
+  /** The /status line about GitHub auth. Tests inject one; defaults to a live check. */
+  githubStatus?: () => Promise<string>;
 }
 
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
@@ -72,7 +75,7 @@ export function buildApp(deps: AppDeps) {
         : undefined;
   const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor);
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock);
+  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()));
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
@@ -154,7 +157,11 @@ if (isMain) {
   assertProductionConfig();
   const store = new Store(config.dataDir);
   repoRegistry.load(store);
+  // With the GitHub App configured, keep its installation token fresh for git and gh during long jobs.
+  startTokenRefresher();
   const repoProblems = await bootstrapRepos();
+  const github = await githubProblemMessage().catch(() => ({ message: undefined, line: "GitHub: health check failed." }));
+  console.log(github.line);
 
   // One messenger per channel, routed by address prefix; one orchestrator behind all of them.
   const routes: Array<{ prefix: string; messenger: Messenger }> = [];
@@ -182,6 +189,12 @@ if (isMain) {
     const to = config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? config.allowedNumbers[0];
     if (to) await messenger.send(to, problem).then(() => store.setSetting("repoProblemsTold", told)).catch(() => undefined);
   } else if (!problem && store.settings().repoProblemsTold) store.setSetting("repoProblemsTold", undefined);
+
+  // GitHub auth: the App failing or a managed repository out of reach, told once per distinct problem. Skipped when the clone failure message above already covers it.
+  if (github.message && !problem && store.settings().githubProblemTold !== github.message) {
+    const to = config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? config.allowedNumbers[0];
+    if (to) await messenger.send(to, github.message).then(() => store.setSetting("githubProblemTold", github.message)).catch(() => undefined);
+  } else if (!github.message && store.settings().githubProblemTold) store.setSetting("githubProblemTold", undefined);
 
   // Jobs a previous process left running are picked up again, now that channels can deliver.
   const resumed = await jobs.resumeInterrupted();

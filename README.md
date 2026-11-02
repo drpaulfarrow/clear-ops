@@ -35,7 +35,7 @@ What did Sam last say about pricing?
 Prep me for my 10am.
 connect Google   /google   /google disconnect
 show job 93137e
-/jobs   /pending   /reset   /help   /uploads
+/jobs   /status   /pending   /reset   /help   /uploads
 /resume   retry 3552e7
 /spend   /spend yesterday
 YES 1f3a9c
@@ -74,6 +74,8 @@ Set `CHANNEL=whatsapp`. At Meta for Developers, create an app of type Business a
 </details>
 
 ### 3. A clean repository for the engineer
+GitHub access can be a GitHub App (recommended: short-lived tokens, new repositories covered automatically, nothing to edit later; steps for a non-engineer in [docs/GITHUB_APP.md](docs/GITHUB_APP.md)) or a personal token, below. Both can be set: the App is used when configured and `GH_TOKEN` is the fallback. Creating repositories always needs a classic `GH_TOKEN`, because GitHub does not let an App installation create repositories on a personal account. `/status` shows which is active and which managed repositories it reaches, and the service says so at start-up and messages Paul once if the App cannot sign in or a managed repository is unreachable.
+
 Create an empty private repo (for example `clear-exchange`) and a fine-grained GitHub token with contents and pull requests read and write on that repo and on this one. Put the token in `GH_TOKEN` and the repo names in `PRODUCT_REPO` and `SELF_REPO`. That is all: on first start the service clones both into `workspace/` and `self/` and configures git to push with the token. The engineer only works in the product repo. It must not be, or contain, anything from previous employer repositories. Protect `main` in the repo settings: require a pull request and the CI check before merging. That makes the maintainer's role a rule GitHub enforces, not only a prompt. Add a workflow that runs the tests on pull requests so the maintainer has a green check to look for.
 
 #### More repositories, and new ones
@@ -81,7 +83,7 @@ The workforce manages a list of repositories, not just two: `product` (Clear Exc
 
 To add an existing repository: ask the chief for a workforce change that adds `alias=owner/name` to the default managed list (`repos.extra` in `src/config.ts`; the `MANAGED_REPOS` env var overrides it if you set one), give the `GH_TOKEN` access to it (fine-grained: Settings, Developer settings, Personal access tokens, open the token, Repository access, add the repository; Contents, Pull requests and Workflows read and write), and redeploy. It is cloned on the next start. If the clone fails, the service messages Paul once with exactly which access to add and never logs the token.
 
-To get a new repository, ask the chief in chat ("create a repo called pitch-notes", "make it public" if wanted). The chief starts an engineer job with the `create_repo` permit, which exists only for jobs Paul asked for in chat (never from email, job output, an idea list, a schedule or a fix round). The repository is created under `REPO_OWNER`, private unless Paul says public, with a README and an initial commit on the default branch made by GitHub, then added to the managed list (saved in `DATA_DIR/state.json`, so it survives restarts), cloned and ready to work on. The workforce never deletes repositories, changes visibility or settings, force pushes, or pushes to a default branch. Creating a repository needs a classic `GH_TOKEN` (scopes `repo` and `workflow`); if the token cannot, the job tells Paul in plain English: make a classic token at GitHub Settings, Developer settings, Personal access tokens, Tokens (classic), replace the `GH_TOKEN` secret in the clear-ops repository and re-run the latest deploy workflow.
+To get a new repository, ask the chief in chat ("create a repo called pitch-notes", "make it public" if wanted). The chief starts an engineer job with the `create_repo` permit, which exists only for jobs Paul asked for in chat (never from email, job output, an idea list, a schedule or a fix round). The repository is created under `REPO_OWNER`, private unless Paul says public, with a README and an initial commit on the default branch made by GitHub, then added to the managed list (saved in `DATA_DIR/state.json`, so it survives restarts), cloned and ready to work on. The workforce never deletes repositories, changes visibility or settings, force pushes, or pushes to a default branch. Creating a repository needs a classic `GH_TOKEN` (scopes `repo` and `workflow`), even when the GitHub App is set up, because an App cannot create repositories on a personal account; if the token cannot, the job tells Paul in plain English: make a classic token at GitHub Settings, Developer settings, Personal access tokens, Tokens (classic), replace the `GH_TOKEN` secret in the clear-ops repository and re-run the latest deploy workflow.
 
 ### 4. Run it
 Needs Node 22 or later (`node --version`) and git. The engineer and maintainer also need the GitHub CLI (`gh`).
@@ -193,7 +195,8 @@ See `.env.example`. The important ones:
 | `ALLOWED_TELEGRAM_IDS`, `ALLOWED_DISCORD_IDS` | Only these ids get a reply. |
 | `ALLOWED_NUMBERS` | WhatsApp: only these numbers get a reply. E.164 digits, no plus. |
 | `WHATSAPP_APP_SECRET` | WhatsApp: enables webhook signature checks. Set it in production. |
-| `GH_TOKEN` | GitHub token. Fine-grained: contents, pull requests and workflows read/write on every managed repository. To let the workforce create repositories it must be a classic token with the `repo` and `workflow` scopes (fine-grained tokens cannot create repositories under a personal account). |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | Sign in to GitHub as a GitHub App instead of a personal token (see [docs/GITHUB_APP.md](docs/GITHUB_APP.md)). The installation id is optional: it is found on `REPO_OWNER`'s account. In GitHub Actions the secrets are named `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_APP_INSTALLATION_ID` (secret names cannot start with `GITHUB_`) and the deploy maps them. |
+| `GH_TOKEN` | GitHub token. The fallback when the App is not configured, and the only way to create repositories (a GitHub App cannot create repositories on a personal account). Fine-grained: contents, pull requests and workflows read/write on every managed repository. To let the workforce create repositories it must be a classic token with the `repo` and `workflow` scopes (fine-grained tokens cannot create repositories under a personal account). |
 | `PRODUCT_REPO`, `SELF_REPO` | The product and this workforce as `owner/name`, cloned on first start. |
 | `MANAGED_REPOS` | More managed repositories: comma-separated `alias=owner/name` (optionally `\|another name`). Default `site=drpaulfarrow/drpaulfarrowcom\|drpaulfarrow.com`. Cloned on first start into `REPOS_DIR/<alias>`. |
 | `REPOS_DIR`, `REPO_OWNER` | Where those clones live (default `DATA_DIR/repos`) and the account new repositories are created under (default `drpaulfarrow`). |
