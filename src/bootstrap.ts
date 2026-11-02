@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { githubAuth, healthLine, healthProblem, type AuthHealth, type GithubAuth } from "./github-auth.js";
 import { explainCloneFailure, redact, repoRegistry, type RepoRegistry } from "./repos.js";
 
 const exec = promisify(execFile);
@@ -14,7 +15,11 @@ export interface RepoProblem {
 }
 
 /** Clones a repository into dir if the folder is missing, then points git at the token and sets the commit identity. */
-export async function prepareRepo(slug: string, dir: string, token = process.env.GH_TOKEN ?? "", log: (m: string) => void = console.log): Promise<void> {
+export async function prepareRepo(slug: string, dir: string, tokenArg?: string, log: (m: string) => void = console.log, auth: GithubAuth = githubAuth): Promise<void> {
+  // With the GitHub App configured, git reads the current installation token from its owner-only file at
+  // every operation, so a long job never holds an expired one. An explicit token (or no App) uses GH_TOKEN as before.
+  const useFile = tokenArg === undefined && (await auth.refreshFile());
+  const token = tokenArg ?? (await auth.token());
   if (!fs.existsSync(dir)) {
     if (!token) throw new Error(`folder ${dir} is missing and GH_TOKEN is not set, so it cannot be cloned.`);
     log(`Cloning ${slug} into ${dir}`);
@@ -34,7 +39,8 @@ export async function prepareRepo(slug: string, dir: string, token = process.env
       // Keep the token out of the stored remote URL; supply it through a credential helper instead.
       const url = `https://github.com/${slug}`;
       await exec("git", ["remote", "set-url", "origin", url], { cwd: dir }).catch(() => exec("git", ["remote", "add", "origin", url], { cwd: dir }));
-      await exec("git", ["config", "credential.helper", `!f() { echo username=x-access-token; echo password=${token}; }; f`], { cwd: dir });
+      const password = useFile ? `$(cat '${auth.tokenFile.replace(/'/g, `'\\''`)}')` : token;
+      await exec("git", ["config", "credential.helper", `!f() { echo username=x-access-token; echo password=${password}; }; f`], { cwd: dir });
     }
   } catch (err) {
     log(`Could not configure git in ${dir}: ${redact(err instanceof Error ? err.message : String(err), token)}`);
@@ -48,8 +54,8 @@ export async function prepareRepo(slug: string, dir: string, token = process.env
  * prepared does not stop the rest; it is returned with plain-English instructions for Paul, and the
  * token is never logged.
  */
-export async function bootstrapRepos(log: (m: string) => void = console.log, registry: RepoRegistry = repoRegistry): Promise<RepoProblem[]> {
-  const token = process.env.GH_TOKEN ?? "";
+export async function bootstrapRepos(log: (m: string) => void = console.log, registry: RepoRegistry = repoRegistry, auth: GithubAuth = githubAuth): Promise<RepoProblem[]> {
+  const token = await auth.token();
   const problems: RepoProblem[] = [];
   for (const repo of registry.list()) {
     const { alias, slug, dir } = repo;
@@ -64,7 +70,7 @@ export async function bootstrapRepos(log: (m: string) => void = console.log, reg
       continue;
     }
     try {
-      await prepareRepo(slug, dir, token, log);
+      await prepareRepo(slug, dir, undefined, log, auth);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       log(`Could not prepare ${alias} (${slug}): ${redact(detail, token).slice(0, 300)}`);
@@ -80,4 +86,20 @@ export function repoProblemsMessage(problems: RepoProblem[]): string | undefined
   if (problems.length === 1) return problems[0].plain;
   const names = problems.map((p) => p.slug).join(", ");
   return `I could not clone ${names} with the GitHub token (GH_TOKEN). In GitHub open Settings, Developer settings, Personal access tokens, open the token and under Repository access add those repositories (or choose All repositories) with Contents, Pull requests and Workflows set to Read and write. If you change the secret, replace GH_TOKEN in the clear-ops repository and re-run the latest deploy workflow.`;
+}
+
+/** Which GitHub auth is active and which managed repositories it reaches. No secrets in it. */
+export async function githubHealth(registry: RepoRegistry = repoRegistry, auth: GithubAuth = githubAuth): Promise<AuthHealth> {
+  return auth.health(registry.list().flatMap((r) => (r.slug ? [r.slug] : [])));
+}
+
+/** The /status line and the start-up log line. */
+export async function githubStatusLine(registry: RepoRegistry = repoRegistry, auth: GithubAuth = githubAuth): Promise<string> {
+  return healthLine(await githubHealth(registry, auth));
+}
+
+/** One plain message for Paul when the App cannot sign in or a managed repository cannot be reached, else undefined. */
+export async function githubProblemMessage(registry: RepoRegistry = repoRegistry, auth: GithubAuth = githubAuth): Promise<{ message?: string; line: string }> {
+  const h = await githubHealth(registry, auth);
+  return { message: healthProblem(h), line: healthLine(h) };
 }

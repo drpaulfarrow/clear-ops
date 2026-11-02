@@ -1,5 +1,6 @@
 import path from "node:path";
 import { config } from "./config.js";
+import { githubAuth } from "./github-auth.js";
 import type { Store } from "./store.js";
 
 /**
@@ -119,7 +120,9 @@ const REPLACE_SECRET = "then replace the GH_TOKEN secret in the clear-ops reposi
 
 /** Removes the token (and any token-bearing URL) from text before it is logged, returned or shown. */
 export function redact(text: string, token = process.env.GH_TOKEN ?? ""): string {
-  let out = text.replace(/x-access-token:[^@\s]+@/g, "x-access-token:***@").replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/g, "***");
+  let out = text.replace(/x-access-token:[^@\s]+@/g, "x-access-token:***@").replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/g, "***")
+    .replace(/eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, "***")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "***");
   if (token.length >= 6) out = out.split(token).join("***");
   return out;
 }
@@ -141,11 +144,12 @@ export class RepoError extends Error {
  * a refusal with a fine-grained token means: use a classic token with the repo scope.
  */
 export function explainCreateFailure(status: number, owner: string, name: string, apiMessage = ""): string {
+  const app = githubAuth.mode() === "app" ? " The GitHub App does the rest of the work, but GitHub does not let an App create repositories on a personal account, so this one step needs the classic GH_TOKEN." : "";
   if (status === 401) {
-    return `GitHub rejected the token (GH_TOKEN), so I could not create ${owner}/${name}. Make a new token (${SETTINGS_PATH} Tokens (classic), Generate new token, tick "repo" and "workflow"), ${REPLACE_SECRET}`;
+    return `GitHub rejected the token (GH_TOKEN), so I could not create ${owner}/${name}. Make a new token (${SETTINGS_PATH} Tokens (classic), Generate new token, tick "repo" and "workflow"), ${REPLACE_SECRET}${app}`;
   }
   if (status === 403 || status === 404) {
-    return `GitHub would not let the token create ${owner}/${name}. Fine-grained tokens cannot create repositories under a personal account, so I need a classic token. ${SETTINGS_PATH} Tokens (classic), Generate new token, tick "repo" and "workflow", copy it, ${REPLACE_SECRET}`;
+    return `GitHub would not let the token create ${owner}/${name}. Fine-grained tokens cannot create repositories under a personal account, so I need a classic token. ${SETTINGS_PATH} Tokens (classic), Generate new token, tick "repo" and "workflow", copy it, ${REPLACE_SECRET}${app}`;
   }
   if (status === 422) {
     return /already exists/i.test(apiMessage)
@@ -162,6 +166,9 @@ export function explainCreateFailure(status: number, owner: string, name: string
 export function explainCloneFailure(slug: string, detail = ""): string {
   const d = detail.toLowerCase();
   const perms = /not found|403|401|authentication|could not read|denied|permission|repository access/.test(d) || !d;
+  if (perms && githubAuth.mode() === "app") {
+    return `I could not reach ${slug} with the GitHub App, most likely because the App is not installed on it. On GitHub open Settings, Applications, Installed GitHub Apps, Configure on the App, and choose All repositories (or add ${slug}). Nothing needs changing in the code or the secrets.`;
+  }
   if (perms) {
     return `I could not reach ${slug} with the GitHub token (GH_TOKEN), most likely because the token has no access to it. ${SETTINGS_PATH} Fine-grained tokens, open the token, under Repository access add ${slug} (or choose All repositories), and make sure Contents and Pull requests are Read and write and Workflows is Read and write (a classic token needs "repo" and "workflow"). Nothing needs changing in the code. If you changed the token, ${REPLACE_SECRET}`;
   }
@@ -207,13 +214,14 @@ export interface CreatedRepoInfo {
 export async function createRepo(opts: CreateRepoOptions, deps: CreateRepoDeps): Promise<CreatedRepoInfo> {
   const registry = deps.registry ?? repoRegistry;
   const owner = deps.owner ?? config.repos.owner;
+  // Always the personal token, never the App: GitHub does not let an App installation create repositories on a personal account.
   const token = deps.token ?? process.env.GH_TOKEN ?? "";
   const name = opts.name.trim();
   if (!REPO_NAME.test(name) || name === "." || name === ".." || name.endsWith(".git")) {
     throw new RepoError(`"${name}" is not a valid GitHub repository name. Use letters, numbers, dots, dashes and underscores.`, false);
   }
   if (!token) {
-    throw new RepoError(`I cannot create repositories because GH_TOKEN is not set. Add a classic GitHub token with the "repo" and "workflow" scopes as the GH_TOKEN secret in the clear-ops repository, then re-run the latest deploy workflow.`);
+    throw new RepoError(`I cannot create repositories because GH_TOKEN is not set.${githubAuth.mode() === "app" ? " The GitHub App covers everything else, but GitHub does not let an App create repositories on a personal account." : ""} Add a classic GitHub token with the "repo" and "workflow" scopes as the GH_TOKEN secret in the clear-ops repository (it is used only to create repositories when you ask), then re-run the latest deploy workflow.`);
   }
   const slug = `${owner}/${name}`;
   const known = registry.find(slug);
