@@ -28,6 +28,8 @@ export const config = {
   repoDir: path.resolve(process.env.REPO_DIR ?? "./workspace"),
   /** A clone of this service's own repository, so the engineer can improve the workforce itself. */
   selfRepoDir: path.resolve(process.env.SELF_REPO_DIR ?? "./self"),
+  /** Where managed repositories other than product and workforce are cloned: one folder per alias, on the data volume. */
+  reposDir: path.resolve(process.env.REPOS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "repos")),
   allowedNumbers: (process.env.ALLOWED_NUMBERS ?? "")
     .split(",")
     .map((s) => s.trim())
@@ -52,6 +54,14 @@ export const config = {
   repos: {
     product: process.env.PRODUCT_REPO || undefined,
     self: process.env.SELF_REPO || "drpaulfarrow/clear-ops",
+    /**
+     * More managed repositories: comma-separated `alias=owner/name` (optionally `|another name` Paul
+     * uses for it). Defaults to his personal site. Repositories the workforce creates are kept in the
+     * store, not here.
+     */
+    extra: process.env.MANAGED_REPOS || "site=drpaulfarrow/drpaulfarrowcom|drpaulfarrow.com",
+    /** The GitHub account new repositories are created under. */
+    owner: process.env.REPO_OWNER || "drpaulfarrow",
   },
   whatsapp: {
     token: process.env.WHATSAPP_TOKEN ?? "",

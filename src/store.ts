@@ -10,8 +10,23 @@ export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse"
  * only when Paul asked for it in chat. Without a permit the job can only read.
  */
 export type EaPermit = "drafts" | "holds";
-/** Which codebase an engineering job works in: the product, or this workforce itself. */
-export type JobTarget = "product" | "self";
+/**
+ * Which managed repository a job works in: the alias of an entry in the repository list
+ * ("product" and "self" always exist; others such as "site" come from MANAGED_REPOS or are created
+ * by the workforce). See src/repos.ts.
+ */
+export type JobTarget = string;
+/** What a job may do beyond its kind's defaults, granted per job by the chief only when Paul asked in chat. */
+export type JobPermit = EaPermit | "create_repo";
+/** A repository the workforce created, kept so it can be worked on straight away and after a restart. */
+export interface CreatedRepo {
+  slug: string;
+  private: boolean;
+  description?: string;
+  createdAt: string;
+  /** The job that created it. */
+  jobId?: string;
+}
 export type JobStatus = "queued" | "running" | "done" | "failed";
 
 export interface Job {
@@ -61,7 +76,7 @@ export interface Job {
   /** A design round that must wait for the product's deploy of the merge before it looks. */
   awaitDeploy?: boolean;
   /** Executive-assistant jobs: what it may change (drafts, holds). Absent means read only. */
-  permits?: EaPermit[];
+  permits?: JobPermit[];
   /** Research jobs: "deep" gets more turns and budget and writes a long, structured report. */
   depth?: "standard" | "deep";
   createdAt: string;
@@ -200,6 +215,8 @@ export interface Settings {
   eaBookingLink?: string;
   /** Where follow-up nudges and hold releases are reported: the chat Google was connected from. */
   eaReplyTo?: string;
+  /** The repository problems Paul was last told about at start-up, so a restart does not repeat them. */
+  repoProblemsTold?: string;
 }
 
 interface State {
@@ -211,6 +228,8 @@ interface State {
   followups: Record<string, FollowUp>;
   holdGroups: Record<string, HoldGroup>;
   settings: Settings;
+  /** Repositories the workforce created, by alias. */
+  repos?: Record<string, CreatedRepo>;
   queueHold?: QueueHold;
   /** London dates (YYYY-MM-DD): the day /resume lifted the daily spend cap, and the day Paul was last told it was hit. */
   capLiftedOn?: string;
@@ -459,6 +478,13 @@ export class Store {
   }
 
   // Settings
+  createdRepos(): Record<string, CreatedRepo> {
+    return { ...(this.state.repos ?? {}) };
+  }
+  addCreatedRepo(alias: string, repo: CreatedRepo): void {
+    this.state.repos = { ...(this.state.repos ?? {}), [alias]: repo };
+    this.save();
+  }
   settings(): Settings {
     return { ...this.state.settings };
   }

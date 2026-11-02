@@ -98,7 +98,8 @@ export function jobTitle(job: Pick<Job, "title" | "brief" | "kind">): string {
 
 /** "Fly deploy · engineer · 16d5d3", with "workforce" for jobs on this repository. */
 export function jobLabel(job: Pick<Job, "id" | "title" | "brief" | "kind" | "target">): string {
-  const kind = job.target === "self" && job.kind !== "create_agent" ? `${job.kind}, workforce` : job.kind;
+  const other = job.target && job.target !== "product" && job.target !== "self" ? job.target : undefined;
+  const kind = job.target === "self" && job.kind !== "create_agent" ? `${job.kind}, workforce` : other && job.kind !== "create_agent" ? `${job.kind}, ${other}` : job.kind;
   return `${jobTitle(job)} · ${kind} · ${job.id}`;
 }
 

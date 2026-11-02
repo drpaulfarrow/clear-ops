@@ -12,6 +12,13 @@ const KIND_WORDS: Record<string, string> = { create_agent: "agent-creator", main
  * A short, human status line for one of the chief's tool calls, shown to the founder while he waits.
  * Unknown tools get a generic line rather than their internal name.
  */
+/** " on the workforce", " on site": the repository a job is about, unless it is the product. */
+function repoWords(repo: unknown): string {
+  const r = typeof repo === "string" ? repo.trim().toLowerCase() : "";
+  if (!r || r === "product") return "";
+  return r === "self" ? " on the workforce" : ` on ${clip(r)}`;
+}
+
 export function describeToolUse(name: string, input: Record<string, unknown> = {}): string {
   const id = typeof input.id === "string" && input.id ? input.id : undefined;
   switch (name.replace(/^mcp__ops__/, "")) {
@@ -25,7 +32,7 @@ export function describeToolUse(name: string, input: Record<string, unknown> = {
       const titled = "title" in checked ? `: ${checked.title}` : "";
       if (input.kind === "design" && input.loop) return `Starting the design loop${titled}…`;
       const kind = KIND_WORDS[String(input.kind)] ?? String(input.kind ?? "worker");
-      return `Starting ${article(kind)} ${kind} job${input.target === "self" ? " on the workforce" : ""}${titled}…`;
+      return `Starting ${article(kind)} ${kind} job${repoWords(input.repo ?? input.target)}${titled}…`;
     }
     case "propose_action":
       return "Preparing an approval request…";
