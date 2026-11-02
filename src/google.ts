@@ -294,7 +294,7 @@ const FORBIDDEN_SEGMENT = /(^|\/)(send|trash|untrash|delete|batchDelete|modify|b
 /* ---------- Approved outbound: sending mail and inviting people, only with a grant ---------- */
 
 /**
- * The only three things that notify other people. Not in ALLOWED_ENDPOINTS, so GoogleApi.request refuses
+ * The only things that notify other people. Not in ALLOWED_ENDPOINTS, so GoogleApi.request refuses
  * them for every caller. GoogleApi.approved reaches them, and only with a grant minted by the approval
  * gate (src/outbound.ts) for one pending action Paul approved in chat, bound to the exact request.
  */
@@ -302,6 +302,7 @@ export const APPROVED_ENDPOINTS: ReadonlyArray<{ api: Api; method: Method; path:
   { api: "gmail", method: "POST", path: /^drafts\/send$/, what: "send an existing draft" },
   { api: "gmail", method: "POST", path: /^messages\/send$/, what: "send a new message" },
   { api: "calendar", method: "POST", path: /^calendars\/primary\/events$/, what: "create an event with attendees" },
+  { api: "calendar", method: "DELETE", path: /^calendars\/primary\/events\/[a-v0-9]{5,1024}$/, what: "cancel an event Paul organises, emailing its attendees" },
 ];
 const INVITE_KEYS = new Set(["summary", "description", "location", "start", "end", "attendees"]);
 
@@ -383,7 +384,7 @@ export class GoogleApi {
   }
 
   /**
-   * Make one approved outbound request: send a draft or message, or create an event with attendees.
+   * Make one approved outbound request: send a draft or message, create an event with attendees, or cancel one with attendees.
    * Needs a live, unused grant whose digest matches this exact request; the grant is spent before the call.
    */
   async approved<T = any>(grant: SendGrant, api: Api, method: Method, p: string, opts: RequestOptions = {}): Promise<T> {
@@ -391,7 +392,14 @@ export class GoogleApi {
     liveGrants.delete(grant);
     if (grant.digest !== requestDigest(api, method, p, opts)) throw new GoogleError("Refused: the request does not match what Paul approved.");
     if (!APPROVED_ENDPOINTS.some((e) => e.api === api && e.method === method && e.path.test(p))) throw new GoogleError(`Refused: ${method} ${api}/${p} is not an approvable operation.`);
-    if (api === "calendar") {
+    if (api === "calendar" && method === "DELETE") {
+      // A cancellation: must notify, carry nothing else, and only for an event Paul organises that has attendees.
+      if (opts.query?.sendUpdates !== "all") throw new GoogleError("Refused: a cancellation must use sendUpdates=all.");
+      if (Object.keys(opts.query ?? {}).some((k) => k !== "sendUpdates") || opts.body !== undefined) throw new GoogleError("Refused: a cancellation takes no other options.");
+      const ev = await this.send<Record<string, any>>("calendar", "GET", p);
+      if (ev.organizer?.self !== true) throw new GoogleError("Refused: Paul is not the organiser of that event, so the assistant cannot cancel it (that would be answering an invitation).");
+      if (!Array.isArray(ev.attendees) || !ev.attendees.some((a: any) => a?.self !== true)) throw new GoogleError("Refused: that event has no other attendees to notify (a hold or personal event is removed with remove_hold).");
+    } else if (api === "calendar") {
       const body = (opts.body ?? {}) as Record<string, any>;
       if (opts.query?.sendUpdates !== "all") throw new GoogleError("Refused: an invitation must use sendUpdates=all.");
       for (const k of ["conferenceDataVersion", "supportsAttachments"]) if (k in (opts.query ?? {})) throw new GoogleError(`Refused: ${k} is not allowed.`);
