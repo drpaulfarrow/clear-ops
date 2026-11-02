@@ -213,7 +213,7 @@ export interface HoldGroup {
  * An email or invitation prepared for Paul's approval. Nothing is sent until Paul approves this id in chat;
  * the record is also the audit log (who approved, when, recipients, subject, the id Google returned).
  */
-export type OutboundKind = "send_draft" | "send_email" | "invite";
+export type OutboundKind = "send_draft" | "send_email" | "invite" | "cancel_event";
 export type OutboundStatus = "pending" | "executing" | "executed" | "cancelled" | "expired" | "changed" | "failed";
 export interface OutboundAction {
   id: string;
@@ -226,6 +226,8 @@ export interface OutboundAction {
   replyTo: string;
   email?: { draftId?: string; to: string[]; cc: string[]; bcc: string[]; subject: string; body: string; threadId?: string; inReplyTo?: string; references?: string; attachments?: string[] };
   invite?: { title: string; start: string; end: string; attendees: string[]; location?: string; description?: string };
+  /** A cancellation of an event Paul organises that has attendees: they are emailed a cancellation. */
+  cancel?: { eventId: string; title: string; start: string; end: string; attendees: string[] };
   /** Digest of exactly what Paul was shown. A draft that no longer matches needs a new approval. */
   hash: string;
   approvedBy?: string;

@@ -271,7 +271,7 @@ export class EaTools {
 
   private need(p: EaPermit): void {
     if (!this.can(p)) {
-      throw new GoogleError(`Refused: this job may not ${p === "drafts" ? "write drafts" : p === "send" ? "prepare sends or invitations" : "place, move or remove holds"}. Only Paul can ask for that, in chat.`);
+      throw new GoogleError(`Refused: this job may not ${p === "drafts" ? "write drafts" : p === "send" ? "prepare sends, invitations or cancellations" : "place, move or remove holds"}. Only Paul can ask for that, in chat.`);
     }
   }
 
@@ -451,6 +451,17 @@ export class EaTools {
     } catch (e) {
       if (e instanceof OutboundError) throw new GoogleError(e.message);
       throw e;
+    }
+  }
+
+  async prepareCancelEvent(input: { eventId: string; replaces?: string }): Promise<string> {
+    const gate = this.gate();
+    try {
+      const a = await gate.prepareCancel(input.eventId, this.origin(input.replaces));
+      return this.preparedText(a).replace("recipients and text", "event and who will be told");
+    } catch (err) {
+      if (err instanceof OutboundError) throw new GoogleError(err.message);
+      throw err;
     }
   }
 
@@ -796,6 +807,11 @@ export function eaServer(t: EaTools) {
       tool("prepare_send_draft", "Prepare sending a Gmail draft YOU created, for Paul's approval. Nothing is sent: the service shows Paul the exact recipients, subject and body and he must reply \"send <id>\" himself. If the draft changes afterwards he must approve again. Only when Paul asked in chat to send it.", { draftId: z.string(), replaces }, (a) => guard(() => t.prepareSendDraft(a))),
       tool("prepare_send_email", "Prepare a new email for Paul's approval. Nothing is sent: the service shows Paul the exact To, Cc, Bcc, subject and body and he must reply \"send <id>\" himself. Only when Paul asked in chat for it, to addresses he gave or people on the thread.", { to: z.array(z.string()), cc: z.array(z.string()).optional(), bcc: z.array(z.string()).optional(), subject: z.string().optional(), body: z.string(), replyToThreadId: z.string().optional(), replaces }, (a) => guard(() => t.prepareSendEmail(a))),
       tool("prepare_invite", "Prepare a calendar invitation with attendees on Paul's own calendar, for his approval. Nothing is created or sent: the service shows Paul the title, time, attendees, location and description and he must reply \"send <id>\" himself; Google then emails the attendees. For time with nobody invited use place_hold instead.", { title: z.string(), start: iso, end: iso, attendees: z.array(z.string()), location: z.string().optional(), description: z.string().optional(), replaces }, (a) => guard(() => t.prepareInvite(a))),
+    );
+  }
+  if (t.can("send")) {
+    tools.push(
+      tool("prepare_cancel_event", "Prepare cancelling a calendar event on Paul's own calendar that has attendees (an event he organises), for his approval. Nothing is cancelled: the service reads the event itself and shows Paul its title, time and the attendees who will be emailed a cancellation, and he must reply \"send <id>\" himself. Only when Paul asked in chat to cancel that event. It cannot decline or answer an invitation Paul received, and holds use remove_hold.", { eventId: z.string().describe("The event id, from list_events."), replaces: z.string().optional().describe("The id of a still-waiting prepared action this one replaces.") }, (a) => guard(() => t.prepareCancelEvent(a))),
     );
   }
   if (t.can("holds")) {

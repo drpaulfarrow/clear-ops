@@ -300,8 +300,8 @@ test("the executive assistant can never delete or relabel mail or RSVP, and the 
 
 test("sending mail and inviting people happen only through the approval gate: one approved item at a time, from Paul's chat", async () => {
   const { GoogleApi, APPROVED_ENDPOINTS, GOOGLE_SCOPES } = await import("../src/google.js");
-  // The three approvable operations, and nothing else, behind a grant.
-  assert.deepEqual(APPROVED_ENDPOINTS.map((e) => `${e.api} ${e.method} ${e.path.source}`).sort(), ["calendar POST ^calendars\\/primary\\/events$", "gmail POST ^drafts\\/send$", "gmail POST ^messages\\/send$"].sort());
+  // The four approvable operations, and nothing else, behind a grant.
+  assert.deepEqual(APPROVED_ENDPOINTS.map((e) => `${e.api} ${e.method} ${e.path.source}`).sort(), ["calendar POST ^calendars\\/primary\\/events$", "gmail POST ^drafts\\/send$", "gmail POST ^messages\\/send$", "calendar DELETE ^calendars\\/primary\\/events\\/[a-v0-9]{5,1024}$"].sort());
   assert.ok(!GOOGLE_SCOPES.some((s) => /gmail\.send|gmail\.modify|mail\.google\.com|auth\/calendar$/.test(s)), "no wider scope is needed or allowed");
   assert.throws(() => GoogleApi.check("gmail", "POST", "drafts/send", { body: {} }), "the ordinary door refuses sends");
   // Only the gate mints grants and calls the approved door; no tool, orchestrator or worker code does.

@@ -1,11 +1,12 @@
 /**
- * Sending email and inviting people, the one place the executive assistant's reach goes beyond drafts and
+ * Sending email, inviting people and cancelling events that have attendees, the one place the executive assistant's reach goes beyond drafts and
  * holds, and only through this approval gate.
  *
  * The flow is two steps and never autonomous:
  *  1. An ea job holding the "send" permit (granted by the chief only because Paul asked in chat) PREPARES an
  *     action. The service itself, not the model, shows Paul the exact recipients, subject and body (or the
- *     invite's title, time, attendees, location and description) with an id. Nothing is sent.
+ *     invite's title, time, attendees, location and description, or the event to cancel and who is told)
+ *     with an id. Nothing is sent or cancelled.
  *  2. Paul replies "send <id>" (or "send it" when exactly one is waiting) from his own allowlisted chat
  *     account. The orchestrator matches that message before any model runs, so no email, calendar entry, job
  *     output or upload can produce it. Only then does the gate mint a single-use grant for that exact request.
@@ -16,7 +17,7 @@
 import { createHash } from "node:crypto";
 import { config, isAllowed } from "./config.js";
 import { addresses, attachmentNames, bodyParts, buildRawMessage, EMAIL, header, oneLine } from "./ea.js";
-import { GoogleError, mintSendGrant, requestDigest, type GoogleApi } from "./google.js";
+import { GoogleError, isHold, mintSendGrant, requestDigest, type GoogleApi } from "./google.js";
 import { fmt, londonYmd } from "./london.js";
 import type { OutboundAction, OutboundKind, Store } from "./store.js";
 import { shortId } from "./store.js";
@@ -46,6 +47,9 @@ const SECRET_PATTERNS: RegExp[] = [
 export function looksLikeSecret(text: string): boolean {
   return SECRET_PATTERNS.some((r) => r.test(text));
 }
+
+/** Calendar event ids are base32hex (a to v, 0 to 9). */
+const CANCEL_EVENT_ID = /^[a-v0-9]{5,1024}$/;
 
 const digest = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 
@@ -148,7 +152,7 @@ export class OutboundGate {
     return this.store.listOutbound().filter((a) => (a.status === "executed" || a.status === "executing") && londonYmd(new Date(a.executedAt ?? a.approvedAt ?? a.createdAt)) === today).length;
   }
 
-  private create(kind: OutboundKind, origin: Origin, fields: Pick<OutboundAction, "email" | "invite" | "hash">): OutboundAction {
+  private create(kind: OutboundKind, origin: Origin, fields: Pick<OutboundAction, "email" | "invite" | "cancel" | "hash">): OutboundAction {
     const replyTo = origin.replyTo;
     if (!replyTo) throw new OutboundError("Refused: there is no chat to show Paul this in, so it cannot be prepared.");
     if (origin.replaces) {
@@ -217,11 +221,43 @@ export class OutboundGate {
     return action;
   }
 
+  /**
+   * Prepares cancelling an event on Paul's own calendar that has attendees. The event is read here, so Paul is
+   * shown its real title, time and attendees, not what the model said. Holds, events Paul does not organise
+   * (cancelling those would be answering an invitation) and events with nobody else invited are refused.
+   */
+  async prepareCancel(eventId: string, origin: Origin): Promise<OutboundAction> {
+    const cancel = await this.readEventToCancel(eventId);
+    this.checkRoom(cancel.attendees.length);
+    const action = this.create("cancel_event", origin, { hash: digest(cancel), cancel });
+    await this.show(action);
+    return action;
+  }
+
+  private async readEventToCancel(eventId: string): Promise<NonNullable<OutboundAction["cancel"]>> {
+    if (!CANCEL_EVENT_ID.test(eventId)) throw new OutboundError("Refused: that is not a calendar event id.");
+    const ev = await this.api.request<Record<string, any>>("calendar", "GET", `calendars/primary/events/${eventId}`);
+    if (ev.status === "cancelled") throw new OutboundError("Refused: that event is already cancelled.");
+    if (isHold(ev)) throw new OutboundError("Refused: that is a hold; remove it with remove_hold, which needs no approval.");
+    if (ev.organizer?.self !== true) throw new OutboundError("Refused: Paul is not the organiser of that event, so cancelling it would be answering an invitation, which the assistant never does.");
+    const attendees = clean((Array.isArray(ev.attendees) ? ev.attendees : []).filter((a: any) => a?.self !== true && !a?.resource).map((a: any) => String(a?.email ?? "")));
+    if (!attendees.length) throw new OutboundError("Refused: that event has no other attendees to notify.");
+    this.checkAddresses("attendees", attendees);
+    const start = new Date(ev.start?.dateTime ?? ev.start?.date ?? "");
+    const end = new Date(ev.end?.dateTime ?? ev.end?.date ?? "");
+    if (Number.isNaN(start.getTime())) throw new OutboundError("Refused: the event has no readable start time.");
+    return { eventId, title: oneLine(String(ev.summary ?? "(no title)")).slice(0, 300), start: start.toISOString(), end: (Number.isNaN(end.getTime()) ? start : end).toISOString(), attendees };
+  }
+
   /* ---------- What Paul sees ---------- */
 
   preview(a: OutboundAction): string {
     const expires = `expires ${fmt(new Date(a.expiresAt))}`;
     const how = `Reply "send ${a.id}" to go ahead, or "cancel ${a.id}". Nothing happens until you do.`;
+    if (a.cancel) {
+      const c = a.cancel;
+      return [`Cancellation waiting for your approval (${a.id}, ${expires}). Google will email a cancellation to every attendee below.`, `Event: ${c.title}`, `When: ${fmt(new Date(c.start))} to ${fmt(new Date(c.end))}`, `Attendees who will be told: ${c.attendees.join(", ")}`, "", `Reply "send ${a.id}" to cancel the event, or "cancel ${a.id}" to keep it. Nothing happens until you do.`].join("\n");
+    }
     if (a.invite) {
       const i = a.invite;
       return [`Invitation waiting for your approval (${a.id}, ${expires}). Attendees will be emailed by Google.`, `Title: ${i.title}`, `When: ${fmt(new Date(i.start))} to ${fmt(new Date(i.end))}`, `Attendees: ${i.attendees.join(", ")}`, `Location: ${i.location ?? "(none)"}`, `Description: ${i.description ?? "(none)"}`, "", how].join("\n");
@@ -266,7 +302,7 @@ export class OutboundGate {
     const cur = this.store.getOutbound(id)!;
     if (cur.status !== "pending") return `${id} is already ${cur.status}, so there is nothing to cancel.`;
     this.store.updateOutbound(id, { status: "cancelled", note: `cancelled by ${by}` });
-    return `Cancelled ${id}. Nothing was sent.`;
+    return `Cancelled ${id}. Nothing was sent or cancelled.`;
   }
 
   /**
@@ -284,6 +320,7 @@ export class OutboundGate {
     this.store.updateOutbound(id, { status: "executing", approvedBy: approver, approvedAt: this.now().toISOString() });
     try {
       if (this.usedToday() > this.limits.dailyCap) throw new OutboundError(`the daily limit of ${this.limits.dailyCap} sends and invitations has been reached`);
+      if (cur.kind === "cancel_event") return await this.runCancel(cur);
       return cur.kind === "invite" ? await this.runInvite(cur) : cur.kind === "send_draft" ? await this.runDraft(cur) : await this.runEmail(cur);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -331,6 +368,24 @@ export class OutboundGate {
     const e = a.email!;
     const who = [e.to.join(", "), e.cc.length ? `cc ${e.cc.join(", ")}` : "", e.bcc.length ? `bcc ${e.bcc.join(", ")}` : ""].filter(Boolean).join("; ");
     return `Sent to ${who}: "${e.subject}"${id ? ` (message ${id})` : ""}. Today ${this.usedToday()} of ${this.limits.dailyCap}.`;
+  }
+
+  private async runCancel(a: OutboundAction): Promise<string> {
+    const c = a.cancel!;
+    // Re-read the event: if it changed since Paul saw it (time, title, attendees), nothing is cancelled.
+    const now = await this.readEventToCancel(c.eventId);
+    if (digest(now) !== a.hash) {
+      this.store.updateOutbound(a.id, { status: "changed", note: "the event changed after it was shown" });
+      const next = this.create("cancel_event", { jobId: a.jobId, replyTo: a.replyTo }, { hash: digest(now), cancel: now });
+      await this.show(next);
+      return `The event changed after you saw it, so I did not cancel it. I have shown you the current version as ${next.id}; reply "send ${next.id}" if it is right.`;
+    }
+    const p = `calendars/primary/events/${c.eventId}`;
+    const query = { sendUpdates: "all" };
+    const grant = mintSendGrant(a.id, requestDigest("calendar", "DELETE", p, { query }));
+    await this.api.approved(grant, "calendar", "DELETE", p, { query });
+    this.executed(a, c.eventId);
+    return `Cancelled "${c.title}", ${fmt(new Date(c.start))}. Cancellation emailed to ${c.attendees.join(", ")}. Today ${this.usedToday()} of ${this.limits.dailyCap}.`;
   }
 
   private async runInvite(a: OutboundAction): Promise<string> {

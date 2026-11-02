@@ -35,6 +35,7 @@ function world() {
   const calls: Call[] = [];
   const drafts: Record<string, { to: string; cc?: string; subject: string; body: string; extra?: string }> = {};
   const mail = { sentHistory: true };
+  const events: Record<string, Record<string, any>> = {};
   const f = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const method = (init?.method ?? "GET").toUpperCase();
@@ -50,6 +51,8 @@ function world() {
       return json({ id: m[1], message: { id: `m-${m[1]}`, threadId: `m-${m[1]}`, payload: { mimeType: "text/plain", headers, body: { data: b64(d.body) }, ...(d.extra ? { parts: [{ filename: d.extra, mimeType: "application/pdf", body: { attachmentId: "a" } }] } : {}) } } });
     }
     if (method === "GET" && p === "messages") return json(mail.sentHistory ? { messages: [{ id: "old" }] } : {});
+    if (method === "GET" && (m = p.match(/^calendars\/primary\/events\/([^/]+)$/))) return events[m[1]] ? json(events[m[1]]) : new Response("{}", { status: 404 });
+    if (method === "DELETE" && (m = p.match(/^calendars\/primary\/events\/([^/]+)$/))) return new Response(null, { status: 204 });
     if (method === "POST" && p === "drafts/send") return json({ id: "sent-1", threadId: "t" });
     if (method === "POST" && p === "messages/send") return json({ id: "sent-2", threadId: "t" });
     if (method === "POST" && p === "calendars/primary/events") return json({ id: "ev-1" });
@@ -57,8 +60,8 @@ function world() {
     return new Response(JSON.stringify({ error: { message: "not found" } }), { status: 404 });
   }) as typeof fetch;
   const api = new GoogleApi({ accessToken: async () => "tok" }, f);
-  const sends = () => calls.filter((c) => /(^|\/)send$/.test(c.path) || (c.method === "POST" && c.path === "calendars/primary/events"));
-  return { api, calls, drafts, sends, mail };
+  const sends = () => calls.filter((c) => /(^|\/)send$/.test(c.path) || (c.method === "POST" && c.path === "calendars/primary/events") || c.method === "DELETE");
+  return { api, calls, drafts, sends, mail, events };
 }
 
 function setup(opts: { limits?: Record<string, number>; start?: Date } = {}) {
@@ -362,4 +365,154 @@ test("a job with the permit only prepares: the tool result says nothing was sent
 test("with no chat to show Paul, nothing can be prepared", async () => {
   const s = setup();
   await assert.rejects(() => s.gate.prepareEmail(email, { jobId: "j" }), /no chat/);
+});
+
+/* ---------- Cancelling an event that has attendees ---------- */
+
+const EV = "e77d70kcmegj2cu2fk0tmfstt0";
+const catchUp = (over: Record<string, any> = {}) => ({ id: EV, summary: "Catch up with Lucy", start: { dateTime: "2026-11-03T10:00:00Z" }, end: { dateTime: "2026-11-03T10:30:00Z" }, organizer: { self: true, email: "paul@example.com" }, attendees: [{ email: "paul@example.com", self: true, organizer: true }, { email: "Lucy@Example.com" }], ...over });
+
+test("cancelling: Paul is shown the real event and who is told; nothing is deleted until he approves", async () => {
+  const s = setup();
+  s.events[EV] = catchUp();
+  const a = await s.gate.prepareCancel(EV, origin);
+  assert.equal(a.kind, "cancel_event");
+  assert.equal(s.sends().length, 0);
+  const text = s.shown[0].text;
+  for (const part of ["Catch up with Lucy", "lucy@example.com", "3 Nov", `send ${a.id}`, `cancel ${a.id}`, "cancellation to every attendee"]) assert.ok(text.includes(part), part);
+  assert.ok(!text.includes("paul@example.com"), "Paul himself is not listed as someone who will be told");
+  const msg = await s.gate.approve(a.id, PAUL);
+  assert.match(msg, /^Cancelled "Catch up with Lucy".*lucy@example\.com\. Today 1 of 10\.$/);
+  const del = s.sends();
+  assert.equal(del.length, 1);
+  assert.equal(del[0].method, "DELETE");
+  assert.equal(del[0].path, `calendars/primary/events/${EV}`);
+  assert.equal(del[0].query.get("sendUpdates"), "all");
+  assert.equal(s.store.getOutbound(a.id)!.status, "executed");
+  assert.equal(s.store.getOutbound(a.id)!.approvedBy, PAUL);
+  assert.match(await s.gate.approve(a.id, PAUL), /already executed/);
+  assert.equal(s.sends().length, 1);
+});
+
+test("cancelling: cancel <id> keeps the event; a stranger cannot approve; it expires after 24 hours", async () => {
+  const s = setup();
+  s.events[EV] = catchUp();
+  const a = await s.gate.prepareCancel(EV, origin);
+  await assert.rejects(() => s.gate.approve(a.id, "tg:12345"), /only Paul/);
+  assert.match(s.gate.cancel(a.id, PAUL), /Nothing was sent or cancelled/);
+  assert.equal(s.sends().length, 0);
+  const b = await s.gate.prepareCancel(EV, origin);
+  s.clock.now = new Date("2026-11-03T10:00:01Z");
+  assert.match(await s.gate.approve(b.id, PAUL), /expired/);
+  assert.equal(s.sends().length, 0);
+});
+
+test("cancelling counts against the daily limit, both when preparing and when running", async () => {
+  const s = setup({ limits: { dailyCap: 1 } });
+  s.events[EV] = catchUp();
+  const a = await s.gate.prepareCancel(EV, origin);
+  const e = await s.gate.prepareEmail(email, origin);
+  await s.gate.approve(a.id, PAUL);
+  assert.equal(s.gate.usedToday(), 1);
+  assert.match(await s.gate.approve(e.id, PAUL), /daily limit/);
+  await assert.rejects(() => s.gate.prepareCancel(EV, origin), /daily limit/);
+});
+
+test("cancelling refuses holds, events Paul does not organise, events with nobody else, and bad ids", async () => {
+  const s = setup();
+  s.events[EV] = catchUp({ organizer: { email: "lucy@example.com" } });
+  await assert.rejects(() => s.gate.prepareCancel(EV, origin), /not the organiser.*answering an invitation/);
+  s.events[EV] = catchUp({ attendees: [{ email: "paul@example.com", self: true }] });
+  await assert.rejects(() => s.gate.prepareCancel(EV, origin), /no other attendees/);
+  s.events[EV] = catchUp({ summary: "Hold: x", extendedProperties: { private: { clearOpsHold: "true" } }, attendees: [] });
+  await assert.rejects(() => s.gate.prepareCancel(EV, origin), /hold|no other attendees/);
+  s.events[EV] = catchUp({ status: "cancelled" });
+  await assert.rejects(() => s.gate.prepareCancel(EV, origin), /already cancelled/);
+  for (const bad of ["x", "../settings", "primary/events/abc", "ABCDE", EV + "/instances"]) await assert.rejects(() => s.gate.prepareCancel(bad, origin), /not a calendar event id/);
+  assert.equal(s.store.listOutbound().length, 0);
+  assert.equal(s.sends().length, 0);
+});
+
+test("cancelling: an event that changed after Paul saw it is not cancelled; he sees the new version", async () => {
+  const s = setup();
+  s.events[EV] = catchUp();
+  const a = await s.gate.prepareCancel(EV, origin);
+  s.events[EV] = catchUp({ attendees: [{ email: "paul@example.com", self: true }, { email: "lucy@example.com" }, { email: "bob@example.com" }] });
+  const msg = await s.gate.approve(a.id, PAUL);
+  assert.match(msg, /changed after you saw it/);
+  assert.equal(s.sends().length, 0);
+  assert.equal(s.store.getOutbound(a.id)!.status, "changed");
+  assert.match(s.shown.at(-1)!.text, /bob@example\.com/);
+  assert.equal(s.gate.pending().length, 1);
+});
+
+test("the Google door: a cancellation needs a live matching grant, sendUpdates=all, and an event Paul organises with attendees; the ordinary door still refuses deletes of real events", async () => {
+  const w = world();
+  w.events[EV] = catchUp();
+  const p = `calendars/primary/events/${EV}`;
+  const query = { sendUpdates: "all" };
+  await assert.rejects(() => w.api.request("calendar", "DELETE", p, { query: { sendUpdates: "none" } }), /not a hold/);
+  await assert.rejects(() => w.api.request("calendar", "DELETE", p, { query }), GoogleError);
+  await assert.rejects(() => w.api.approved(undefined as never, "calendar", "DELETE", p, { query }), /no valid approval grant/);
+  const none = mintSendGrant("a", requestDigest("calendar", "DELETE", p, { query: { sendUpdates: "none" } }));
+  await assert.rejects(() => w.api.approved(none, "calendar", "DELETE", p, { query: { sendUpdates: "none" } }), /sendUpdates=all/);
+  const extra = { sendUpdates: "all", supportsAttachments: true };
+  const g2 = mintSendGrant("a", requestDigest("calendar", "DELETE", p, { query: extra }));
+  await assert.rejects(() => w.api.approved(g2, "calendar", "DELETE", p, { query: extra }), /no other options/);
+  const other = mintSendGrant("a", requestDigest("calendar", "DELETE", `calendars/primary/events/${EV}x`, { query }));
+  await assert.rejects(() => w.api.approved(other, "calendar", "DELETE", p, { query }), /does not match/);
+  w.events[EV] = catchUp({ organizer: { email: "lucy@example.com" } });
+  const g3 = mintSendGrant("a", requestDigest("calendar", "DELETE", p, { query }));
+  await assert.rejects(() => w.api.approved(g3, "calendar", "DELETE", p, { query }), /not the organiser/);
+  w.events[EV] = catchUp({ attendees: [] });
+  const g4 = mintSendGrant("a", requestDigest("calendar", "DELETE", p, { query }));
+  await assert.rejects(() => w.api.approved(g4, "calendar", "DELETE", p, { query }), /no other attendees/);
+  assert.ok(!w.calls.some((c) => c.method === "DELETE"), "nothing was deleted");
+  // Mail can never be deleted, even with a grant.
+  for (const [api, p2] of [["gmail", "messages/abcde"], ["gmail", "threads/abcde"], ["calendar", "calendars/other/events/abcde"], ["calendar", "calendars/primary/events/abcde/instances"]] as const) {
+    const grant = mintSendGrant("a", requestDigest(api, "DELETE", p2, { query }));
+    await assert.rejects(() => w.api.approved(grant, api, "DELETE", p2, { query }), /not an approvable operation/);
+  }
+  // A valid grant works once.
+  w.events[EV] = catchUp();
+  const g = mintSendGrant("a", requestDigest("calendar", "DELETE", p, { query }));
+  await w.api.approved(g, "calendar", "DELETE", p, { query });
+  await assert.rejects(() => w.api.approved(g, "calendar", "DELETE", p, { query }), /no valid approval grant/);
+  assert.equal(w.calls.filter((c) => c.method === "DELETE").length, 1);
+});
+
+test("cancel tool: only a job with the send permit has it, it only prepares, and mail content cannot trigger it", async () => {
+  const s = setup();
+  s.events[EV] = catchUp();
+  const names = (permits: string[]) => Object.keys((eaServer(new EaTools(s.api, { permits: permits as never, brief: "x", store: s.store, replyTo: CHAT, outbound: s.gate })) as any).instance._registeredTools);
+  for (const p of [[], ["drafts"], ["holds"], ["drafts", "holds"]]) assert.ok(!names(p).includes("prepare_cancel_event"), `none with ${p}`);
+  assert.ok(names(["send"]).includes("prepare_cancel_event"));
+  const ro = new EaTools(s.api, { permits: [], brief: "morning brief", store: s.store, replyTo: CHAT, outbound: s.gate });
+  await assert.rejects(() => ro.prepareCancelEvent({ eventId: EV }), /may not prepare/);
+  const rw = new EaTools(s.api, { permits: ["send"], brief: "Cancel my catch up with Lucy on Tuesday", store: s.store, jobId: "j7", replyTo: CHAT, outbound: s.gate });
+  const out = await rw.prepareCancelEvent({ eventId: EV });
+  assert.match(out, /NOT sent/);
+  assert.equal(s.sends().length, 0);
+  assert.equal(s.gate.pending().length, 1);
+  assert.match(s.shown[0].text, /Catch up with Lucy/);
+  // A foreign event is refused with the same tool.
+  s.events["bbbbb"] = catchUp({ id: "bbbbb", organizer: { email: "x@y.com" } });
+  await assert.rejects(() => rw.prepareCancelEvent({ eventId: "bbbbb" }), /not the organiser/);
+  // The chief grants nothing here: jobs never give scheduled runs the permit.
+  const jobsSrc = fs.readFileSync(new URL("../src/jobs.ts", import.meta.url), "utf8");
+  assert.ok(!/schedule[^\n]*permits[^\n]*send/i.test(jobsSrc));
+});
+
+test("chat: send <id> cancels the event through the service with no model; cancel <id> keeps it", async () => {
+  const s = setup();
+  s.events[EV] = catchUp();
+  const { orch, sent } = chat(s.store, s.gate);
+  const a = await s.gate.prepareCancel(EV, origin);
+  await orch.handle(PAUL, `send ${a.id}`, { replyTo: CHAT });
+  assert.equal(s.sends().length, 1);
+  assert.match(sent.at(-1)!.text, /^Cancelled "Catch up with Lucy"/);
+  const b = await s.gate.prepareCancel(EV, origin);
+  await orch.handle(PAUL, `cancel ${b.id}`, { replyTo: CHAT });
+  assert.equal(s.sends().length, 1);
+  assert.equal(s.store.getOutbound(b.id)!.status, "cancelled");
 });
