@@ -113,6 +113,12 @@ export const config = {
    * of this public repository: set it as the EA_BOOKING_LINK Actions variable (or env var).
    */
   eaBookingLink: (process.env.EA_BOOKING_LINK ?? "").trim(),
+  /** Sending mail and inviting people, only after Paul approves each one in chat (src/outbound.ts). */
+  outbound: {
+    dailyCap: positive(process.env.OUTBOUND_DAILY_CAP, 10),
+    maxRecipients: positive(process.env.OUTBOUND_MAX_RECIPIENTS, 10),
+    ttlHours: positive(process.env.OUTBOUND_TTL_HOURS, 24),
+  },
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */

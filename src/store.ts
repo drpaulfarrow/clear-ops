@@ -9,7 +9,7 @@ export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse"
  * What an executive-assistant job may change in Paul's Google Workspace, granted per job by the chief
  * only when Paul asked for it in chat. Without a permit the job can only read.
  */
-export type EaPermit = "drafts" | "holds";
+export type EaPermit = "drafts" | "holds" | "send";
 /**
  * Which managed repository a job works in: the alias of an entry in the repository list
  * ("product" and "self" always exist; others such as "site" come from MANAGED_REPOS or are created
@@ -209,6 +209,33 @@ export interface HoldGroup {
   closedAt?: string;
 }
 
+/**
+ * An email or invitation prepared for Paul's approval. Nothing is sent until Paul approves this id in chat;
+ * the record is also the audit log (who approved, when, recipients, subject, the id Google returned).
+ */
+export type OutboundKind = "send_draft" | "send_email" | "invite";
+export type OutboundStatus = "pending" | "executing" | "executed" | "cancelled" | "expired" | "changed" | "failed";
+export interface OutboundAction {
+  id: string;
+  kind: OutboundKind;
+  status: OutboundStatus;
+  createdAt: string;
+  expiresAt: string;
+  /** The ea job that prepared it, and where Paul was shown it. */
+  jobId?: string;
+  replyTo: string;
+  email?: { draftId?: string; to: string[]; cc: string[]; bcc: string[]; subject: string; body: string; threadId?: string; inReplyTo?: string; references?: string; attachments?: string[] };
+  invite?: { title: string; start: string; end: string; attendees: string[]; location?: string; description?: string };
+  /** Digest of exactly what Paul was shown. A draft that no longer matches needs a new approval. */
+  hash: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  executedAt?: string;
+  /** Gmail message id or calendar event id returned by Google. */
+  resultId?: string;
+  note?: string;
+}
+
 /** Runtime settings Paul sets from chat. */
 export interface Settings {
   /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */
@@ -230,6 +257,9 @@ interface State {
   followups: Record<string, FollowUp>;
   holdGroups: Record<string, HoldGroup>;
   settings: Settings;
+  outbound?: Record<string, OutboundAction>;
+  /** Gmail drafts the assistant created: the only drafts it may prepare for sending. */
+  createdDrafts?: Record<string, { at: string; jobId?: string }>;
   /** Repositories the workforce created, by alias. */
   repos?: Record<string, CreatedRepo>;
   queueHold?: QueueHold;
@@ -385,6 +415,33 @@ export class Store {
   }
   pendingActions(): PendingAction[] {
     return Object.values(this.state.actions).filter((a) => a.status === "pending");
+  }
+
+  // Outbound (send and invite) approvals and their log
+  putOutbound(a: OutboundAction): OutboundAction {
+    (this.state.outbound ??= {})[a.id] = a;
+    this.save();
+    return a;
+  }
+  getOutbound(id: string): OutboundAction | undefined {
+    return this.state.outbound?.[id];
+  }
+  updateOutbound(id: string, patch: Partial<OutboundAction>): OutboundAction {
+    const a = this.state.outbound?.[id];
+    if (!a) throw new Error(`No outbound action ${id}`);
+    Object.assign(a, patch);
+    this.save();
+    return a;
+  }
+  listOutbound(): OutboundAction[] {
+    return Object.values(this.state.outbound ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  recordCreatedDraft(draftId: string, jobId?: string): void {
+    (this.state.createdDrafts ??= {})[draftId] = { at: new Date().toISOString(), jobId };
+    this.save();
+  }
+  isCreatedDraft(draftId: string): boolean {
+    return Boolean(this.state.createdDrafts?.[draftId]);
   }
 
   // Schedules
