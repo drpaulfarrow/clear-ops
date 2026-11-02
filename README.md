@@ -12,6 +12,8 @@ Everything the workforce sends you reads like a colleague on WhatsApp, not like 
 
 Everything runs on the Claude Agent SDK. Conversation memory persists per phone number; jobs, approvals, schedules and standing notes persist in a JSON store on a volume.
 
+A one-page summary of what each worker does and how you use it is in [docs/WORKFORCE.md](docs/WORKFORCE.md).
+
 ## What you can say
 
 ```
@@ -35,6 +37,7 @@ connect Google   /google   /google disconnect
 show job 93137e
 /jobs   /pending   /reset   /help   /uploads
 /resume   retry 3552e7
+/spend   /spend yesterday
 YES 1f3a9c
 ```
 
@@ -186,10 +189,10 @@ See `.env.example`. The important ones:
 | `GH_TOKEN` | Fine-grained token with contents and pull requests read/write on both repos. |
 | `PRODUCT_REPO`, `SELF_REPO` | The two repositories as `owner/name`, cloned on first start. |
 | `REPO_DIR`, `SELF_REPO_DIR` | Where the clones live. |
-| `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. |
+| `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. Code defaults: chief and engineer `opus`, worker `sonnet`; `fly.toml` sets all three to `sonnet`. |
 | `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
 | `DEEP_RESEARCH_BUDGET_USD` | Spend cap per deep research job (default 20); deep research also gets 200 turns instead of 60. |
-| `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job. |
+| `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job (code default 25; `fly.toml` sets 10). |
 | `JOB_STALL_MINUTES` | A running job whose worker shows no activity for this long is stopped, its work kept and its queue moved on. Default 30. |
 | `DAILY_BUDGET_USD` | Cap on the cost of jobs finished in one Europe/London day. Default 20. Once reached, new jobs wait (one message to you per day), and `/resume` lifts it for the rest of that day; they also start when the next day begins. |
 | `JOB_MAX_RUNTIME_MINUTES` | The longest any job may run before it is stopped the same way. Default 240. |

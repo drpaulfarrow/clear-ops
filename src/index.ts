@@ -26,6 +26,8 @@ export interface AppDeps {
   google?: GoogleAuth;
   /** What Google API calls go through. Tests inject a fake. */
   googleFetch?: Fetch;
+  /** The time source for follow-up commands. Tests pin it. */
+  clock?: () => Date;
 }
 
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
@@ -59,7 +61,7 @@ export function buildApp(deps: AppDeps) {
       : undefined;
   const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor);
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google);
+  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock);
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
