@@ -357,3 +357,17 @@ test("the chief knows the ideate kind and is told never to start jobs from its i
   assert.equal(spec.name, "ideator");
   assert.ok(spec.prompt.includes("Clean room rule"));
 });
+
+test("the chief knows the cv kind, its hand-offs and that it never applies or sends", async () => {
+  await post(inbound("447700900123", "chat: what is the cv kind for"));
+  await waitFor(() => calls.some((c) => c.prompt.startsWith("chat: what is the cv kind")));
+  const chief = calls.find((c) => c.prompt.startsWith("chat: what is the cv kind"))!;
+  assert.match(chief.systemPrompt, /cv \(the CV writer/);
+  assert.match(chief.systemPrompt, /job seekers agent/);
+  assert.match(chief.systemPrompt, /start an ea job first, only when he asks/);
+  assert.match(chief.systemPrompt, /never applies, sends, posts or logs in to LinkedIn/);
+  const { workerSpec } = await import("../src/agents.js");
+  const spec = workerSpec("cv" as any);
+  assert.equal(spec.name, "cv-writer");
+  assert.ok(spec.prompt.includes("Clean room rule"));
+});

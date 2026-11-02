@@ -499,6 +499,8 @@ export class JobRunner {
       const fromService = job.kind === "design" ? undefined : this.toolsFor(job);
       const extraTools = fromService ? Object.fromEntries(Object.entries(fromService).filter(([name]) => name !== "design")) : undefined;
       const ownTools = job.kind === "design" ? perJob.mcpServers : undefined;
+      // The cv worker's own save tool, from its spec alone (toolsFor gives a cv job nothing else).
+      const cvTools = job.kind === "cv" ? perJob.mcpServers : undefined;
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
@@ -524,7 +526,7 @@ export class JobRunner {
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        mcpServers: ownTools || extraTools ? { ...extraTools, ...ownTools } : undefined,
+        mcpServers: ownTools || extraTools || cvTools ? { ...extraTools, ...ownTools, ...cvTools } : undefined,
         additionalDirectories: dirs,
         maxTurns: limits.maxTurns,
         maxBudgetUsd: limits.maxBudgetUsd,
