@@ -68,6 +68,8 @@ export class Orchestrator {
     private readonly uploads: Uploads = new Uploads(),
     /** Paul's Google Workspace connection, for the executive assistant. Absent in tests that do not need it. */
     private readonly google?: GoogleAuth,
+    /** The time source for follow-up commands. Tests pin it so they do not depend on the real date. */
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   /**
@@ -217,7 +219,7 @@ export class Orchestrator {
   }
 
   private followUps(): FollowUps {
-    return new FollowUps(this.store);
+    return new FollowUps(this.store, this.clock);
   }
 
   private followUpsText(): string {
@@ -234,7 +236,7 @@ export class Orchestrator {
   }
 
   private followUpSnooze(id: string, when?: string): string {
-    const now = new Date();
+    const now = this.clock();
     const until = (when && parseWhen(when, now, "snooze")) || (when ? undefined : parseWhen("2d", now, "snooze"));
     if (!until) return `I could not read "${when}" as a time. Try 2d, 1w, tomorrow, monday, next week or 3 Nov.`;
     if (until <= now) return "That time has already passed.";
