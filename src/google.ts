@@ -7,12 +7,13 @@ import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } f
  *
  * OAuth for his own user account (no service account, no domain-wide delegation). The refresh token
  * is encrypted at rest under DATA_DIR/secrets, owner-only. Every API call goes through GoogleApi,
- * which only reaches the endpoints in ALLOWED_ENDPOINTS: there is no route to sending mail, sending
- * a draft, deleting, archiving or relabelling mail, inviting anyone or answering an invitation,
- * whatever a prompt or an email says.
+ * which only reaches the endpoints in ALLOWED_ENDPOINTS: there is no route to deleting, archiving or
+ * relabelling mail or answering an invitation, whatever a prompt or an email says. Sending a draft or
+ * message and creating an event with attendees are reachable only through GoogleApi.approved with a
+ * single-use grant that the approval gate (src/outbound.ts) mints after Paul approves that exact item in chat.
  */
 
-/** The narrowest scopes for read plus drafts plus holds. gmail.compose could send, so GoogleApi forbids it. */
+/** The narrowest scopes for read plus drafts plus holds. gmail.compose (drafts.send, messages.send) and calendar.events (events.insert) also cover the approved send and invite, so no extra scope or reconnect is needed. */
 export const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.compose",
@@ -290,6 +291,38 @@ export const ALLOWED_ENDPOINTS: ReadonlyArray<{ api: Api; method: Method; path: 
 /** Path segments that mean sending, deleting, relabelling or moving, refused even if a pattern above matched. */
 const FORBIDDEN_SEGMENT = /(^|\/)(send|trash|untrash|delete|batchDelete|modify|batchModify|import|insert|quickAdd|move|watch|stop|settings|acl|instances)(\/|$)/i;
 
+/* ---------- Approved outbound: sending mail and inviting people, only with a grant ---------- */
+
+/**
+ * The only three things that notify other people. Not in ALLOWED_ENDPOINTS, so GoogleApi.request refuses
+ * them for every caller. GoogleApi.approved reaches them, and only with a grant minted by the approval
+ * gate (src/outbound.ts) for one pending action Paul approved in chat, bound to the exact request.
+ */
+export const APPROVED_ENDPOINTS: ReadonlyArray<{ api: Api; method: Method; path: RegExp; what: string }> = [
+  { api: "gmail", method: "POST", path: /^drafts\/send$/, what: "send an existing draft" },
+  { api: "gmail", method: "POST", path: /^messages\/send$/, what: "send a new message" },
+  { api: "calendar", method: "POST", path: /^calendars\/primary\/events$/, what: "create an event with attendees" },
+];
+const INVITE_KEYS = new Set(["summary", "description", "location", "start", "end", "attendees"]);
+
+/** Stable digest of one request, so a grant covers exactly that request and nothing else. */
+export function requestDigest(api: Api, method: Method, p: string, opts: RequestOptions = {}): string {
+  const canon = (v: unknown): unknown => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v as object).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, canon(x)])) : v);
+  return createHash("sha256").update(JSON.stringify(canon({ api, method, p, query: opts.query ?? {}, body: opts.body ?? null }))).digest("hex");
+}
+
+/** Permission to make one specific request, once. Only the approval gate mints these. */
+export interface SendGrant {
+  readonly actionId: string;
+  readonly digest: string;
+}
+const liveGrants = new WeakSet<SendGrant>();
+export function mintSendGrant(actionId: string, digest: string): SendGrant {
+  const g = Object.freeze({ actionId, digest });
+  liveGrants.add(g);
+  return g;
+}
+
 /** The private property that marks an event as a hold the workforce placed. */
 export const HOLD_MARKER = "clearOpsHold";
 export const HOLD_PREFIX = "Hold: ";
@@ -349,6 +382,26 @@ export class GoogleApi {
     return this.send<T>(api, method, p, opts);
   }
 
+  /**
+   * Make one approved outbound request: send a draft or message, or create an event with attendees.
+   * Needs a live, unused grant whose digest matches this exact request; the grant is spent before the call.
+   */
+  async approved<T = any>(grant: SendGrant, api: Api, method: Method, p: string, opts: RequestOptions = {}): Promise<T> {
+    if (!liveGrants.has(grant)) throw new GoogleError("Refused: no valid approval grant.");
+    liveGrants.delete(grant);
+    if (grant.digest !== requestDigest(api, method, p, opts)) throw new GoogleError("Refused: the request does not match what Paul approved.");
+    if (!APPROVED_ENDPOINTS.some((e) => e.api === api && e.method === method && e.path.test(p))) throw new GoogleError(`Refused: ${method} ${api}/${p} is not an approvable operation.`);
+    if (api === "calendar") {
+      const body = (opts.body ?? {}) as Record<string, any>;
+      if (opts.query?.sendUpdates !== "all") throw new GoogleError("Refused: an invitation must use sendUpdates=all.");
+      for (const k of ["conferenceDataVersion", "supportsAttachments"]) if (k in (opts.query ?? {})) throw new GoogleError(`Refused: ${k} is not allowed.`);
+      for (const k of Object.keys(body)) if (!INVITE_KEYS.has(k)) throw new GoogleError(`Refused: an invitation cannot set "${k}".`);
+      if (!Array.isArray(body.attendees) || !body.attendees.length) throw new GoogleError("Refused: an invitation needs attendees (use a hold for time with nobody invited).");
+      if (String(body.summary ?? "").startsWith(HOLD_PREFIX)) throw new GoogleError("Refused: an invitation cannot be titled as a hold.");
+    }
+    return this.send<T>(api, method, p, opts);
+  }
+
   private async send<T>(api: Api, method: Method, p: string, opts: RequestOptions = {}): Promise<T> {
     const url = new URL(API_BASE[api] + p);
     for (const [k, v] of Object.entries(opts.query ?? {})) if (v !== undefined) url.searchParams.set(k, String(v));
@@ -383,6 +436,7 @@ export function setupSteps(redirectUri: string): string {
 4. Data access, Add or remove scopes. Add: gmail.readonly, gmail.compose, calendar.readonly, calendar.events. Update, Save.
 5. Clients, Create client. Type: Web application. Name "clear-ops". Authorised redirect URIs, Add URI: ${redirectUri}  Create, then copy the Client ID and Client secret.
 6. In GitHub, drpaulfarrow/clear-ops, Settings, Secrets and variables, Actions, New repository secret, one each: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_ACCOUNT (your Workspace email, so no other account can connect) and GOOGLE_TOKEN_KEY (any long random string, it encrypts the stored token). (Your booking link for scheduling drafts can be set later in chat with /booking.) Then Actions, ci, Run workflow, so the service picks them up.
+(No extra step is needed for sending mail or inviting people: it uses the same Gmail and Calendar permissions, and only ever acts after you approve each item in chat.)
 7. Tell me "connect Google". I send a link; open it, choose your account and Allow. That is all.
 Only if Google says the app is blocked: admin.google.com, Security, Access and data control, API controls, Manage third-party app access, find "Clear Ops EA" and set it to Trusted.
 To disconnect at any time say "disconnect Google" (or /google disconnect); you can also remove it at myaccount.google.com, Security, Third-party connections.`;

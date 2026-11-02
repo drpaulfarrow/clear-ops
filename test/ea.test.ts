@@ -508,11 +508,14 @@ test("an ea job gets the google tools with its permits; other kinds get neither"
   const toolsFor = (job: any) => (job.kind === "ea" ? { google: eaServer(new EaTools(api, { permits: job.permits ?? [], brief: job.brief })) } : undefined);
   const jobs = new JobRunner(store, new ConsoleMessenger(), runner as any, toolsFor);
   const a = jobs.start("ea", "triage", "tg:1", "product", "tg:1");
-  const b = jobs.start("ea", "draft a reply to Sam", "tg:1", "product", "tg:1", { permits: ["drafts", "drafts", "send" as any] });
+  const b = jobs.start("ea", "draft a reply to Sam", "tg:1", "product", "tg:1", { permits: ["drafts", "drafts", "delete" as any] });
   const c = jobs.start("research", "x", "tg:1", "product", "tg:1", { permits: ["holds"] });
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(store.getJob(a.id)!.permits, undefined);
-  assert.deepEqual(store.getJob(b.id)!.permits, ["drafts"], "only drafts and holds exist; duplicates dropped");
+  assert.deepEqual(store.getJob(b.id)!.permits, ["drafts"], "unknown permits and duplicates are dropped");
+  // "send" is a real permit now (prepare a send or invite for Paul's approval); the chief grants it from Paul's chat only.
+  const d = jobs.start("ea", "send Sam the intro", "tg:1", "product", "tg:1", { permits: ["send", "drafts"] });
+  assert.deepEqual(store.getJob(d.id)!.permits, ["send", "drafts"]);
   assert.equal(store.getJob(c.id)!.permits, undefined, "only the ea kind has permits");
   const [ra, rb, rc] = seen;
   assert.match(ra.prompt, /may change: nothing \(read only\)/);
@@ -550,7 +553,7 @@ test("the consent callback connects, schedules the briefs once and tells Paul; a
       const state = stateOf(auth.consentUrl("tg:99887766", "tg:99887766"));
       const res = await fetch(`${base}/google/callback?state=${encodeURIComponent(state)}&code=the-code`);
       assert.equal(res.status, 200);
-      assert.match(await res.text(), /never send email/);
+      assert.match(await res.text(), /only after you approve that exact item in chat/);
     }
     const ea = scheduler.list().filter((s) => s.kind === "ea");
     assert.deepEqual(ea.map((s) => s.cron).sort(), ["0 18 * * 1-5", "30 7 * * 1-5"]);

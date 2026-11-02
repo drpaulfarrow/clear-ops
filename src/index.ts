@@ -17,6 +17,7 @@ import { repoRegistry } from "./repos.js";
 import { REPO_SERVER, repoServer } from "./repo-tools.js";
 import type { AgentRunner } from "./agents.js";
 import { GoogleApi, GoogleAuth, GoogleError, type Fetch } from "./google.js";
+import { OutboundGate } from "./outbound.js";
 import { EA_SERVER, EaTools, eaServer, ensureEaSchedules, upgradeEaSchedules } from "./ea.js";
 import cron from "node-cron";
 import { nudgeStale } from "./followups.js";
@@ -60,13 +61,15 @@ export function buildApp(deps: AppDeps) {
       return undefined;
     }
   };
+  // The approval gate for sending mail and inviting people: shared by the ea's prepare tools and the chat approval.
+  const outbound = new OutboundGate(deps.store, googleApi, deps.messenger);
   // Repositories the workforce created in earlier runs are managed again from the first request.
   repoRegistry.load(deps.store);
   const toolsFor = (job: { id: string; kind: string; brief: string; replyTo?: string; permits?: JobPermit[] }): Record<string, McpServerConfig> | undefined =>
     job.kind === "ea"
       ? {
           [EA_SERVER]: eaServer(
-            new EaTools(googleApi, { permits: (job.permits ?? []).filter((p): p is EaPermit => p === "drafts" || p === "holds"), brief: job.brief, store: deps.store, bookingLink: bookingLink(deps.store), account: account(), jobId: job.id, replyTo: job.replyTo }),
+            new EaTools(googleApi, { permits: (job.permits ?? []).filter((p): p is EaPermit => p === "drafts" || p === "holds" || p === "send"), brief: job.brief, store: deps.store, bookingLink: bookingLink(deps.store), account: account(), jobId: job.id, replyTo: job.replyTo, outbound }),
           ),
         }
       : // Only an engineer job the chief gave the create_repo permit (Paul asked in chat) gets the tool.
@@ -75,7 +78,7 @@ export function buildApp(deps: AppDeps) {
         : undefined;
   const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor);
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()));
+  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound);
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
@@ -135,12 +138,12 @@ export function buildApp(deps: AppDeps) {
     }
     try {
       const r = await google.completeConsent(state, code);
-      res.type("html").send(page("Connected", "Your assistant can now read your mail and calendars, write drafts and place holds. It can never send email or invite anyone. You can close this tab."));
+      res.type("html").send(page("Connected", "Your assistant can now read your mail and calendars, write drafts and place holds. It can send an email or invite people only after you approve that exact item in chat. You can close this tab."));
       deps.store.setSetting("eaReplyTo", r.replyTo);
       const made = ensureEaSchedules(scheduler, r.requestedBy, r.replyTo);
       const lines = made.map((m) => `${m.name} ${m.cron} (${m.id}${m.created ? "" : ", already set"})`).join("; ");
       await deps.messenger
-        .send(r.replyTo, `Google connected as ${r.account}: drafts plus holds, never send. Weekday briefs scheduled: ${lines}. Tell me to move or cancel either.`)
+        .send(r.replyTo, `Google connected as ${r.account}: drafts plus holds; it sends mail or invites people only when you approve each one in chat. Weekday briefs scheduled: ${lines}. Tell me to move or cancel either.`)
         .catch(() => undefined);
     } catch (err) {
       const msg = err instanceof GoogleError ? err.message : "Something went wrong talking to Google. Ask for a new link in chat.";
