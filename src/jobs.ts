@@ -108,6 +108,8 @@ export class JobRunner {
   private readonly waitForDeploy: DeployWait;
   /** Batches failure messages so an outage that fails many jobs sends Paul one message, not a flood. */
   readonly failures: FailureNotifier;
+  /** Told when a job finishes with a saved output (the outputs repository copy). Fire and forget: it can never fail or delay a job. */
+  private readonly onOutput?: (job: Job) => void;
 
   constructor(
     private readonly store: Store,
@@ -115,9 +117,10 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions } = {},
+    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions } = {},
   ) {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
+    this.onOutput = opts.onOutput;
     const l = opts.liveness ?? {};
     this.stallMs = l.stallMs ?? config.jobStallMinutes * MINUTE;
     this.maxRuntimeMs = l.maxRuntimeMs ?? config.jobMaxRuntimeMinutes * MINUTE;
@@ -553,6 +556,12 @@ export class JobRunner {
         outputPath,
         costUsd: result.costUsd,
       });
+      try {
+        const done = this.store.getJob(id);
+        if (done) this.onOutput?.(done);
+      } catch (err) {
+        console.warn(`outputs copy not started for job ${id}: ${err instanceof Error ? err.message : err}`);
+      }
       // An engineer's pull request is reviewed by the maintainer without anyone asking. The
       // maintainer is not an engineering kind, so it runs at once and never waits for the lock.
       let chained = "";

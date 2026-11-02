@@ -212,6 +212,7 @@ See `.env.example`. The important ones:
 | `GH_TOKEN` | GitHub token. The fallback when the App is not configured, and the only way to create repositories (a GitHub App cannot create repositories on a personal account). Fine-grained: contents, pull requests and workflows read/write on every managed repository. To let the workforce create repositories it must be a classic token with the `repo` and `workflow` scopes (fine-grained tokens cannot create repositories under a personal account). |
 | `PRODUCT_REPO`, `SELF_REPO` | The product and this workforce as `owner/name`, cloned on first start. |
 | `MANAGED_REPOS` | More managed repositories: comma-separated `alias=owner/name` (optionally `\|another name`). Default `site=drpaulfarrow/drpaulfarrowcom\|drpaulfarrow.com`. Cloned on first start into `REPOS_DIR/<alias>`. |
+| `OUTPUTS_REPO` | The private repository every finished job's output is copied to as Markdown (`outputs/<date>-<id>-<title>.md` plus an index README). Default `drpaulfarrow/clear-outputs`. Nothing is pushed unless GitHub reports it private; the GitHub token needs Contents read and write on it. |
 | `REPOS_DIR`, `REPO_OWNER` | Where those clones live (default `DATA_DIR/repos`) and the account new repositories are created under (default `drpaulfarrow`). |
 | `REPO_DIR`, `SELF_REPO_DIR` | Where the clones live. |
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. Code defaults: chief and engineer `opus`, worker `sonnet`; `fly.toml` sets all three to `sonnet`. |

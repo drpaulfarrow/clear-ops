@@ -51,6 +51,8 @@ export const config = {
     token: process.env.DISCORD_BOT_TOKEN ?? "",
   },
   /** GitHub "owner/name" slugs. Cloned automatically on first start when GH_TOKEN is set. */
+  /** The private repository every finished job's output is copied to (src/publish-outputs.ts). */
+  outputsRepo: process.env.OUTPUTS_REPO || "drpaulfarrow/clear-outputs",
   repos: {
     product: process.env.PRODUCT_REPO || undefined,
     self: process.env.SELF_REPO || "drpaulfarrow/clear-ops",
