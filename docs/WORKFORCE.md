@@ -18,7 +18,9 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 ## Rules of the road
 
 - Jobs only start when you ask for them. Suggestions from reviews, research or the strategist come back as options for you to choose.
-- One engineering job per repository at a time; others queue. `/jobs` shows the queue.
+- One engineering job per repository at a time; others queue, per repository. `/jobs` shows the queue.
+- Say which repository a job is about: the product (the default), `self` (the workforce) or `site` (drpaulfarrow.com, your personal site). Every worker can read all of them.
+- Ask for a new repository in chat ("create a repo called X", add "public" if you want it public). It is created under drpaulfarrow, private by default, with a README, and can be worked on straight away. Workers never delete repositories or change their settings, and never create one unless you asked.
 - Anything outside the engineer's normal remit waits for `YES <id>`. Deploys of the product happen through GitHub Actions, not from the workforce.
 - Daily spend is capped (`DAILY_BUDGET_USD`, default 20); `/spend` shows today's, `/resume` lifts a cap or a credit hold.
 
@@ -28,4 +30,4 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 ## Things only you do
 
-Add the secrets in GitHub (Settings > Secrets and variables > Actions), connect Google once with the link the chief sends, add your chat ids to the allowlist secrets, and top up Anthropic credit if a job reports it ran out. Setup is in the [README](../README.md).
+Add the secrets in GitHub (Settings > Secrets and variables > Actions), connect Google once with the link the chief sends, add your chat ids to the allowlist secrets, and top up Anthropic credit if a job reports it ran out. Creating repositories needs a classic GitHub token (`repo` and `workflow` scopes) as the `GH_TOKEN` secret; a fine-grained token cannot create repositories under a personal account, and it only reaches repositories you added under Repository access. If a job says it could not create or clone a repository, it tells you exactly which of these to change. Setup is in the [README](../README.md).
