@@ -454,3 +454,37 @@ test("repository creation: a per-job permit only an engineer can hold, creation 
   }
   assert.doesNotMatch(src("repos.ts"), /method: "(DELETE|PATCH|PUT)"/, "creation is a POST and nothing else");
 });
+
+test("the cv worker is read-only apart from one confined save tool, never sends or starts jobs, and protects personal data", async () => {
+  const { workerSpec, JOB_KINDS, PR_KINDS } = await import("../src/agents.js");
+  const { lockKey } = await import("../src/jobs.js");
+  const { checkCvName, saveCvFile, cvDir } = await import("../src/cv.js");
+  assert.ok(JOB_KINDS.includes("cv" as any), "cv is a job kind");
+  for (const target of ["product", "self"] as const) {
+    const s = workerSpec("cv" as any, target);
+    assert.deepEqual(s.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__cv__save_cv_file"], "cv gets read-only tools plus its own save tool");
+    assert.deepEqual(s.tools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops__|mcp__google__|mcp__repos__|mcp__design__)/.test(t)), "cv gets no Edit, Write, Bash, mail or chief tools");
+    assert.ok(s.prompt.includes("Clean room rule"), "cv carries the clean-room rule");
+    assert.ok(s.prompt.includes("Messaging rule from Paul"), "cv carries the messaging rule");
+    assert.match(s.prompt, /Your message to Paul is three or four plain sentences/);
+    assert.match(s.prompt, /Never invent or inflate/);
+    assert.match(s.prompt, /never log in to, scrape or automate LinkedIn/i);
+    assert.match(s.prompt, /never start, schedule or request engineer, design, analyse or create_agent jobs/i);
+    assert.match(s.prompt, /never copy them or the CV files into a repository/);
+    assert.ok(s.prompt.includes("Files the founder sends in chat"), "cv carries the uploads rule");
+    assert.ok(!s.prompt.includes("This task is on the workforce itself"));
+    assert.ok(s.disallowedTools?.some((t) => t.includes("secrets")), "cv cannot read stored secrets");
+    assert.ok(s.disallowedTools?.includes("WebFetch(domain:linkedin.com)"), "cv cannot fetch LinkedIn");
+  }
+  assert.ok(!PR_KINDS.includes("cv" as any), "cv opens no pull requests");
+  assert.equal(lockKey({ kind: "cv", target: "product" } as any), undefined, "cv never holds the engineering lock");
+  // The save tool: plain Markdown or text names only, inside the private folder, which is not in any checkout.
+  for (const bad of ["../x.md", "a/b.md", "cv.sh", "cv.docx", ".env", "x"]) assert.throws(() => checkCvName(bad), bad);
+  assert.equal(checkCvName("cv-advisory-2026-11.md"), "cv-advisory-2026-11.md");
+  const p = saveCvFile("facts.md", "# Facts");
+  assert.ok(p.startsWith(cvDir()), "saved inside the CV folder");
+  assert.equal(fs.statSync(p).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(cvDir()).mode & 0o777, 0o700);
+  assert.throws(() => saveCvFile("big.md", "x".repeat(200_001)));
+});
