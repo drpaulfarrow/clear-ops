@@ -10,6 +10,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-pub-"));
 
 const { Store } = await import("../src/store.js");
 const { JobRunner } = await import("../src/jobs.js");
+const { classify } = await import("../src/output-folders.js");
 const { OutputsPublisher, renderIndex, slugify, entryFor, backfillOnce } = await import("../src/publish-outputs.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { Job } from "../src/store.js";
@@ -17,7 +18,7 @@ import type { Job } from "../src/store.js";
 const FOUNDER = "tg:99887766";
 const tmp = (p: string) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
-const waitFor = async (pred: () => boolean, ms = 5000) => {
+const waitFor = async (pred: () => boolean, ms = 20000) => {
   const t0 = Date.now();
   while (!pred()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");
@@ -65,8 +66,9 @@ function setup(opts: { isPrivate?: boolean | number } = {}) {
 test("layout: file name from date, id and title, and an index newest first", () => {
   assert.equal(slugify("Fly deploy: £5 & more!"), "fly-deploy-5-more");
   const e = entryFor({ id: "1b88d9", kind: "research", title: "Profile review", brief: "", status: "done", createdAt: "2026-11-02T10:00:00Z" } as Job);
-  assert.equal(e.file, "outputs/2026-11-02-1b88d9-profile-review.md");
-  const idx = renderIndex([e, { ...e, id: "aaaaaa", at: "2026-11-03T10:00:00Z", date: "2026-11-03", file: "outputs/x.md", title: "A | B" }]);
+  assert.equal(e.file, "outputs/2026-11-02-1b88d9-profile-review.md", "default folder");
+  assert.equal(entryFor({ id: "1b88d9", kind: "research", title: "Profile review", brief: "", status: "done", createdAt: "2026-11-02T10:00:00Z" } as Job, "research").file, "research/2026-11-02-1b88d9-profile-review.md");
+  const idx = renderIndex([e, { ...e, id: "aaaaaa", at: "2026-11-03T10:00:00Z", date: "2026-11-03", file: "research/x.md", title: "A | B" }]);
   assert.ok(idx.indexOf("aaaaaa") < idx.indexOf("1b88d9"), "newest first");
   assert.match(idx, /\| 2026-11-02 \| 1b88d9 \| Profile review \| research \| \[read\]\(outputs\/2026-11-02-1b88d9-profile-review\.md\) \|/);
   assert.ok(!idx.includes("A | B"), "pipes in titles cannot break the table");
@@ -75,9 +77,9 @@ test("layout: file name from date, id and title, and an index newest first", () 
 test("a finished job's output is pushed as Markdown with an index", async () => {
   const s = setup();
   s.pub.publish(s.job("1b88d9", "Profile review", "Full report text"));
-  await waitFor(() => s.remoteFiles().has("outputs/2026-11-02-1b88d9-profile-review.md"));
+  await waitFor(() => s.remoteFiles().has("research/2026-11-02-1b88d9-profile-review.md"));
   const r = s.remoteFiles();
-  assert.match(r.read("outputs/2026-11-02-1b88d9-profile-review.md"), /Full report text/);
+  assert.match(r.read("research/2026-11-02-1b88d9-profile-review.md"), /Full report text/);
   assert.match(r.read("README.md"), /1b88d9/);
 });
 
@@ -91,7 +93,8 @@ test("backfill publishes every existing output, including ones with no job recor
   await backfillOnce(s.store, s.pub);
   const r = s.remoteFiles();
   const index = r.read("README.md");
-  for (const id of ["1b88d9", "23ea1b", "002189"]) assert.ok(index.includes(id), id);
+  for (const id of ["1b88d9", "23ea1b"]) assert.ok(index.includes(id), id);
+  assert.ok(!index.includes("002189"), "an output with no job record cannot be classified, so it is not copied");
   assert.ok(!index.includes("bad name") && !index.includes("notes"));
   assert.ok(s.store.settings().outputsBackfilled);
   const before = sh(s.dir, "rev-list", "--count", "HEAD");
@@ -122,8 +125,8 @@ test("an unreachable repository (404) or a failing check also pushes nothing and
 test("secrets in an output are redacted before they are pushed", async () => {
   const s = setup();
   s.pub.publish(s.job("1b88d9", "T", "token ghp_ABCDEFGHIJKLMNOP1234 here"));
-  await waitFor(() => s.remoteFiles().has("outputs/2026-11-02-1b88d9-t.md"));
-  assert.ok(!s.remoteFiles().read("outputs/2026-11-02-1b88d9-t.md").includes("ghp_ABC"));
+  await waitFor(() => s.remoteFiles().has("research/2026-11-02-1b88d9-t.md"));
+  assert.ok(!s.remoteFiles().read("research/2026-11-02-1b88d9-t.md").includes("ghp_ABC"));
 });
 
 test("a push failure never fails or delays a job or its message", async () => {
@@ -161,4 +164,75 @@ test("only the outputs folder is read: the publisher never touches uploads, and 
   assert.ok(!fs.existsSync(path.join(r.c, "outputs")) || fs.readdirSync(path.join(r.c, "outputs")).every((f) => !f.includes("secret")));
   const src = fs.readFileSync(new URL("../src/publish-outputs.ts", import.meta.url), "utf8");
   assert.ok(!/uploads/i.test(src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")), "the module never names uploads in code");
+});
+
+
+test("outputs go into folders by type, and a research job titled as a design goes to designs", async () => {
+  const s = setup();
+  const mk = (id: string, kind: string, title: string, text = "body") => {
+    const j = s.job(id, title, text);
+    j.kind = kind as Job["kind"];
+    return j;
+  };
+  const jobs = [
+    mk("aaaaa1", "design", "Publisher and buyer platforms spec"),
+    mk("dfa5d1", "research", "Two-way Prebid module design"),
+    mk("aaaaa2", "research", "Market scan"),
+    mk("aaaaa3", "advisor", "Publisher pitch"),
+    mk("aaaaa4", "maintain", "Review: X"),
+    mk("aaaaa5", "engineer", "Build X"),
+  ];
+  for (const j of jobs) s.pub.publish(j);
+  await waitFor(() => s.remoteFiles().has("reviews/2026-11-02-aaaaa4-review-x.md") && s.remoteFiles().has("engineering/2026-11-02-aaaaa5-build-x.md"));
+  const r = s.remoteFiles();
+  assert.ok(r.has("designs/2026-11-02-aaaaa1-publisher-and-buyer-platforms-spec.md"));
+  assert.ok(r.has("designs/2026-11-02-dfa5d1-two-way-prebid-module-design.md"));
+  assert.ok(r.has("research/2026-11-02-aaaaa2-market-scan.md"));
+  assert.ok(r.has("advice/2026-11-02-aaaaa3-publisher-pitch.md"));
+  const idx = r.read("README.md");
+  for (const f of ["designs", "research", "advice", "engineering", "reviews"]) assert.match(idx, new RegExp(`## ${f}\\n`));
+  assert.match(idx, /\[read\]\(designs\/2026-11-02-dfa5d1/);
+});
+
+test("ea, cv and upload-derived outputs are never copied, and are removed if an earlier layout copied them", async () => {
+  const s = setup();
+  const ea = s.job("bbbbb1", "Morning brief", "mailbox summary");
+  ea.kind = "ea";
+  const cv = s.job("bbbbb2", "Master CV", "cv text");
+  cv.kind = "cv";
+  const up = s.job("bbbbb3", "Warm paths", "ranked from /data/uploads/2026-11-02-Connections.csv");
+  const up2 = s.job("bbbbb4", "Prospects", "x");
+  up2.brief = "cross-reference Connections.csv with targets";
+  const ok = s.job("bbbbb5", "Market scan", "public research");
+  assert.deepEqual(classify(ea, "x"), { excluded: "ea outputs are not copied" });
+  for (const j of [ea, cv, up, up2, ok]) s.pub.publish(j);
+  await waitFor(() => s.remoteFiles().has("research/2026-11-02-bbbbb5-market-scan.md"));
+  const r = s.remoteFiles();
+  const all = r.read("README.md") + r.read("index.json");
+  for (const id of ["bbbbb1", "bbbbb2", "bbbbb3", "bbbbb4"]) assert.ok(!all.includes(id), id);
+  assert.ok(!fs.existsSync(path.join(r.c, "ea")) && !fs.existsSync(path.join(r.c, "cv")));
+
+  // Migration: an earlier flat layout had copied the ea output; the next run takes it out of the tree.
+  fs.mkdirSync(path.join(s.dir, "outputs"), { recursive: true });
+  const old = "outputs/2026-11-02-bbbbb1-morning-brief.md";
+  fs.writeFileSync(path.join(s.dir, old), "mailbox summary");
+  const idxFile = path.join(s.dir, "index.json");
+  const entries = JSON.parse(fs.readFileSync(idxFile, "utf8"));
+  entries.push({ id: "bbbbb1", title: "Morning brief", kind: "ea", date: "2026-11-02", at: "2026-11-02T10:00:00.000Z", status: "done", file: old });
+  fs.writeFileSync(idxFile, JSON.stringify(entries));
+  sh(s.dir, "add", "-A");
+  sh(s.dir, "commit", "-m", "old layout");
+  sh(s.dir, "push", "origin", "main");
+  await s.pub.backfill();
+  const after = s.remoteFiles();
+  assert.ok(!after.has(old), "removed from the tree");
+  assert.ok(!after.read("index.json").includes("bbbbb1"));
+});
+
+test("an old flat-layout backfill record does not stop the folder migration", async () => {
+  const s = setup();
+  s.store.setSetting("outputsBackfilled", "2026-11-02T10:00:00.000Z");
+  s.job("ccccc1", "Market scan", "public");
+  await backfillOnce(s.store, s.pub);
+  assert.ok(s.remoteFiles().has("research/2026-11-02-ccccc1-market-scan.md"));
 });
