@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { config } from "./config.js";
 import { githubAuth } from "./github-auth.js";
 import { londonYmd } from "./london.js";
+import { classify, FOLDER_ORDER } from "./output-folders.js";
 import { redact } from "./repos.js";
 import type { Job, Store } from "./store.js";
 import { jobTitle } from "./titles.js";
@@ -28,7 +29,7 @@ export interface IndexEntry {
   /** ISO time used for ordering, newest first. */
   at: string;
   status: string;
-  /** Path inside the repository, outputs/<date>-<id>-<title>.md. */
+  /** Path inside the repository, <folder>/<date>-<id>-<title>.md. */
   file: string;
 }
 
@@ -39,29 +40,34 @@ export function slugify(title: string): string {
   return title.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50).replace(/-+$/, "") || "output";
 }
 
-export function entryFor(job: Pick<Job, "id" | "title" | "brief" | "kind" | "status" | "createdAt" | "finishedAt">): IndexEntry {
+export function entryFor(job: Pick<Job, "id" | "title" | "brief" | "kind" | "status" | "createdAt" | "finishedAt">, folder = "outputs"): IndexEntry {
   const at = job.finishedAt ?? job.createdAt;
   const date = londonYmd(new Date(at));
   const title = jobTitle(job);
-  return { id: job.id, title, kind: job.kind, date, at, status: job.status, file: `outputs/${date}-${job.id}-${slugify(title)}.md` };
+  return { id: job.id, title, kind: job.kind, date, at, status: job.status, file: `${folder}/${date}-${job.id}-${slugify(title)}.md` };
 }
 
 const cell = (s: string) => s.replace(/\|/g, "/").replace(/[\r\n]+/g, " ");
 
-/** The index README: id, title, kind, date and a link, newest first. */
+/** The index README: one table per folder, newest first, each row with a link. */
 export function renderIndex(entries: IndexEntry[]): string {
   const sorted = [...entries].sort((a, b) => b.at.localeCompare(a.at) || a.id.localeCompare(b.id));
-  const rows = sorted.map((e) => `| ${e.date} | ${e.id} | ${cell(e.title)} | ${e.kind} | [read](${e.file}) |`);
-  return [
+  const folderOf = (e: IndexEntry) => e.file.split("/")[0];
+  const folders = [...new Set(sorted.map(folderOf))].sort((a, b) => (FOLDER_ORDER.indexOf(a) + 1 || 99) - (FOLDER_ORDER.indexOf(b) + 1 || 99) || a.localeCompare(b));
+  const out = [
     "# clear-outputs",
     "",
-    "Saved job outputs from the Clear Exchange workforce, newest first. Private: outputs can contain personal data. This repository is written by the workforce service; do not edit it by hand.",
+    "Saved job outputs from the Clear Exchange workforce, in folders by type, newest first in each. Private: outputs can contain personal data, so assistant (ea) and CV outputs and anything derived from a file Paul uploaded are never copied here. This repository is written by the workforce service; do not edit it by hand.",
     "",
-    "| Date | Id | Title | Kind | Output |",
-    "| --- | --- | --- | --- | --- |",
-    ...rows,
+    "Folders: " + folders.map((f) => `[${f}](#${f}) (${sorted.filter((e) => folderOf(e) === f).length})`).join(", "),
     "",
-  ].join("\n");
+  ];
+  for (const f of folders) {
+    out.push(`## ${f}`, "", "| Date | Id | Title | Kind | Output |", "| --- | --- | --- | --- | --- |");
+    for (const e of sorted.filter((x) => folderOf(x) === f)) out.push(`| ${e.date} | ${e.id} | ${cell(e.title)} | ${e.kind} | [read](${e.file}) |`);
+    out.push("");
+  }
+  return out.join("\n");
 }
 
 export type Fetch = typeof fetch;
@@ -94,6 +100,8 @@ export class OutputsPublisher {
   private chain: Promise<unknown> = Promise.resolve();
   private privateUntil = 0;
   private told = "";
+  /** Ids held back as personal this run, for the log and tests. */
+  readonly excluded = new Set<string>();
   readonly slug: string;
   readonly dir: string;
   private readonly branch: string;
@@ -141,9 +149,9 @@ export class OutputsPublisher {
         jobs.push(known);
         continue;
       }
-      // An output whose job record is gone: dated by the file itself.
+      // An output whose job record is gone cannot be classified, so it is never copied.
       const t = fs.statSync(path.join(dir, f)).mtime.toISOString();
-      jobs.push({ id, kind: "research", title: `Output ${id}`, brief: "", requestedBy: "", status: "done", createdAt: t, finishedAt: t } as Job);
+      jobs.push({ id, kind: "unknown", title: `Output ${id}`, brief: "", requestedBy: "", status: "done", createdAt: t, finishedAt: t } as unknown as Job);
     }
     return this.enqueue(jobs).then((n) => n);
   }
@@ -205,23 +213,36 @@ export class OutputsPublisher {
       // first run
     }
     let written = 0;
+    let removed = 0;
     for (const job of jobs) {
       if (!ID.test(job.id)) continue;
       const text = this.store.readOutput(job.id);
       if (text === undefined) continue;
-      const entry = entryFor(job);
+      const verdict = classify(job, text);
+      if ("excluded" in verdict) {
+        // Never copied; and if an earlier version of this service already copied it, take it out of the tree.
+        const old = entries.find((e) => e.id === job.id);
+        if (old) {
+          fs.rmSync(path.join(this.dir, old.file), { force: true });
+          entries = entries.filter((e) => e.id !== job.id);
+          removed++;
+        }
+        this.excluded.add(job.id);
+        continue;
+      }
+      const entry = entryFor(job, verdict.folder);
       const old = entries.find((e) => e.id === entry.id);
       if (old && old.file !== entry.file) fs.rmSync(path.join(this.dir, old.file), { force: true });
-      fs.mkdirSync(path.join(this.dir, "outputs"), { recursive: true });
+      fs.mkdirSync(path.join(this.dir, verdict.folder), { recursive: true });
       const body = `# ${entry.title}\n\n_${entry.kind} job ${entry.id}, ${entry.date}, ${entry.status}_\n\n---\n\n${redact(text)}\n`;
       fs.writeFileSync(path.join(this.dir, entry.file), body);
       entries = [...entries.filter((e) => e.id !== entry.id), entry];
       written++;
     }
-    if (!written) return 0;
+    if (!written && !removed) return 0;
     fs.writeFileSync(indexFile, JSON.stringify(entries, null, 2) + "\n");
     fs.writeFileSync(path.join(this.dir, "README.md"), renderIndex(entries));
-    await git(this.dir, ["add", "README.md", INDEX_JSON, "outputs"]);
+    await git(this.dir, ["add", "-A", "."]);
     const status = (await git(this.dir, ["status", "--porcelain"])).trim();
     if (!status) return 0;
     const label = jobs.length === 1 ? `output of job ${jobs[0].id}` : `${written} job outputs`;
@@ -236,9 +257,12 @@ export class OutputsPublisher {
   }
 }
 
-/** The backfill runs once: this setting records that it has. */
+/** The backfill runs once per layout: this setting records which one has run. */
+export const LAYOUT = "folders-v1";
+
+/** Runs once per layout: copies every output into its folder and takes out what must not be there. */
 export async function backfillOnce(store: Store, publisher: OutputsPublisher): Promise<void> {
-  if (store.settings().outputsBackfilled) return;
+  if (store.settings().outputsBackfilled === LAYOUT) return;
   const n = await publisher.backfill();
-  if (n > 0) store.setSetting("outputsBackfilled", new Date().toISOString());
+  if (n > 0) store.setSetting("outputsBackfilled", LAYOUT);
 }
