@@ -135,6 +135,7 @@ export class JobRunner {
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
     if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds" || p === "send") : extra.permits;
+    else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
     else if (kind === "engineer") extra.permits = extra.permits?.includes("create_repo") ? ["create_repo"] : undefined;
     else delete extra.permits;
     if (!extra.permits) delete extra.permits;
@@ -515,13 +516,14 @@ export class JobRunner {
         job.kind === "ea"
           ? `\n\nThis job may change: ${job.permits?.length ? job.permits.join(" and ") : "nothing (read only)"}.${link ? ` Paul's booking link for scheduling drafts: ${link}` : ""}`
           : "";
+      const dnsPermit = job.kind === "dns" ? `\n\nThis job may: ${job.permits?.includes("dns") ? "prepare DNS changes for Paul's approval (dns_prepare_change); nothing is applied until he replies \"dns apply <id>\" himself" : "read only (no dns_prepare_change): list domains, records and snapshots, and explain"}.` : "";
       const createRepo = job.kind === "engineer" && job.permits?.includes("create_repo") ? `\n\n${CREATE_REPO_NOTE}` : "";
       const focus = job.kind !== "engineer" && job.kind !== "maintain" && job.kind !== "create_agent" ? repoFocus(job.target, job.kind) : "";
       const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
       // Every run is capped; deep research gets more turns and budget than the default.
       const limits = runLimits(job.kind, job.depth);
       const result = await this.run({
-        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${createRepo}${depth}${standing}${resume}${carryOn}`,
+        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${depth}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
         model: spec.model,
         cwd: spec.cwd,

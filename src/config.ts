@@ -121,6 +121,20 @@ export const config = {
     maxRecipients: positive(process.env.OUTBOUND_MAX_RECIPIENTS, 10),
     ttlHours: positive(process.env.OUTBOUND_TTL_HOURS, 24),
   },
+  /**
+   * GoDaddy DNS (src/dns.ts, src/dns-gate.ts). The key and secret exist only as service secrets; the
+   * domain list is the allowlist of zones the DNS agent may touch (Paul edits it with the GODADDY_DOMAINS setting).
+   */
+  dns: {
+    key: process.env.GODADDY_API_KEY ?? "",
+    secret: process.env.GODADDY_API_SECRET ?? "",
+    base: (process.env.GODADDY_API_BASE || "https://api.godaddy.com").replace(/\/+$/, ""),
+    domains: (process.env.GODADDY_DOMAINS || "clearexchange.ai,drpaulfarrow.com")
+      .split(",")
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean),
+    ttlHours: positive(process.env.DNS_TTL_HOURS, 2),
+  },
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */

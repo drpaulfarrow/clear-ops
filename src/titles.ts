@@ -45,6 +45,7 @@ const KIND_NAMES: Record<JobKind, string> = {
   design: "Design",
   ideate: "Ideas",
   cv: "CV",
+  dns: "DNS",
 };
 
 /** Words a derived title should not end on. */

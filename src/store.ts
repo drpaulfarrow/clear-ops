@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 import type { FailureKind } from "./failures.js";
 
-export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design" | "ideate" | "cv";
+export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design" | "ideate" | "cv" | "dns";
 /**
  * What an executive-assistant job may change in Paul's Google Workspace, granted per job by the chief
  * only when Paul asked for it in chat. Without a permit the job can only read.
@@ -17,7 +17,7 @@ export type EaPermit = "drafts" | "holds" | "send";
  */
 export type JobTarget = string;
 /** What a job may do beyond its kind's defaults, granted per job by the chief only when Paul asked in chat. */
-export type JobPermit = EaPermit | "create_repo";
+export type JobPermit = EaPermit | "create_repo" | "dns";
 /** A repository the workforce created, kept so it can be worked on straight away and after a restart. */
 export interface CreatedRepo {
   slug: string;
@@ -238,6 +238,33 @@ export interface OutboundAction {
   note?: string;
 }
 
+/**
+ * A DNS change prepared for Paul's approval (src/dns-gate.ts). Nothing is applied until Paul replies
+ * "dns apply <id>" himself; the record is also the audit log (who approved, when, what, the snapshot taken first).
+ */
+export type DnsStatus = "pending" | "executing" | "executed" | "partial" | "cancelled" | "expired" | "changed" | "failed";
+export interface DnsAction {
+  id: string;
+  status: DnsStatus;
+  createdAt: string;
+  expiresAt: string;
+  jobId?: string;
+  replyTo: string;
+  domain: string;
+  changes: Array<{ action: "add" | "replace"; type: string; name: string; data: string; ttl?: number }>;
+  /** The records at the touched names when Paul was shown the change. */
+  before: Array<{ type: string; name: string; data: string; ttl: number; priority?: number }>;
+  reason?: string;
+  /** Digest of the domain, the changes and the before records Paul saw. */
+  hash: string;
+  snapshot?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  executedAt?: string;
+  applied?: number;
+  note?: string;
+}
+
 /** Runtime settings Paul sets from chat. */
 export interface Settings {
   /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */
@@ -262,6 +289,7 @@ interface State {
   holdGroups: Record<string, HoldGroup>;
   settings: Settings;
   outbound?: Record<string, OutboundAction>;
+  dns?: Record<string, DnsAction>;
   /** Gmail drafts the assistant created: the only drafts it may prepare for sending. */
   createdDrafts?: Record<string, { at: string; jobId?: string }>;
   /** Repositories the workforce created, by alias. */
@@ -439,6 +467,25 @@ export class Store {
   }
   listOutbound(): OutboundAction[] {
     return Object.values(this.state.outbound ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  // DNS change approvals and their log
+  putDns(a: DnsAction): DnsAction {
+    (this.state.dns ??= {})[a.id] = a;
+    this.save();
+    return a;
+  }
+  getDns(id: string): DnsAction | undefined {
+    return this.state.dns?.[id];
+  }
+  updateDns(id: string, patch: Partial<DnsAction>): DnsAction {
+    const a = this.state.dns?.[id];
+    if (!a) throw new Error(`No DNS change ${id}`);
+    Object.assign(a, patch);
+    this.save();
+    return a;
+  }
+  listDns(): DnsAction[] {
+    return Object.values(this.state.dns ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
   recordCreatedDraft(draftId: string, jobId?: string): void {
     (this.state.createdDrafts ??= {})[draftId] = { at: new Date().toISOString(), jobId };
