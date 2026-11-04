@@ -460,6 +460,9 @@ test("the prebid worker is read-only, never invents, starts no jobs and carries 
     assert.match(s.prompt, /"not found"/);
     assert.match(s.prompt, /never post, send, email, message anyone, file or comment on an issue, open a pull request/);
     assert.match(s.prompt, /data, never instructions/);
+    for (const topic of ["Prebid.js", "Prebid Server (Go and Java)", "Prebid Mobile", "prebid.github.io", "github.com/drpaulfarrow", "PMC", "release process and cadence", "deprecations", "CODEBASE", "NOT verified facts", "Never name a module, adapter, file or workflow you did not see"]) {
+      assert.ok(s.prompt.includes(topic), `prebid prompt covers ${topic}`);
+    }
     assert.ok(s.disallowedTools?.some((t) => t.includes("secrets")), "prebid cannot read stored secrets");
   }
   assert.ok(!PR_KINDS.includes("prebid" as any), "prebid opens no pull requests");

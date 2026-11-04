@@ -363,6 +363,8 @@ test("the chief knows the prebid kind, its read-only limits and the offered week
   await waitFor(() => calls.some((c) => c.prompt.startsWith("chat: what is the prebid kind")));
   const chief = calls.find((c) => c.prompt.startsWith("chat: what is the prebid kind"))!;
   assert.match(chief.systemPrompt, /prebid \(the Prebid expert/);
+  assert.match(chief.systemPrompt, /CODEBASE mode/);
+  assert.match(chief.systemPrompt, /Prebid.org governance/);
   assert.match(chief.systemPrompt, /not found" rather than inventing/);
   assert.match(chief.systemPrompt, /start nothing until he picks one in this chat/);
   assert.match(chief.systemPrompt, /0 8 \* \* 1/);
