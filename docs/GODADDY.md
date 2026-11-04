@@ -8,12 +8,22 @@ GoDaddy's developer documentation has been changing, and its pages disagree in p
 
 - The classic Domains API (v1, which has the records endpoints this agent uses) authenticates with an API key and secret, sent as `sso-key KEY:SECRET`. GoDaddy's [classic getting-started page](https://classic-developer.godaddy.com/getstarted) says production access to the Management and DNS APIs is "limited to accounts with 1 or more domains or an active Discount Domain Club - Domain Pro Plan", and the Availability API to accounts with 50 or more domains. Older posts, such as this [Let's Encrypt forum thread](https://community.letsencrypt.org/t/godaddy-no-longer-allows-api-access-to-clients-e-g-for-dns-based-cert-renewal-if-you-have-less-than-50-domains/219377), quote a higher bar (10 or more domains, or a Premier plan). Several domains should qualify under the current wording.
 - GoDaddy's newer [API users page](https://developer.godaddy.com/en/docs/api-users) says reads work with any valid credential, paid operations need a billing method, and an ineligible account gets `403 Forbidden` (the body's `code`, for example `ACCESS_DENIED`, says whether it is scope or eligibility). It does not say whether DNS writes need anything more.
-- Classic keys are "scheduled for retirement" and do not work with the new v3 Domains API, which uses Personal Access Tokens (the [token page](https://developer.godaddy.com/personal-access-token); scopes `domains.domain:read` and `domains.dns:update`). Domains v1 still takes keys, and the docs call it deprecated "through 2026". I could not confirm that v1 record calls accept a token, so this agent uses a key and secret and does not guess.
+- Classic keys are "scheduled for retirement" and do not work with the new v3 Domains API, which uses Personal Access Tokens (the [token page](https://developer.godaddy.com/personal-access-token); scopes `domains.domain:read` and `domains.dns:update`). Domains v1 still takes keys, and the docs call it deprecated "through 2026". GoDaddy's [authentication page](https://developer.godaddy.com/en/docs/api-users/auth) says a token goes as `Authorization: Bearer <token>`, works with Domains v3, and that `sso-key` does not work with v3. The v3 DNS endpoints (checked 4 Nov 2026) are `GET` and `POST /v3/domains/zones/{zone}/dns-records` and `PUT /v3/domains/zones/{zone}/dns-records/{recordId}` (a full replace, TTL 600 to 86400). With `GODADDY_API_TOKEN` set, this agent uses exactly those, on `https://api.godaddy.com`; without it, it falls back to the v1 key and secret.
 - Neither a key nor a token can be limited to chosen domains or to one kind of change. The key is as powerful as your whole DNS account, which is why this agent enforces its own domain allowlist and approval flow in code, and why you should create a key used for nothing else and revoke it if you ever doubt it.
 
 I could not test your account. The first read ("list the records for clearexchange.ai") tells you at once: if GoDaddy answers 403 `ACCESS_DENIED`, the agent says so plainly. The usual fix is to reply to GoDaddy's developer support with your account number and ask for production Domains API access, or to take the Cloudflare route below.
 
-## Setup, once
+## Setup with a Personal Access Token (preferred)
+
+1. Sign in at GoDaddy's developer site and open the [Personal Access Token page](https://developer.godaddy.com/personal-access-token) with the account that owns the domains.
+2. Create a token with only the scopes `domains.domain:read` and `domains.dns:update`. Copy it straight away.
+3. In the clear-ops repository on GitHub, open Settings, Secrets and variables, Actions, and add one repository secret called `GODADDY_API_TOKEN` with the token as its value.
+4. Optional: set the `GODADDY_DOMAINS` Actions variable as in step 5 below.
+5. Re-run the latest deploy workflow in the Actions tab. Never paste the token in chat.
+
+When `GODADDY_API_TOKEN` is set it is used and the key and secret are ignored, so you can leave the old secrets in place as a fallback or delete them. If GoDaddy answers 401 the token has expired or been revoked; a 403 means a missing scope or a domain on another account. All the safety rules below are the same in both modes.
+
+## Setup with a key and secret (fallback, v1)
 
 1. Sign in at [developer.godaddy.com/keys](https://developer.godaddy.com/keys) with the GoDaddy account that owns the domains.
 2. Choose Create New API Key. Your first key is for the test environment (OTE), which does not touch your real DNS, so create a second one and set the environment to **Production**. Name it `clear-ops-dns`.
@@ -47,7 +57,7 @@ Reply `dns apply 3fa9c1` and it is done: the service re-reads the zone, saves a 
 - A snapshot of the zone is saved before every applied change in `DATA_DIR/dns/snapshots` (owner-only), and every applied change is logged in the store and in `DATA_DIR/dns/changes.log`. To go back, ask the agent to show the snapshot and prepare the reverse change, or restore it in GoDaddy. Removing a record the agent added is a delete, which is blocked, so that one is done in GoDaddy.
 - Refused outright, with no override: deleting records; any NS, MX, SRV, CAA or SOA change; SPF, DKIM, DMARC and other email authentication records; apex (@) A, AAAA and CNAME records; wildcards; more than 5 records in one change; domains not on the allowlist. If you need one of those, do it in GoDaddy.
 - The agent has no route to transfer, renew, buy, unlock, change contacts, nameservers or any registrar setting.
-- The key and secret exist only as service secrets, go only in GoDaddy's Authorization header, are removed from every worker's environment and are scrubbed from errors.
+- The token (or key and secret) exist only as service secrets, go only in GoDaddy's Authorization header, are removed from every worker's environment and are scrubbed from errors.
 
 ## If your account cannot use the API: move DNS hosting to Cloudflare
 

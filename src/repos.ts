@@ -123,7 +123,8 @@ export function redact(text: string, token = process.env.GH_TOKEN ?? ""): string
   let out = text.replace(/x-access-token:[^@\s]+@/g, "x-access-token:***@").replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/g, "***")
     .replace(/eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, "***")
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "***");
-  if (token.length >= 6) out = out.split(token).join("***");
+  out = out.replace(/\b(Bearer|sso-key) +[\w.~+/=:-]{6,}/gi, "$1 ***");
+  for (const t of [token, process.env.GODADDY_API_TOKEN ?? ""]) if (t.length >= 6) out = out.split(t).join("***");
   return out;
 }
 

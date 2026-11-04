@@ -294,7 +294,7 @@ export function healthProblem(h: AuthHealth): string | undefined {
 export const githubAuth = new GithubAuth();
 
 /** Environment variables that must never reach a worker. */
-const WORKER_STRIPPED = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GODADDY_API_KEY", "GODADDY_API_SECRET"];
+const WORKER_STRIPPED = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GODADDY_API_KEY", "GODADDY_API_SECRET", "GODADDY_API_TOKEN"];
 
 /** Directory of the `gh` wrapper that reads the current token from the token file, so long jobs never hold a stale one. */
 export function wrapperDir(): string {

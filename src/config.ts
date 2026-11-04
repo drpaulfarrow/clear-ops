@@ -122,10 +122,11 @@ export const config = {
     ttlHours: positive(process.env.OUTBOUND_TTL_HOURS, 24),
   },
   /**
-   * GoDaddy DNS (src/dns.ts, src/dns-gate.ts). The key and secret exist only as service secrets; the
+   * GoDaddy DNS (src/dns.ts, src/dns-gate.ts). The token (or key and secret) exist only as service secrets; the
    * domain list is the allowlist of zones the DNS agent may touch (Paul edits it with the GODADDY_DOMAINS setting).
    */
   dns: {
+    token: process.env.GODADDY_API_TOKEN ?? "",
     key: process.env.GODADDY_API_KEY ?? "",
     secret: process.env.GODADDY_API_SECRET ?? "",
     base: (process.env.GODADDY_API_BASE || "https://api.godaddy.com").replace(/\/+$/, ""),
