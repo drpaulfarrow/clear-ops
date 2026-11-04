@@ -61,6 +61,9 @@ jobs:
             GOOGLE_ACCOUNT="${{ secrets.GOOGLE_ACCOUNT }}" \
             GOOGLE_TOKEN_KEY="${{ secrets.GOOGLE_TOKEN_KEY }}" \
             EA_BOOKING_LINK="${{ vars.EA_BOOKING_LINK }}" \
+            GODADDY_API_KEY="${{ secrets.GODADDY_API_KEY }}" \
+            GODADDY_API_SECRET="${{ secrets.GODADDY_API_SECRET }}" \
+            GODADDY_DOMAINS="${{ vars.GODADDY_DOMAINS }}" \
             GITHUB_APP_ID="$GITHUB_APP_ID" \
             GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
             GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID"

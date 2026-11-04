@@ -38,6 +38,8 @@ show job 93137e
 /jobs   /status   /pending   /reset   /help   /uploads
 /resume   retry 3552e7
 /spend   /spend yesterday
+What DNS records does clearexchange.ai have?
+Add a CNAME publisher pointing to clear-exchange.fly.dev.   dns apply 3fa9c1   dns cancel 3fa9c1
 YES 1f3a9c
 ```
 
@@ -187,6 +189,9 @@ If the agent needs its own role, method or tools (for example "an agent that dra
 ## CV writer
 Ask in chat: "Build my CV from the one I just sent", "Tailor my CV for this role", "A one-paragraph bio for an advisory pitch". The `cv` worker keeps `facts.md` (roles, dates, achievements, numbers only where you supplied them), `master-cv.md` and `bios.md` in `DATA_DIR/cv` (owner-only, never in a repository), saves tailored versions there as Markdown (it pastes into Word or Google Docs; DOCX or PDF would need a new dependency and is not built), and puts the full text in its saved report, which is what you open from chat. Anything it lacks becomes a numbered question for you; anything that might be Microsoft confidential goes in a "Check before use" list and out of the drafts. It has web search and fetch (LinkedIn is blocked), your uploads and one save tool, no mail tool: to draw on your sent mail, ask for an assistant job first. It works with the job seekers agent: that agent's role summary is the input to a tailored CV, and the CV report names the file for a cover note. It never applies, sends, posts or logs in anywhere.
 
+## DNS agent (GoDaddy)
+The `dns` worker lists your GoDaddy domains and records, explains what a change does, and prepares A, AAAA, CNAME and TXT changes for you to approve in chat. It is read only by default; with the `dns` permit (granted by the chief only when you ask for a change in chat, never to scheduled runs) it can only PREPARE. The service reads the zone and shows you the exact records before and after with an id; you reply `dns apply <id>` (or `dns cancel <id>`) yourself, a whole-message command handled before any model runs. Approvals expire after `DNS_TTL_HOURS` (2). Before an applied change the service saves a snapshot of the whole zone under `DATA_DIR/dns/snapshots` and logs it. Hard blocks in code: no deleting, no NS, MX, SRV, CAA, SOA, SPF, DKIM or DMARC changes, no apex A, AAAA or CNAME, no wildcards, at most 5 records at once, only the domains in `GODADDY_DOMAINS` (default `clearexchange.ai,drpaulfarrow.com`), and no registrar action of any kind. `GODADDY_API_KEY` and `GODADDY_API_SECRET` are service secrets only, never in a worker's environment. Setup, what GoDaddy's API allows and the Cloudflare fallback: [docs/GODADDY.md](docs/GODADDY.md).
+
 ## Design loop
 The design worker can see. It takes desktop and mobile screenshots of the live site (`DESIGN_SITE_URL`, by default https://clear-exchange.fly.dev), of any branch of the product (it runs that branch locally, so it can review work before it merges) and of its own boards, and looks at them. It critiques the screenshots as three buyers in turn: a publisher's head of revenue or partnerships, the product lead at an AI company buying content, and an investor. It writes brand work (logo direction, palette, type, tone of voice, UI principles) and specs precise enough for an engineer to build without asking. It writes no production code, opens no pull requests and merges nothing.
 
@@ -212,6 +217,7 @@ See `.env.example`. The important ones:
 | `GH_TOKEN` | GitHub token. The fallback when the App is not configured, and the only way to create repositories (a GitHub App cannot create repositories on a personal account). Fine-grained: contents, pull requests and workflows read/write on every managed repository. To let the workforce create repositories it must be a classic token with the `repo` and `workflow` scopes (fine-grained tokens cannot create repositories under a personal account). |
 | `PRODUCT_REPO`, `SELF_REPO` | The product and this workforce as `owner/name`, cloned on first start. |
 | `MANAGED_REPOS` | More managed repositories: comma-separated `alias=owner/name` (optionally `\|another name`). Default `site=drpaulfarrow/drpaulfarrowcom\|drpaulfarrow.com`. Cloned on first start into `REPOS_DIR/<alias>`. |
+| `GODADDY_API_KEY`, `GODADDY_API_SECRET`, `GODADDY_DOMAINS`, `DNS_TTL_HOURS` | GoDaddy DNS agent: production API key and secret (secrets), the domains it may touch (comma separated, default `clearexchange.ai,drpaulfarrow.com`) and how long an approval lasts (hours, default 2). See [docs/GODADDY.md](docs/GODADDY.md). |
 | `OUTPUTS_REPO` | The private repository every finished job's output is copied to as Markdown (`outputs/<date>-<id>-<title>.md` plus an index README). Default `drpaulfarrow/clear-outputs`. Nothing is pushed unless GitHub reports it private; the GitHub token needs Contents read and write on it. |
 | `REPOS_DIR`, `REPO_OWNER` | Where those clones live (default `DATA_DIR/repos`) and the account new repositories are created under (default `drpaulfarrow`). |
 | `REPO_DIR`, `SELF_REPO_DIR` | Where the clones live. |
