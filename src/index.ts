@@ -19,6 +19,8 @@ import { REPO_SERVER, repoServer } from "./repo-tools.js";
 import type { AgentRunner } from "./agents.js";
 import { GoogleApi, GoogleAuth, GoogleError, type Fetch } from "./google.js";
 import { OutboundGate } from "./outbound.js";
+import { GoDaddyClient } from "./dns.js";
+import { DnsGate, dnsServer, DNS_SERVER } from "./dns-gate.js";
 import { EA_SERVER, EaTools, eaServer, ensureEaSchedules, upgradeEaSchedules } from "./ea.js";
 import cron from "node-cron";
 import { nudgeStale } from "./followups.js";
@@ -35,6 +37,8 @@ export interface AppDeps {
   repoClone?: (slug: string, dir: string) => Promise<void>;
   /** What Google API calls go through. Tests inject a fake. */
   googleFetch?: Fetch;
+  /** Fetch for the GoDaddy client; tests inject a fake. */
+  dnsFetch?: Fetch;
   /** The time source for follow-up commands. Tests pin it. */
   clock?: () => Date;
   /** The /status line about GitHub auth. Tests inject one; defaults to a live check. */
@@ -66,6 +70,9 @@ export function buildApp(deps: AppDeps) {
   };
   // The approval gate for sending mail and inviting people: shared by the ea's prepare tools and the chat approval.
   const outbound = new OutboundGate(deps.store, googleApi, deps.messenger);
+  // The approval gate for DNS changes: shared by the dns agent's prepare tool and the chat approval.
+  const dnsClient = new GoDaddyClient(deps.dnsFetch);
+  const dns = new DnsGate(deps.store, dnsClient, deps.messenger);
   // Repositories the workforce created in earlier runs are managed again from the first request.
   repoRegistry.load(deps.store);
   const toolsFor = (job: { id: string; kind: string; brief: string; replyTo?: string; permits?: JobPermit[] }): Record<string, McpServerConfig> | undefined =>
@@ -75,13 +82,15 @@ export function buildApp(deps: AppDeps) {
             new EaTools(googleApi, { permits: (job.permits ?? []).filter((p): p is EaPermit => p === "drafts" || p === "holds" || p === "send"), brief: job.brief, store: deps.store, bookingLink: bookingLink(deps.store), account: account(), jobId: job.id, replyTo: job.replyTo, outbound }),
           ),
         }
+      : job.kind === "dns"
+        ? { [DNS_SERVER]: dnsServer({ client: dnsClient, gate: dns, permit: job.permits?.includes("dns") === true, jobId: job.id, replyTo: job.replyTo }) }
       : // Only an engineer job the chief gave the create_repo permit (Paul asked in chat) gets the tool.
         job.kind === "engineer" && job.permits?.includes("create_repo")
         ? { [REPO_SERVER]: repoServer({ store: deps.store, jobId: job.id, createDeps: { fetch: deps.repoFetch, clone: deps.repoClone } }) }
         : undefined;
   const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined });
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound);
+  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns);
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
