@@ -372,6 +372,20 @@ test("the chief knows the cv kind, its hand-offs and that it never applies or se
   assert.ok(spec.prompt.includes("Clean room rule"));
 });
 
+test("the chief knows the advisor kind, that it only drafts and advises, and never starts jobs from it", async () => {
+  await post(inbound("447700900123", "chat: what is the advisor kind for"));
+  await waitFor(() => calls.some((c) => c.prompt.startsWith("chat: what is the advisor kind")));
+  const chief = calls.find((c) => c.prompt.startsWith("chat: what is the advisor kind"))!;
+  assert.match(chief.systemPrompt, /advisor \(the pitch builder and startup consultant/);
+  assert.match(chief.systemPrompt, /pressure-test our pricing/);
+  assert.match(chief.systemPrompt, /never invents traction, customers, quotes or numbers/);
+  assert.match(chief.systemPrompt, /neither it nor you start an engineer, design, analyse or create_agent job from its report/);
+  const { workerSpec } = await import("../src/agents.js");
+  const spec = workerSpec("advisor" as any);
+  assert.equal(spec.name, "advisor");
+  assert.ok(spec.prompt.includes("Clean room rule"));
+});
+
 test("the chief knows the dns kind, grants dns only on Paul's request, and never applies or deletes", async () => {
   await post(inbound("447700900123", "chat: what is the dns kind for"));
   await waitFor(() => calls.some((c) => c.prompt.startsWith("chat: what is the dns kind")));
