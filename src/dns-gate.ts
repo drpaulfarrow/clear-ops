@@ -133,7 +133,7 @@ export class DnsGate {
       const snapshot = saveSnapshot(cur.domain, id, zone, this.now());
       this.store.updateDns(id, { snapshot });
       for (const c of cur.changes as DnsChange[]) {
-        const r = requestFor(cur.domain, c);
+        const r = requestFor(cur.domain, c, this.client.mode(), zone);
         const grant = mintDnsGrant(id, requestDigest(r.method, r.path, r.body));
         await this.client.write(grant, r.method, r.path, r.body);
         applied++;

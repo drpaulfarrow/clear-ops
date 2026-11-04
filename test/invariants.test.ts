@@ -514,9 +514,10 @@ test("the dns worker reads and prepares only: no Bash, Edit, Write or web, no ap
   assert.ok(!PR_KINDS.includes("dns" as any), "dns opens no pull requests");
   assert.equal(lockKey({ kind: "dns", target: "product" } as any), undefined, "dns never holds the engineering lock");
   // The GoDaddy key and secret never reach any worker's environment.
-  const env = await workerGithubEnv({ GODADDY_API_KEY: "k", GODADDY_API_SECRET: "s", PATH: "/bin" } as never, { mode: () => "token", refreshFile: async () => false } as never);
+  const env = await workerGithubEnv({ GODADDY_API_KEY: "k", GODADDY_API_SECRET: "s", GODADDY_API_TOKEN: "t", PATH: "/bin" } as never, { mode: () => "token", refreshFile: async () => false } as never);
   assert.equal(env.GODADDY_API_KEY, undefined);
   assert.equal(env.GODADDY_API_SECRET, undefined);
+  assert.equal(env.GODADDY_API_TOKEN, undefined);
   // The client's routes: reads, an append and a single-record replace; no delete and no registrar call; writes only with a grant.
   const dns = src("dns.ts");
   assert.doesNotMatch(dns, /method === "DELETE"|"DELETE"/, "no delete route");

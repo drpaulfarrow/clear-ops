@@ -6,7 +6,9 @@
  * (src/dns-gate.ts): `GoDaddyClient.write` needs a single-use grant bound to the exact request, minted
  * only in dns-gate.ts. The client reaches only the paths in `routeOf`: it has no delete, no renew,
  * transfer, lock, contact, nameserver or any other registrar call, so no prompt can ask for one.
- * The key and secret are read here, sent only in the Authorization header and scrubbed from every error.
+ * Credentials: a Personal Access Token (GODADDY_API_TOKEN, `Authorization: Bearer`) when set, which GoDaddy
+ * accepts on the v3 Domains API (`/v3/domains/zones/{zone}/dns-records`); otherwise the classic key and secret
+ * (`sso-key`) on v1. They are read here, sent only in the Authorization header and scrubbed from every error.
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -21,6 +23,8 @@ export interface DnsRecord {
   data: string;
   ttl: number;
   priority?: number;
+  /** GoDaddy v3's id for the record, needed to replace it. Not part of what Paul is shown or approves. */
+  recordId?: string;
 }
 
 /** One requested change. "add" appends a record; "replace" swaps the single existing record of that type and name. */
@@ -210,7 +214,21 @@ function routeOf(method: string, p: string): Route | undefined {
   if (method === "GET" && /^\/v1\/domains\/[a-z0-9.-]+\/records$/.test(p)) return { write: false };
   if (method === "PATCH" && /^\/v1\/domains\/[a-z0-9.-]+\/records$/.test(p)) return { write: true };
   if (method === "PUT" && /^\/v1\/domains\/[a-z0-9.-]+\/records\/(A|AAAA|CNAME|TXT)\/[a-z0-9_.-]+$/.test(p)) return { write: true };
+  // v3, the API a Personal Access Token works with.
+  if (method === "GET" && /^\/v3\/domains\/domain-names$/.test(p)) return { write: false };
+  if (method === "GET" && /^\/v3\/domains\/zones\/[a-z0-9.-]+\/dns-records$/.test(p)) return { write: false };
+  if (method === "POST" && /^\/v3\/domains\/zones\/[a-z0-9.-]+\/dns-records$/.test(p)) return { write: true };
+  if (method === "PUT" && /^\/v3\/domains\/zones\/[a-z0-9.-]+\/dns-records\/[A-Za-z0-9._~-]+$/.test(p)) return { write: true };
   return undefined;
+}
+
+export type AuthMode = "token" | "key";
+export interface DnsCreds {
+  key: string;
+  secret: string;
+  base: string;
+  /** GoDaddy Personal Access Token; wins over key and secret when set. */
+  token?: string;
 }
 
 export class GoDaddyClient {
@@ -218,28 +236,33 @@ export class GoDaddyClient {
 
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
-    private readonly creds: { key: string; secret: string; base: string } = config.dns,
+    private readonly creds: DnsCreds = config.dns,
   ) {}
 
+  /** "token" (Bearer, v3) when GODADDY_API_TOKEN is set, otherwise "key" (sso-key, v1). */
+  mode(): AuthMode {
+    return this.creds.token ? "token" : "key";
+  }
+
   configured(): boolean {
-    return Boolean(this.creds.key && this.creds.secret);
+    return Boolean(this.creds.token || (this.creds.key && this.creds.secret));
   }
 
   /** Removes the credentials from any text that is about to be shown or logged. */
   private scrub(text: string): string {
     let t = text;
-    for (const s of [this.creds.key, this.creds.secret]) if (s) t = t.split(s).join("***");
+    for (const s of [this.creds.token, this.creds.key, this.creds.secret]) if (s) t = t.split(s).join("***");
     return t;
   }
 
   private async call(method: string, p: string, body?: unknown, query?: Record<string, string>): Promise<any> {
-    if (!this.configured()) throw new DnsError("GoDaddy is not connected yet: the GODADDY_API_KEY and GODADDY_API_SECRET secrets are not set. docs/GODADDY.md has the steps.");
+    if (!this.configured()) throw new DnsError("GoDaddy is not connected yet: neither GODADDY_API_TOKEN nor the GODADDY_API_KEY and GODADDY_API_SECRET secrets are set. docs/GODADDY.md has the steps.");
     const qs = query ? `?${new URLSearchParams(query)}` : "";
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.creds.base}${p}${qs}`, {
         method,
-        headers: { Authorization: `sso-key ${this.creds.key}:${this.creds.secret}`, Accept: "application/json", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+        headers: { Authorization: this.creds.token ? `Bearer ${this.creds.token}` : `sso-key ${this.creds.key}:${this.creds.secret}`, Accept: "application/json", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         redirect: "error",
         signal: AbortSignal.timeout(20_000),
@@ -259,7 +282,8 @@ export class GoDaddyClient {
         // not JSON
       }
       const hint =
-        res.status === 401 ? " The key and secret were refused: check they are the production pair and still active."
+        res.status === 401 ? (this.mode() === "token" ? " The token was refused: check it has not expired or been revoked, and that it is the one for GODADDY_API_TOKEN." : " The key and secret were refused: check they are the production pair and still active.")
+        : this.mode() === "token" && (res.status === 403 || code === "ACCESS_DENIED") ? " GoDaddy is refusing the token: check it has the scopes domains.domain:read and domains.dns:update, and that its account owns this domain."
         : res.status === 403 || code === "ACCESS_DENIED" ? " GoDaddy is refusing this account the Domains API. Its docs limit it to accounts with enough domains or a Discount Domain Club plan; reply to GoDaddy's developer support with the account number to ask for access."
         : res.status === 429 ? " GoDaddy is rate limiting; try again in a minute."
         : "";
@@ -270,6 +294,7 @@ export class GoDaddyClient {
 
   /** Domains on the account, narrowed to the allowlist. */
   async domains(): Promise<string[]> {
+    if (this.mode() === "token") return this.domainsV3();
     const all = (await this.call("GET", "/v1/domains", undefined, { statuses: "ACTIVE", limit: "1000" })) as Array<{ domain?: string }>;
     return (Array.isArray(all) ? all : []).map((d) => String(d.domain ?? "").toLowerCase()).filter((d) => d && isAllowedDomain(d)).sort();
   }
@@ -277,24 +302,79 @@ export class GoDaddyClient {
   /** Every record in the zone of an allowlisted domain. */
   async records(domain: string): Promise<DnsRecord[]> {
     const d = requireDomain(domain);
+    if (this.mode() === "token") return this.recordsV3(d);
     const rows = (await this.call("GET", `/v1/domains/${d}/records`)) as Array<Record<string, any>>;
     return (Array.isArray(rows) ? rows : []).map((r) => ({ type: String(r.type), name: String(r.name).toLowerCase(), data: String(r.data), ttl: Number(r.ttl) || DEFAULT_TTL, ...(r.priority !== undefined && r.priority !== null ? { priority: Number(r.priority) } : {}) }));
   }
 
+  /** v3: cursor pages with a `next` link. Only follows links on GoDaddy's own base, at most 20 pages. */
+  private async domainsV3(): Promise<string[]> {
+    const out: string[] = [];
+    let next: { p: string; q: Record<string, string> } | undefined = { p: "/v3/domains/domain-names", q: { pageSize: "200" } };
+    for (let i = 0; next && i < 20; i++) {
+      const page: any = await this.call("GET", next.p, undefined, next.q);
+      for (const d of Array.isArray(page?.items) ? page.items : []) out.push(String(d.domain ?? "").toLowerCase());
+      next = this.nextLink(page?.links);
+    }
+    return [...new Set(out)].filter((d) => d && isAllowedDomain(d)).sort();
+  }
+
+  private nextLink(links: unknown): { p: string; q: Record<string, string> } | undefined {
+    const l = (Array.isArray(links) ? links : []).find((x: any) => x?.rel === "next" && typeof x.href === "string");
+    if (!l) return undefined;
+    try {
+      const u = new URL(l.href, this.creds.base);
+      if (u.origin !== new URL(this.creds.base).origin || u.pathname !== "/v3/domains/domain-names") return undefined;
+      return { p: u.pathname, q: Object.fromEntries(u.searchParams) };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** v3: offset pages of up to 100, at most 50 pages. */
+  private async recordsV3(d: string): Promise<DnsRecord[]> {
+    const rows: Array<Record<string, any>> = [];
+    for (let page = 1; page <= 50; page++) {
+      const res: any = await this.call("GET", `/v3/domains/zones/${d}/dns-records`, undefined, { page: String(page), pageSize: "100" });
+      const items: Array<Record<string, any>> = Array.isArray(res?.items) ? res.items : [];
+      rows.push(...items);
+      if (items.length < 100) break;
+    }
+    return rows.map((r) => ({
+      type: String(r.type),
+      name: String(r.name).toLowerCase(),
+      data: String(r.data),
+      ttl: Number(r.ttl) || DEFAULT_TTL,
+      ...(r.priority !== undefined && r.priority !== null ? { priority: Number(r.priority) } : {}),
+      ...(r.recordId !== undefined && r.recordId !== null ? { recordId: String(r.recordId) } : {}),
+    }));
+  }
+
   /** The one write path. Needs a grant from the approval gate, bound to exactly this request, usable once. */
-  async write(grant: DnsGrant, method: "PATCH" | "PUT", p: string, body: unknown): Promise<void> {
+  async write(grant: DnsGrant, method: "PATCH" | "PUT" | "POST", p: string, body: unknown): Promise<void> {
     if (!minted.has(grant) || this.used.has(grant)) throw new DnsError("Refused: a change needs a fresh approval from Paul.");
     if (grant.digest !== requestDigest(method, p, body)) throw new DnsError("Refused: the approval does not match this request.");
-    const m = p.match(/^\/v1\/domains\/([a-z0-9.-]+)\//);
-    if (!m || !isAllowedDomain(m[1]) || !routeOf(method, p)?.write) throw new DnsError("Refused: that is not a DNS record change on an allowed domain.");
+    const m = p.match(/^\/v1\/domains\/([a-z0-9.-]+)\/|^\/v3\/domains\/zones\/([a-z0-9.-]+)\//);
+    if (!m || !isAllowedDomain(m[1] ?? m[2]) || !routeOf(method, p)?.write) throw new DnsError("Refused: that is not a DNS record change on an allowed domain.");
     this.used.add(grant);
     await this.call(method, p, body);
   }
 }
 
-/** The GoDaddy request that carries out one change. */
-export function requestFor(domain: string, c: DnsChange): { method: "PATCH" | "PUT"; path: string; body: unknown } {
+/**
+ * The GoDaddy request that carries out one change. Key mode is v1 (append with PATCH, swap with PUT by type and name);
+ * token mode is v3 (POST a record, or PUT by the record id found in the live `zone`).
+ */
+export function requestFor(domain: string, c: DnsChange, mode: AuthMode = "key", zone: DnsRecord[] = []): { method: "PATCH" | "PUT" | "POST"; path: string; body: unknown } {
   const ttl = c.ttl ?? DEFAULT_TTL;
+  if (mode === "token") {
+    const base = `/v3/domains/zones/${domain}/dns-records`;
+    if (c.action === "add") return { method: "POST", path: base, body: { type: c.type, name: c.name, data: c.data, ttl } };
+    const same = zone.filter((r) => r.type === c.type && r.name.toLowerCase() === c.name);
+    const id = same.length === 1 ? same[0].recordId : undefined;
+    if (!id || !/^[A-Za-z0-9._~-]+$/.test(id)) throw new DnsError(`GoDaddy gave no usable id for the ${c.type} record at ${c.name}, so it cannot be replaced here; change it in GoDaddy.`);
+    return { method: "PUT", path: `${base}/${id}`, body: { type: c.type, name: c.name, data: c.data, ttl } };
+  }
   return c.action === "add"
     ? { method: "PATCH", path: `/v1/domains/${domain}/records`, body: [{ type: c.type, name: c.name, data: c.data, ttl }] }
     : { method: "PUT", path: `/v1/domains/${domain}/records/${c.type}/${c.name}`, body: [{ data: c.data, ttl }] };

@@ -293,3 +293,127 @@ test("blockers() reads the live zone: a name's existing records decide what may 
   assert.deepEqual(blockers("example.test", [add("_acme-challenge.docs", "tokenvalue", "TXT")] as never, ZONE as never), [], "certificate challenge records are fine");
   assert.ok(blockers("example.test", [add("app", "other.fly.dev")] as never, ZONE as never).length, "a name that is already a CNAME");
 });
+
+// ---- Personal Access Token (Bearer, Domains v3) ----
+const TOKEN = "pat_0123456789abcdef";
+
+/** A fake GoDaddy v3: records have ids, a POST adds one, a PUT by id replaces it. */
+function worldV3(zone: Array<{ type: string; name: string; data: string; ttl: number }> = ZONE, opts: { status?: number } = {}) {
+  const calls: Call[] = [];
+  const records = zone.map((r, i) => ({ ...r, recordId: `rec${i + 1}` }));
+  const f = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    calls.push({ method, path: url.pathname, body, auth: (init?.headers as Record<string, string>)?.Authorization });
+    const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+    if (opts.status) return json({ code: opts.status === 401 ? "UNAUTHORIZED" : "ACCESS_DENIED", message: `refused ${TOKEN}` }, opts.status);
+    if (method === "GET" && url.pathname === "/v3/domains/domain-names") return json({ items: [{ domain: "example.test" }, { domain: "stranger.test" }], links: [] });
+    if (method === "GET" && url.pathname === "/v3/domains/zones/example.test/dns-records") return json({ items: records, links: [] });
+    if (method === "POST" && url.pathname === "/v3/domains/zones/example.test/dns-records") {
+      records.push({ ...body, recordId: `rec${records.length + 1}` });
+      return json(records[records.length - 1], 201);
+    }
+    if (method === "PUT" && url.pathname.startsWith("/v3/domains/zones/example.test/dns-records/")) {
+      const id = url.pathname.split("/").pop();
+      const at = records.findIndex((r) => r.recordId === id);
+      if (at < 0) return json({ code: "NOT_FOUND" }, 404);
+      records[at] = { ...body, recordId: id };
+      return json(records[at]);
+    }
+    return json({ message: "unexpected" }, 500);
+  }) as typeof fetch;
+  const client = new GoDaddyClient(f, { token: TOKEN, key: "", secret: "", base: "https://api.test" });
+  return { calls, records, client, writes: () => calls.filter((c) => c.method !== "GET") };
+}
+
+function setupV3(zone = ZONE, opts = {}) {
+  const w = worldV3(zone, opts);
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-dns-store-")));
+  const sent: Array<{ to: string; text: string }> = [];
+  const gate = new DnsGate(store, w.client, { send: async (to: string, text: string) => void sent.push({ to, text }) } as never);
+  return { ...w, store, gate, sent };
+}
+
+test("with GODADDY_API_TOKEN the client sends Authorization: Bearer on v3 and never sso-key", async () => {
+  const s = setupV3();
+  assert.equal(s.client.mode(), "token");
+  assert.deepEqual(await s.client.domains(), ["example.test"], "narrowed to the allowlist");
+  const recs = await s.client.records("example.test");
+  assert.equal(recs.length, ZONE.length);
+  assert.ok(s.calls.length >= 2);
+  for (const c of s.calls) {
+    assert.equal(c.auth, `Bearer ${TOKEN}`);
+    assert.match(c.path, /^\/v3\//);
+  }
+});
+
+test("the token wins over key and secret; without it the v1 sso-key path is unchanged", async () => {
+  const both = new GoDaddyClient((async (_u: unknown, init?: RequestInit) => {
+    seen.push((init?.headers as Record<string, string>).Authorization);
+    return new Response(JSON.stringify({ items: [] }), { status: 200 });
+  }) as typeof fetch, { token: TOKEN, key: KEY, secret: SECRET, base: "https://api.test" });
+  const seen: string[] = [];
+  await both.records("example.test");
+  assert.deepEqual(seen, [`Bearer ${TOKEN}`]);
+  const v1 = setup();
+  assert.equal(v1.client.mode(), "key");
+  await v1.client.records("example.test");
+  assert.equal(v1.calls[0].auth, `sso-key ${KEY}:${SECRET}`);
+  assert.match(v1.calls[0].path, /^\/v1\//);
+});
+
+test("token mode: an approved add is a v3 POST and a replace is a v3 PUT by record id, all behind the gate", async () => {
+  const s = setupV3();
+  const a = await s.gate.prepare("example.test", [add("publisher", "clear-exchange.fly.dev")], undefined, origin);
+  assert.equal(s.writes().length, 0, "preparing changes nothing");
+  await s.gate.approve(a.id, PAUL);
+  assert.deepEqual(s.writes().map((c) => [c.method, c.path, c.auth]), [["POST", "/v3/domains/zones/example.test/dns-records", `Bearer ${TOKEN}`]]);
+  assert.deepEqual(s.writes()[0].body, { type: "CNAME", name: "publisher", data: "clear-exchange.fly.dev", ttl: 3600 });
+  assert.ok(fs.existsSync(s.store.getDns(a.id)!.snapshot!), "snapshot taken");
+  const b = await s.gate.prepare("example.test", [{ action: "replace" as const, type: "CNAME" as any, name: "app", data: "new.fly.dev" }], undefined, origin);
+  await s.gate.approve(b.id, PAUL);
+  const put = s.writes()[1];
+  assert.deepEqual([put.method, put.path], ["PUT", "/v3/domains/zones/example.test/dns-records/rec2"]);
+  assert.deepEqual(put.body, { type: "CNAME", name: "app", data: "new.fly.dev", ttl: 3600 });
+});
+
+test("token mode keeps every hard block, the allowlist and the grant requirement", async () => {
+  const s = setupV3();
+  await assert.rejects(s.gate.prepare("example.test", [add("x", "mail.example.net", "MX")] as never, undefined, origin));
+  await assert.rejects(s.gate.prepare("stranger.test", [add("x", "a.example.net")], undefined, origin));
+  const p = "/v3/domains/zones/example.test/dns-records";
+  const body = { type: "CNAME", name: "evil", data: "evil.example.net", ttl: 3600 };
+  await assert.rejects(s.client.write({ actionId: "x", digest: requestDigest("POST", p, body) }, "POST", p, body), /fresh approval/, "a forged grant is refused");
+  for (const [m, path] of [["DELETE", `${p}/rec1`], ["POST", "/v3/domains/example.test/renew"], ["PUT", "/v3/domains/zones/stranger.test/dns-records/rec1"], ["POST", "/v3/domains/zones/stranger.test/dns-records"]] as const) {
+    const g = mintDnsGrant("x", requestDigest(m as never, path, body));
+    await assert.rejects(s.client.write(g, m as never, path, body), DnsError, `${m} ${path}`);
+  }
+  assert.equal(s.writes().length, 0);
+});
+
+test("token mode: replace without a usable record id is refused rather than guessed", () => {
+  assert.throws(() => requestFor("example.test", { action: "replace", type: "CNAME", name: "app", data: "x.fly.dev" } as never, "token", [{ type: "CNAME", name: "app", data: "y", ttl: 600 }]), /no usable id/);
+});
+
+test("the token is scrubbed from errors, hints name the token, and nothing else carries it", async () => {
+  for (const status of [401, 403]) {
+    const s = setupV3(ZONE, { status });
+    await assert.rejects(s.client.records("example.test"), (e: Error) => {
+      assert.ok(!e.message.includes(TOKEN), "errors never contain the token");
+      assert.match(e.message, status === 401 ? /token was refused/ : /scopes domains\.domain:read and domains\.dns:update/);
+      return true;
+    });
+  }
+  const none = new GoDaddyClient(fetch, { token: "", key: "", secret: "", base: "https://api.test" });
+  assert.equal(none.configured(), false);
+  await assert.rejects(none.records("example.test"), /GODADDY_API_TOKEN/);
+  const { redact } = await import("../src/repos.js");
+  process.env.GODADDY_API_TOKEN = TOKEN;
+  try {
+    const out = redact(`failed: ${TOKEN} and Authorization: Bearer abcdef123456 and sso-key k12345:s12345`, "");
+    assert.ok(!out.includes(TOKEN) && !out.includes("abcdef123456") && !out.includes("k12345:s12345"));
+  } finally {
+    delete process.env.GODADDY_API_TOKEN;
+  }
+});
