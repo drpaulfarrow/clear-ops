@@ -304,7 +304,10 @@ test("in chat: 'send it' works for exactly one waiting action, asks which for se
   const b = await s.gate.prepareEmail({ ...email, subject: "Two" }, origin);
   await orch.handle(PAUL, "send it", { replyTo: CHAT });
   assert.equal(s.sends().length, 0);
-  assert.match(sent.at(-1)!.text, new RegExp(`send ${a.id} or send ${b.id}`));
+  // both ids are named; order is not guaranteed when two actions share a millisecond
+  assert.match(sent.at(-1)!.text, /2 things are waiting/);
+  assert.match(sent.at(-1)!.text, new RegExp(`send ${a.id}`));
+  assert.match(sent.at(-1)!.text, new RegExp(`send ${b.id}`));
   await orch.handle(PAUL, `cancel ${a.id}`, { replyTo: CHAT });
   await orch.handle(PAUL, "send it", { replyTo: CHAT });
   assert.equal(s.sends().length, 1);
