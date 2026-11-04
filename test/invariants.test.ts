@@ -488,3 +488,51 @@ test("the cv worker is read-only apart from one confined save tool, never sends 
   assert.equal(fs.statSync(cvDir()).mode & 0o777, 0o700);
   assert.throws(() => saveCvFile("big.md", "x".repeat(200_001)));
 });
+
+test("the dns worker reads and prepares only: no Bash, Edit, Write or web, no apply tool, no registrar reach, credentials kept out of workers", async () => {
+  const { workerSpec, JOB_KINDS, PR_KINDS } = await import("../src/agents.js");
+  const { lockKey } = await import("../src/jobs.js");
+  const { workerGithubEnv } = await import("../src/github-auth.js");
+  assert.ok(JOB_KINDS.includes("dns" as any), "dns is a job kind");
+  for (const target of ["product", "self"] as const) {
+    const s = workerSpec("dns" as any, target);
+    assert.deepEqual(s.allowedTools, ["mcp__dns__*", "Read", "Glob", "Grep"], "dns gets its own server plus read-only repository tools");
+    assert.deepEqual(s.tools, ["Read", "Glob", "Grep"]);
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|WebFetch|WebSearch|mcp__ops__|mcp__google__|mcp__repos__|mcp__design__|mcp__cv__)/.test(t)), "dns gets no Edit, Write, Bash, web, mail or chief tools");
+    assert.ok(s.prompt.includes("Clean room rule"), "dns carries the clean-room rule");
+    assert.ok(s.prompt.includes("Messaging rule from Paul"), "dns carries the messaging rule");
+    assert.match(s.prompt, /Your message to Paul is three or four plain sentences/);
+    assert.match(s.prompt, /never start, schedule or request engineer, design, analyse or create_agent jobs/i);
+    assert.match(s.prompt, /no deleting records/);
+    assert.match(s.prompt, /SPF, DKIM, DMARC/);
+    assert.match(s.prompt, /no more than 5 records at once/);
+    assert.match(s.prompt, /transfer, renew, buy, unlock, change contacts/);
+    assert.match(s.prompt, /You never apply a change/);
+    assert.ok(s.prompt.includes("Files the founder sends in chat"), "dns carries the uploads rule");
+    assert.ok(s.disallowedTools?.some((t) => t.includes("secrets")), "dns cannot read stored secrets");
+  }
+  assert.ok(!PR_KINDS.includes("dns" as any), "dns opens no pull requests");
+  assert.equal(lockKey({ kind: "dns", target: "product" } as any), undefined, "dns never holds the engineering lock");
+  // The GoDaddy key and secret never reach any worker's environment.
+  const env = await workerGithubEnv({ GODADDY_API_KEY: "k", GODADDY_API_SECRET: "s", PATH: "/bin" } as never, { mode: () => "token", refreshFile: async () => false } as never);
+  assert.equal(env.GODADDY_API_KEY, undefined);
+  assert.equal(env.GODADDY_API_SECRET, undefined);
+  // The client's routes: reads, an append and a single-record replace; no delete and no registrar call; writes only with a grant.
+  const dns = src("dns.ts");
+  assert.doesNotMatch(dns, /method === "DELETE"|"DELETE"/, "no delete route");
+  assert.doesNotMatch(dns, /\/(renew|transfer|contacts|privacy|nameservers|agreements|purchase|domains\/available)/, "no registrar route");
+  assert.match(dns, /async write\(grant: DnsGrant/, "writes need a grant");
+  // Only the gate mints grants and writes; nothing else in the service names the write path.
+  for (const f of fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"))) {
+    if (f !== "dns.ts" && f !== "dns-gate.ts") assert.ok(!/mintDnsGrant|\.write\(grant|GoDaddyClient/.test(src(f)) || f === "index.ts", `${f} must not mint DNS grants or call the write path`);
+  }
+  assert.ok(!/mintDnsGrant/.test(src("index.ts")), "index.ts wires the client but never mints grants");
+  assert.equal([...src("dns-gate.ts").matchAll(/mintDnsGrant\(/g)].length, 1, "one place mints grants: the gate's apply path");
+  // Approval is reachable from one place: the orchestrator's chat handler, after the allowlist check, with no model.
+  const orch = src("orchestrator.ts");
+  assert.equal([...orch.matchAll(/dnsGate\.approve\(/g)].length, 1, "one DNS approval call site");
+  assert.ok(orch.indexOf("parseDnsCommand(trimmed)") > orch.indexOf("if (!isAllowed(sender))"), "DNS approval is parsed only after the allowlist check");
+  for (const f of fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"))) if (!["dns-gate.ts", "orchestrator.ts"].includes(f)) assert.ok(!/dnsGate\.approve|dns\.approve\(/.test(src(f)), `${f} must not approve DNS changes`);
+  // Scheduled runs and the chief's permits: the permit is per job, and the scheduler never passes one.
+  assert.doesNotMatch(src("scheduler.ts"), /permits:\s*\[/, "scheduled runs get no permits");
+});
