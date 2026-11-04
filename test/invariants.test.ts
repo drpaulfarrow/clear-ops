@@ -537,3 +537,37 @@ test("the dns worker reads and prepares only: no Bash, Edit, Write or web, no ap
   // Scheduled runs and the chief's permits: the permit is per job, and the scheduler never passes one.
   assert.doesNotMatch(src("scheduler.ts"), /permits:\s*\[/, "scheduled runs get no permits");
 });
+
+test("the advisor worker is read-only apart from one confined deck save tool, never sends or starts jobs, and never invents traction", async () => {
+  const { workerSpec, JOB_KINDS, PR_KINDS } = await import("../src/agents.js");
+  const { lockKey } = await import("../src/jobs.js");
+  const { checkDeckName, saveDeckFile, deckDir } = await import("../src/decks.js");
+  assert.ok(JOB_KINDS.includes("advisor" as any), "advisor is a job kind");
+  for (const target of ["product", "self"] as const) {
+    const s = workerSpec("advisor" as any, target);
+    assert.deepEqual(s.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__decks__save_deck_file"]);
+    assert.deepEqual(s.tools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops__|mcp__google__|mcp__repos__|mcp__design__|mcp__cv__)/.test(t)), "advisor gets no Edit, Write, Bash, mail or chief tools");
+    assert.ok(s.prompt.includes("Clean room rule"), "advisor carries the clean-room rule");
+    assert.ok(s.prompt.includes("Messaging rule from Paul"), "advisor carries the messaging rule");
+    assert.match(s.prompt, /Your message to Paul is three or four plain sentences/);
+    assert.match(s.prompt, /Never invent traction, revenue, customers, partnerships, pilots, quotes/);
+    assert.match(s.prompt, /label them "simulated"/);
+    assert.match(s.prompt, /never send, post, publish, email or message anyone/i);
+    assert.match(s.prompt, /never start, schedule or request engineer, design, analyse or create_agent jobs/i);
+    assert.match(s.prompt, /one endpoint for relevant, licensed, citable content/);
+    assert.match(s.prompt, /never copy them or your decks into a repository/);
+    assert.ok(s.prompt.includes("Files the founder sends in chat"), "advisor carries the uploads rule");
+    assert.ok(!s.prompt.includes("This task is on the workforce itself"));
+    assert.ok(s.disallowedTools?.some((t) => t.includes("secrets")), "advisor cannot read stored secrets");
+  }
+  assert.ok(!PR_KINDS.includes("advisor" as any), "advisor opens no pull requests");
+  assert.equal(lockKey({ kind: "advisor", target: "product" } as any), undefined, "advisor never holds the engineering lock");
+  for (const bad of ["../x.md", "a/b.md", "deck.sh", "deck.pptx", ".env", "x"]) assert.throws(() => checkDeckName(bad), bad);
+  assert.equal(checkDeckName("deck-investor-2026-11.md"), "deck-investor-2026-11.md");
+  const p = saveDeckFile("deck-test.md", "---\nmarp: true\n---\n# Slide");
+  assert.ok(p.startsWith(deckDir()), "saved inside the decks folder");
+  assert.equal(fs.statSync(p).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(deckDir()).mode & 0o777, 0o700);
+  assert.throws(() => saveDeckFile("big.md", "x".repeat(200_001)));
+});

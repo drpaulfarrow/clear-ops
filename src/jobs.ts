@@ -503,8 +503,8 @@ export class JobRunner {
       const fromService = job.kind === "design" ? undefined : this.toolsFor(job);
       const extraTools = fromService ? Object.fromEntries(Object.entries(fromService).filter(([name]) => name !== "design")) : undefined;
       const ownTools = job.kind === "design" ? perJob.mcpServers : undefined;
-      // The cv worker's own save tool, from its spec alone (toolsFor gives a cv job nothing else).
-      const cvTools = job.kind === "cv" ? perJob.mcpServers : undefined;
+      // The cv and advisor workers' own save tools, from their specs alone (toolsFor gives them nothing else).
+      const cvTools = job.kind === "cv" || job.kind === "advisor" ? perJob.mcpServers : undefined;
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
