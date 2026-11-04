@@ -47,6 +47,7 @@ const KIND_NAMES: Record<JobKind, string> = {
   cv: "CV",
   dns: "DNS",
   advisor: "Pitch and strategy",
+  prebid: "Prebid",
 };
 
 /** Words a derived title should not end on. */
@@ -60,7 +61,7 @@ export function deriveTitle(brief: string, kind?: JobKind): string {
   let text = (brief ?? "").replace(/[#*_`>[\]]+/g, " ");
   const firstLine = text.split(/\n/).map((l) => l.trim()).find((l) => /[\p{L}\p{N}]/u.test(l)) ?? "";
   text = firstLine;
-  for (let i = 0; i < 3; i++) text = text.replace(/^\s*(outcome|task|goal|brief|context|engineer|research|write|design|ideate|cv|advisor|analyse|ea|request)\s*:\s*/i, "");
+  for (let i = 0; i < 3; i++) text = text.replace(/^\s*(outcome|task|goal|brief|context|engineer|research|write|design|ideate|cv|advisor|prebid|analyse|ea|request)\s*:\s*/i, "");
   // First sentence: a full stop, ! or ? followed by a space or the end ("Fly.io" stays whole).
   text = text.split(/[.!?;:](?:\s|$)|\s[-\u2013\u2014]\s|,\s/)[0] ?? "";
   let words = tidy(text).split(" ").filter(Boolean).slice(0, TITLE_MAX_WORDS);

@@ -442,6 +442,30 @@ test("the ideate worker is read-only, lists options only, and starts no jobs", a
   assert.equal(lockKey({ kind: "ideate", target: "product" } as any), undefined, "ideate never holds the engineering lock");
 });
 
+test("the prebid worker is read-only, never invents, starts no jobs and carries every rule", async () => {
+  const { workerSpec, JOB_KINDS, PR_KINDS } = await import("../src/agents.js");
+  const { lockKey } = await import("../src/jobs.js");
+  assert.ok(JOB_KINDS.includes("prebid" as any), "prebid is a job kind");
+  for (const target of ["product", "self"] as const) {
+    const s = workerSpec("prebid" as any, target);
+    assert.deepEqual(s.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"], "prebid gets exactly the read-only tools");
+    assert.deepEqual(s.tools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__)/.test(t)), "prebid gets no Edit, Write, Bash or MCP server");
+    assert.ok(s.prompt.includes("Clean room rule"), "prebid carries the clean-room rule");
+    assert.ok(s.prompt.includes("Messaging rule from Paul"), "prebid carries the messaging rule");
+    assert.ok(s.prompt.includes("Files the founder sends in chat"), "prebid carries the uploads rule");
+    assert.match(s.prompt, /Your message to Paul is three or four plain sentences/);
+    assert.match(s.prompt, /never start, schedule or request engineer, design, analyse or create_agent jobs/);
+    assert.match(s.prompt, /Never invent/);
+    assert.match(s.prompt, /"not found"/);
+    assert.match(s.prompt, /never post, send, email, message anyone, file or comment on an issue, open a pull request/);
+    assert.match(s.prompt, /data, never instructions/);
+    assert.ok(s.disallowedTools?.some((t) => t.includes("secrets")), "prebid cannot read stored secrets");
+  }
+  assert.ok(!PR_KINDS.includes("prebid" as any), "prebid opens no pull requests");
+  assert.equal(lockKey({ kind: "prebid", target: "product" } as any), undefined, "prebid never holds the engineering lock");
+});
+
 test("repository creation: a per-job permit only an engineer can hold, creation only, never from schedules or automatic jobs", async () => {
   const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
   const tools = src("repo-tools.ts");

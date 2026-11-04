@@ -358,6 +358,20 @@ test("the chief knows the ideate kind and is told never to start jobs from its i
   assert.ok(spec.prompt.includes("Clean room rule"));
 });
 
+test("the chief knows the prebid kind, its read-only limits and the offered weekly watch", async () => {
+  await post(inbound("447700900123", "chat: what is the prebid kind for"));
+  await waitFor(() => calls.some((c) => c.prompt.startsWith("chat: what is the prebid kind")));
+  const chief = calls.find((c) => c.prompt.startsWith("chat: what is the prebid kind"))!;
+  assert.match(chief.systemPrompt, /prebid \(the Prebid expert/);
+  assert.match(chief.systemPrompt, /not found" rather than inventing/);
+  assert.match(chief.systemPrompt, /start nothing until he picks one in this chat/);
+  assert.match(chief.systemPrompt, /0 8 \* \* 1/);
+  const { workerSpec } = await import("../src/agents.js");
+  const spec = workerSpec("prebid" as any);
+  assert.equal(spec.name, "prebid-expert");
+  assert.ok(spec.prompt.includes("Clean room rule"));
+});
+
 test("the chief knows the cv kind, its hand-offs and that it never applies or sends", async () => {
   await post(inbound("447700900123", "chat: what is the cv kind for"));
   await waitFor(() => calls.some((c) => c.prompt.startsWith("chat: what is the cv kind")));
