@@ -227,7 +227,7 @@ See `.env.example`. The important ones:
 | `OUTPUTS_REPO` | The private repository every finished job's output is copied to as Markdown into folders by type (`designs/`, `research/`, `advice/`, `ideas/`, `engineering/`, `reviews/`, `ops/`, as `<folder>/<date>-<id>-<title>.md`, plus an index README). ea and cv outputs and anything derived from an uploaded file are never copied. Default `drpaulfarrow/clear-outputs`. Nothing is pushed unless GitHub reports it private; the GitHub token needs Contents read and write on it. |
 | `REPOS_DIR`, `REPO_OWNER` | Where those clones live (default `DATA_DIR/repos`) and the account new repositories are created under (default `drpaulfarrow`). |
 | `REPO_DIR`, `SELF_REPO_DIR` | Where the clones live. |
-| `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. Code defaults: chief and engineer `opus`, worker `sonnet`; `fly.toml` sets all three to `sonnet`. |
+| `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. All three default to `haiku` in code and in `fly.toml`. The maintainer uses `ENGINEER_MODEL`. Set one of them to `sonnet` (or `opus`) to put that role back on a stronger model. |
 | `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn. |
 | `DEEP_RESEARCH_BUDGET_USD` | Spend cap per deep research job (default 20); deep research also gets 200 turns instead of 60. |
 | `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job (code default 25; `fly.toml` sets 10). |
@@ -235,7 +235,7 @@ See `.env.example`. The important ones:
 | `DAILY_BUDGET_USD` | Cap on the cost of jobs finished in one Europe/London day. Default 20. Once reached, new jobs wait (one message to you per day), and `/resume` lifts it for the rest of that day; they also start when the next day begins. |
 | `JOB_MAX_RUNTIME_MINUTES` | The longest any job may run before it is stopped the same way. Default 240. |
 | `DESIGN_SITE_URL` | The live site the design worker reviews. Default https://clear-exchange.fly.dev. |
-| `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `opus`) and spend cap per design job (default 10). |
+| `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `haiku`) and spend cap per design job (default 10). |
 | `CHROMIUM_PATH` | Headless browser for screenshots. The Docker image installs `chromium`. |
 | `DESIGN_USER` | The unprivileged account the browser and branch previews run as. Default `designer`, created in the Docker image. The browser will not run as root. |
 | `UPLOAD_MAX_MB` | Largest file accepted in chat, in MB. Default 20. |

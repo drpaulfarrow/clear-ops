@@ -9,6 +9,7 @@ process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.WHATSAPP_VERIFY_TOKEN = "verify-me";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-"));
 
+const { config } = await import("../src/config.js");
 const { buildApp } = await import("../src/index.js");
 const { Store } = await import("../src/store.js");
 const { ConsoleMessenger, chunk, parseInbound, verifySignature } = await import("../src/whatsapp.js");
@@ -96,7 +97,8 @@ test("a plain message goes to the chief and the reply comes back, session is sto
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith("chief says:")));
   assert.equal(store.getSession("447700900123"), "sess-1");
   const last = calls.at(-1)!;
-  assert.equal(last.model, "opus");
+  assert.equal(last.model, config.models.chief);
+  assert.ok(config.models.chief.length > 0);
   assert.deepEqual(last.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*"]);
 });
 
@@ -121,14 +123,13 @@ test("delegation starts a job and the worker reports back", async () => {
   assert.equal(job.title, "SPUR news");
   assert.equal(job.brief, "find out what SPUR announced this week", "the brief is kept in full");
   assert.equal(job.status, "done");
-  assert.ok(store.readOutput(job.id)?.startsWith("worker(sonnet)"));
+  assert.ok(store.readOutput(job.id)?.startsWith(`worker(${config.models.worker})`));
   const workerCall = calls.find((c) => c.systemPrompt.includes("research analyst"))!;
   assert.deepEqual(workerCall.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
   assert.ok(workerCall.systemPrompt.includes("Clean room rule"));
 });
 
 test("the chief can ask for deep research: the job gets the deep depth, more turns and budget, and the deep note", async () => {
-  const { config } = await import("../src/config.js");
   const { DEEP_RESEARCH_NOTE } = await import("../src/agents.js");
   await post(inbound("447700900123", "deep research: who buys licensed content for AI answers"));
   await waitFor(() => messenger.sent.some((m) => /^Finished: Market map · research · [a-f0-9]{6}\./.test(m.text)));
@@ -144,7 +145,6 @@ test("the chief can ask for deep research: the job gets the deep depth, more tur
 
 test("an engineer job targeted at the workforce itself runs in SELF_REPO_DIR with the self-improvement brief", async () => {
   const { JobRunner } = await import("../src/jobs.js");
-  const { config } = await import("../src/config.js");
   const runner = new JobRunner(store, messenger, fakeRunner);
   const job = runner.start("engineer", "Add a /version command", "447700900123", "self");
   await waitFor(() => store.getJob(job.id)?.status === "done");
@@ -247,7 +247,6 @@ test("verifySignature accepts a correct HMAC and rejects a wrong one", () => {
 });
 
 test("the chief starts the agent-creator on the workforce repo, and its pull request goes to the maintainer", async () => {
-  const { config } = await import("../src/config.js");
   await post(inbound("447700900123", "new agent: an agent that drafts publisher outreach"));
   await waitFor(() => messenger.sent.some((m) => m.text.includes("Started: Outreach agent · create_agent · ")));
   const job = store.listJobs(50).find((j) => j.kind === "create_agent" && j.brief.includes("drafts publisher outreach"))!;
