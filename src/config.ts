@@ -73,9 +73,9 @@ export const config = {
     apiVersion: process.env.WHATSAPP_API_VERSION ?? "v21.0",
   },
   models: {
-    chief: process.env.CHIEF_MODEL ?? "opus",
-    worker: process.env.WORKER_MODEL ?? "sonnet",
-    engineer: process.env.ENGINEER_MODEL ?? "opus",
+    chief: process.env.CHIEF_MODEL ?? "haiku",
+    worker: process.env.WORKER_MODEL ?? "haiku",
+    engineer: process.env.ENGINEER_MODEL ?? "haiku",
   },
   /** The design worker: what it looks at, its browser, model and spend cap per job. */
   design: {
@@ -83,7 +83,7 @@ export const config = {
     chromiumPath: process.env.CHROMIUM_PATH || "chromium",
     /** The unprivileged account the browser and branch previews run as (created in the Dockerfile). */
     user: process.env.DESIGN_USER || "designer",
-    model: process.env.DESIGN_MODEL ?? "opus",
+    model: process.env.DESIGN_MODEL ?? "haiku",
     budgetUsd: Number(process.env.DESIGN_BUDGET_USD ?? 10),
   },
   /**
