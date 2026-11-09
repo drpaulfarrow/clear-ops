@@ -9,6 +9,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 | Research, "go deep on..." | researcher | A sourced brief (long and structured if you ask for depth) |
 | Posts, emails, specs in your voice | writer | A draft |
 | "Engineer: build X" | engineer | A pull request with tests; the maintainer reviews and merges it, and review fixes loop on their own (three rounds) |
+| Runs after every engineer job (you do not ask for it) | maintainer | Runs the tests and CI, reads the diff, then merges or requests changes. It never edits code |
 | Questions about earlier outputs or data | analyst | An answer |
 | Inbox, agenda, drafts, holds, meeting prep, outreach | executive assistant | Gmail drafts and calendar holds on your own calendar; it sends an email, invites people or cancels an event with attendees only after you approve that exact item in chat (`send <id>`). Weekday 07:30 brief and 18:00 wrap |
 | "I want an agent that..." | agent-creator | A schedule on an existing worker, or a new worker, as a pull request |
@@ -21,7 +22,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 ## Rules of the road
 
-- Jobs only start when you ask for them. The only automatic jobs are the maintainer's reviews and the fix rounds of pull requests you asked for, plus the rounds of a design loop you started. Suggestions from reviews, research or the strategist come back as options for you to choose.
+- Jobs only start when you ask for them. Besides the schedules you set (including the weekday 07:30 brief and 18:00 wrap once Google is connected), the only jobs that start by themselves are the maintainer's reviews, the fix rounds of pull requests you asked for, and the rounds of a design loop you started. Suggestions from reviews, research or the strategist come back as options for you to choose.
 - One engineering job per repository at a time; others queue, per repository. `/jobs` shows the queue.
 - Say which repository a job is about: the product (the default), `self` (the workforce) or `site` (drpaulfarrow.com, your personal site). Every worker can read all of them.
 - Ask for a new repository in chat ("create a repo called X", add "public" if you want it public). It is created under drpaulfarrow, private by default, with a README, and can be worked on straight away. Workers never delete repositories or change their settings, and never create one unless you asked.
