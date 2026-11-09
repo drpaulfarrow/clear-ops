@@ -59,6 +59,7 @@ The engineer and maintainer may work on this repository (job target "self"). Not
 - `src/messages.ts` how everything talks to Paul: `PAUL_STYLE`, the workers' two-part answer (`REPORT_RULE`: full report, then a short message between `<message_to_paul>` tags), `splitReport`, `plainMessage` for chat and `tidyReply` for the chief's replies.
 - `src/failures.ts` failed runs: telling an API or SDK error from real work, the plain reason and what Paul does, and `FailureNotifier`, which batches failure messages.
 - `src/titles.ts` job titles: validation, derivation from briefs, the titles of system-started jobs, display labels and the migration of untitled state.
+- `src/config.ts` every environment variable, its default and the allowlist check (`isAllowed`). `src/bootstrap.ts` clones or checks out each managed repository at job start. `src/publish-outputs.ts` mirrors finished outputs to the private outputs repository (see the section above).
 - `src/london.ts` Europe/London date helpers.
 - `src/ea.ts` the executive assistant's tools (mail search and threads, drafts, agenda, free slots, holds), the untrusted-content fence, the recipient guard and the default brief schedules.
 - `src/whatsapp.ts` Cloud API client, inbound parsing, signature check, chunking.

@@ -14,10 +14,14 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 | "I want an agent that..." | agent-creator | A schedule on an existing worker, or a new worker, as a pull request |
 | Brand, site critique, page specs | design director | Images and specs for an engineer; no production code |
 | "What should we do next?" | creative strategist | A ranked list of options. It only lists; nothing starts until you pick one |
+| "Build the investor deck", "pressure-test our pricing" | pitch and strategy advisor | Slide-ready Markdown decks, one-pagers and candid consulting notes, from the saved research. Never invents traction or numbers |
+| Prebid questions, module review, release news | Prebid expert | Sourced answers with dates and versions; read-only, never posts or files anything |
+| "Build my CV", "tailor it for this role" | CV writer | Markdown CVs, bios and a facts file kept in a private folder, from facts you supply; asks you questions rather than inventing |
+| GoDaddy records ("what does clearexchange.ai have?", "add a CNAME") | DNS agent | Reads your zones; prepares a change that shows the exact before and after. Nothing is written until you reply `dns apply <id>` |
 
 ## Rules of the road
 
-- Jobs only start when you ask for them. Suggestions from reviews, research or the strategist come back as options for you to choose.
+- Jobs only start when you ask for them. The only automatic jobs are the maintainer's reviews and the fix rounds of pull requests you asked for, plus the rounds of a design loop you started. Suggestions from reviews, research or the strategist come back as options for you to choose.
 - One engineering job per repository at a time; others queue, per repository. `/jobs` shows the queue.
 - Say which repository a job is about: the product (the default), `self` (the workforce) or `site` (drpaulfarrow.com, your personal site). Every worker can read all of them.
 - Ask for a new repository in chat ("create a repo called X", add "public" if you want it public). It is created under drpaulfarrow, private by default, with a README, and can be worked on straight away. Workers never delete repositories or change their settings, and never create one unless you asked.
@@ -26,7 +30,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 ## Commands
 
-`/jobs` `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `done <id>`, `snooze <id> <when>`, `YES <id>`.
+`/jobs` `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>` and `dns cancel <id>`. Each approval command is for one item, you send it yourself, and it expires.
 
 ## Things only you do
 
