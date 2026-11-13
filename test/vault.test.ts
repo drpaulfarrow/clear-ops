@@ -16,6 +16,7 @@ const { BrowseSession } = await import("../src/browse.js");
 const { config } = await import("../src/config.js");
 
 const PASSWORD = "correct horse battery staple 42!";
+const PAUL = "tg:99887766";
 
 test("TOTP matches the RFC 6238 test vector", () => {
   // RFC 6238 appendix B, SHA-1 secret "12345678901234567890" in base32, T = 59 s: 94287082, six digits 287082.
@@ -271,6 +272,145 @@ test(
       const after = await session.signIn();
       assert.match(after, /Signed in[\s\S]*Welcome back/);
       assert.match(got.join(" "), new RegExp(`otp=${totp(secret)}(&|$)`), "the service generated the code from the vault key");
+    } finally {
+      await session.close();
+      server.close();
+    }
+  },
+);
+
+test(
+  "a code page whose only way on is its own button is finished from the same relay",
+  { skip: (!chrome && "no Chromium here") || (noDesigner && "running as root with no designer user") },
+  async () => {
+    config.design.chromiumPath = chrome!;
+    const got: string[] = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        res.setHeader("content-type", "text/html");
+        if (req.method === "POST" && req.url === "/login") {
+          // A page that builds its own form in JavaScript: the code field is in no form, so Enter in it
+          // does nothing and the page's own "Continue" button is the only way on. The button is not
+          // consequential, so the service may press it; a consequential one never would be.
+          return res.end(
+            `<title>Verify</title><p>Enter the verification code we sent you.</p><input name="otp" placeholder="Code"><button id="go">Continue</button>` +
+              `<script>document.getElementById("go").addEventListener("click",function(){var f=document.createElement("form");f.method="post";f.action="/verify";` +
+              `var i=document.createElement("input");i.name="otp";i.value=document.querySelector('[name=otp]').value;f.appendChild(i);document.body.appendChild(f);f.submit();});</script>`,
+          );
+        }
+        if (req.method === "POST" && req.url === "/verify") {
+          got.push(body);
+          res.setHeader("set-cookie", "sid=abc; Path=/");
+          return res.end(`<title>Account</title><p>Welcome back</p>`);
+        }
+        res.end(`<title>Login</title><form action="/login" method="post"><input name="email" type="email" placeholder="Email"><input name="password" type="password" placeholder="Password"><button>Sign in</button></form>`);
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as any).port;
+    const { startEgressProxy } = await import("../src/design.js");
+    const entry = { domain: "127.0.0.1", username: "paul@example.com", password: PASSWORD, addedAt: "2026-11-13" };
+    const asks: number[] = [];
+    const session = new BrowseSession({
+      proxy: () => startEgressProxy({ allow: `127.0.0.1:${port}` }),
+      policy: { mayAct: (h) => h === "127.0.0.1" },
+      vault: { entryFor: (h) => (h === "127.0.0.1" ? entry : undefined), markUsed: () => undefined, savedCookies: () => [], saveSession: () => undefined },
+      otp: { code: async () => (asks.push(Date.now()), "445566") },
+      insecureSignInForTests: true,
+    });
+    try {
+      await session.open(`http://127.0.0.1:${port}/`);
+      const after = await session.signIn();
+      assert.match(after, /Signed in[\s\S]*Welcome back/, "the page's own button carried the sign-in on");
+      assert.equal(asks.length, 1, "one code was asked for, not a second one after the click");
+      assert.match(got.join(" "), /otp=445566/, "the button posted the relay's code");
+      assert.ok(!after.includes("445566"), "the code never reaches the worker's view");
+    } finally {
+      await session.close();
+      server.close();
+    }
+  },
+);
+
+test(
+  "a purchase job whose sign-in needs a code waits for the relay, then the order still goes through the purchase gate",
+  { skip: (!chrome && "no Chromium here") || (noDesigner && "running as root with no designer user") },
+  async () => {
+    config.design.chromiumPath = chrome!;
+    const { Store } = await import("../src/store.js");
+    const { PurchaseGate } = await import("../src/purchase.js");
+    const { OtpRelay } = await import("../src/otp.js");
+    const posted: string[] = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        res.setHeader("content-type", "text/html");
+        if (req.method === "POST" && req.url === "/login") {
+          return res.end(`<title>Verify</title><p>Enter the verification code we sent you. This code expires in 5 minutes.</p><form action="/verify" method="post"><input name="otp" placeholder="Code"><button>Verify</button></form>`);
+        }
+        if (req.method === "POST" && req.url === "/verify") {
+          res.setHeader("set-cookie", "sid=abc; Path=/");
+          return res.end(`<title>Account</title><p>Welcome back</p><a href="/basket">Basket</a>`);
+        }
+        if (req.method === "POST" && req.url === "/order") {
+          posted.push("/order");
+          return res.end(`<title>Thank you</title><p>Order placed, thanks. Order Total: £23.98</p>`);
+        }
+        if (req.url === "/basket") {
+          return res.end(`<title>Basket</title><p>Nespresso compatible pods x 2\nOrder Total: £23.98</p><form action="/order" method="post"><button>Place your order</button></form>`);
+        }
+        res.end(`<title>Login</title><form action="/login" method="post"><input name="email" type="email" placeholder="Email"><input name="password" type="password" placeholder="Password"><button>Sign in</button></form>`);
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as any).port;
+    const base = `http://127.0.0.1:${port}`;
+    const { startEgressProxy } = await import("../src/design.js");
+    // The service's own relay, exactly as a purchase job gets it: the code he is sent in chat is the code
+    // the browser types, and the worker and its job output never see it.
+    const asks: string[] = [];
+    const relay = new OtpRelay({ messenger: { send: async (_to: string, t: string) => void asks.push(t) }, ttlMs: 5_000, minGapMs: 0 });
+    const entry = { domain: "127.0.0.1", username: "paul@example.com", password: PASSWORD, addedAt: "2026-11-13" };
+    const session = new BrowseSession({
+      proxy: () => startEgressProxy({ allow: `127.0.0.1:${port}` }),
+      policy: { mayAct: (h) => h === "127.0.0.1" },
+      vault: { entryFor: (h) => (h === "127.0.0.1" ? entry : undefined), markUsed: () => undefined, savedCookies: () => [], saveSession: () => undefined },
+      otp: relay.forJob({ id: "job1", replyTo: PAUL }),
+      insecureSignInForTests: true,
+    });
+    const waitFor = async (what: () => string | undefined) => {
+      for (let i = 0; i < 400 && !what(); i++) await new Promise((r) => setTimeout(r, 5));
+      return what();
+    };
+    try {
+      await session.open(`${base}/`);
+      // The sign-in holds the page and waits for the relay rather than dead-ending on the code step.
+      const signingIn = session.signIn();
+      const ask = await waitFor(() => asks[0]);
+      assert.match(ask ?? "", /127\.0\.0\.1 asked for a code to sign in\. Reply: code [a-f0-9]{6}/);
+      const codeId = ask!.match(/code ([a-f0-9]{6})/)![1];
+      assert.ok(relay.pending().length === 1, "the sign-in is waiting for the code");
+      assert.equal(relay.redeem({ id: codeId, code: "112233", by: PAUL }).accepted, true);
+      const signed = await signingIn;
+      assert.match(signed, /Welcome back/, "the sign-in carries on once the code is in");
+      assert.ok(!signed.includes("112233") && !asks.join(" ").includes("112233"), "the code is nowhere the worker or chat can see");
+      // On to the basket and the checkout review, as the job would: the purchase flow is unchanged.
+      const basket = await session.open(`${base}/basket`);
+      const place = Number(basket.match(/\[(\d+)\] button: Place your order/)![1]);
+      const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-otp-buy-")));
+      const sent: string[] = [];
+      const gate = new PurchaseGate(store, { summary: () => undefined, forApprovedPurchase: () => undefined }, { send: async (_to: string, t: string) => void sent.push(t) }, { ttlMs: 3_000 });
+      const waiting = gate.prepareAndWait(session, place, { jobId: "job1", replyTo: PAUL });
+      const approval = await waitFor(() => sent[0]);
+      const buyId = approval!.match(/\(([a-f0-9]{6}),/)?.[1];
+      assert.ok(buyId, `expected the approval ask: ${approval}`);
+      assert.deepEqual(posted, [], "nothing is pressed before Paul decides the order");
+      gate.decide(buyId!, "approve", PAUL);
+      assert.match(await waiting, /Order placed/, "the approved order goes through");
+      assert.deepEqual(posted, ["/order"], "the button is pressed once, after his own approval");
     } finally {
       await session.close();
       server.close();

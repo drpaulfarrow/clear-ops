@@ -90,6 +90,18 @@ test("a mailbox that finds nothing returns nothing rather than throwing", async 
   assert.equal(await reader.codeFrom({ domain: "amazon.co.uk", since: Date.now() - 10_000, timeoutMs: 1 }), undefined);
 });
 
+test("a code is never taken from another site's mail: a look-alike sender is refused", async () => {
+  const since = 1_000_000_000_000;
+  const api = fakeGmail([
+    { id: "a", from: "no-reply@amazon.co.uk.evil.test", body: "Your sign-in code is 999999", at: since + 1000 },
+    { id: "b", from: "no-reply@notamazon.co.uk", body: "Your sign-in code is 888888", at: since + 1000 },
+  ]);
+  // The clock advances with the polling, as the real one does, so the wait is bounded.
+  let now = since;
+  const reader = new GmailCodeReader(api as never, { now: () => now, sleep: async (ms) => void (now += ms) });
+  assert.equal(await reader.codeFrom({ domain: "amazon.co.uk", since, timeoutMs: 10 }), undefined, "only that site's own domain counts");
+});
+
 /* ---------- the relay: email first ---------- */
 
 test("a code the site sent by email is used without bothering Paul", async () => {
@@ -219,4 +231,27 @@ test("the site, and how long the page's own code lasts, are read from what Paul 
   assert.equal(siteLabel("github.com"), "Github");
   assert.equal(codeTtlMs("This code expires in 5 minutes."), 5 * 60_000);
   assert.equal(codeTtlMs("Enter the code we sent you"), undefined);
+});
+
+test("a request holds the site, the job and an id: nowhere is there a code to find", async () => {
+  const { sent, gate, job } = relay();
+  const waiting = job("job1").code({ domain: "amazon.co.uk" });
+  const ask = await sentOne(sent);
+  const id = ask.match(/code ([a-f0-9]{6})/)![1];
+  const req = gate.pending()[0]!;
+  assert.deepEqual(Object.keys(req).sort(), ["createdAt", "expiresAt", "host", "id", "jobId"], "nothing but the request is kept");
+  assert.equal(req.host, "amazon.co.uk");
+  assert.match(gate.preview(req), /Reply: code [a-f0-9]{6} <the code>/, "the listing asks again with a placeholder, never a code");
+  gate.redeem({ id, code: "246810", by: PAUL });
+  assert.equal(await waiting, "246810");
+  assert.ok(!JSON.stringify(gate.pending()).includes("246810") && !log().includes("246810"), "the code is discarded after use");
+});
+
+test("the page's own shorter lifetime is honoured, so a code is not waited on past its life", async () => {
+  const { sent, gate, job } = relay({ ttlMs: 10_000 });
+  const started = Date.now();
+  assert.equal(await job().code({ domain: "amazon.co.uk", ttlMs: 60 }), undefined);
+  assert.ok(Date.now() - started < 5_000, "the wait ended with the page's own 60ms, not the relay's ten seconds");
+  assert.match(sent[1] ?? "", /No code came for Amazon UK/);
+  assert.equal(gate.pending().length, 0);
 });

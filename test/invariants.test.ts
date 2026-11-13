@@ -781,3 +781,70 @@ test("a purchase is placed ONLY through the purchase gate, after Paul's own deci
   const record = store.slice(store.indexOf("export interface PurchaseAction"), store.indexOf("export type SignupStatus"));
   assert.doesNotMatch(record, /\bnumber\b|\bcvc\b/, "the purchase record never holds the card");
 });
+
+test("a one-time code is handled ONLY by the service relay: never a model, never logged, never stored", () => {
+  const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
+  const relay = src("otp.ts");
+  const mail = src("mail-code.ts");
+  // The relay is the one place a code is settled, and it can only send Paul a message and read a mailbox:
+  // it can never pay, send, post, sign up, write or grant anything, so a code can never stand for one of those.
+  assert.match(relay, /redeem\(input: \{ id\?: string; code: string; by: string \}\): CodeDecision/, "only otp.ts settles a code");
+  const relayImports = [...relay.matchAll(/^import .*$/gm)].map((m) => m[0]).join("\n");
+  for (const forbidden of ["purchase", "outbound", "signup", "dns", "google", "jobs", "agents", "design", "browse"]) {
+    assert.doesNotMatch(relayImports, new RegExp(forbidden), `otp.ts must not reach ${forbidden}: a code is only a sign-in`);
+  }
+  assert.doesNotMatch(relay, /JobPermit|\bpermits\b|\bmint|Grant/, "a code never grants a permit or an approval");
+  // Nothing but the relay writes its log, and the code is never one of the fields written.
+  for (const f of files) {
+    if (f !== "otp.ts") assert.doesNotMatch(src(f), /logOtp\(/, `${f} must not write the one-time code log`);
+    if (f !== "orchestrator.ts") assert.doesNotMatch(src(f), /\.redeem\(/, `${f} must not settle a code`);
+  }
+  for (const call of relay.matchAll(/logOtp\(\{([^}]*)\}/g)) {
+    assert.doesNotMatch(call[1]!, /\bcode\b|\botp\b|passcode/i, `no code is ever in the log: ${call[1]}`);
+  }
+  // The mailbox reader only ever reads, through the one door it is given, and only that site's own mail.
+  assert.match(mail, /private readonly api: Pick<GoogleApi, "request">/, "the mailbox reader has reads and nothing else");
+  const gmailCalls = [...mail.matchAll(/"gmail", "([A-Z]+)"/g)].map((m) => m[1]);
+  assert.ok(gmailCalls.length > 0 && gmailCalls.every((m) => m === "GET"), "the mailbox reader never writes to the mailbox");
+  assert.match(mail, /hostMatches\(from, domain\) \|\| hostMatches\(domain, from\)/, "only that site's own mail is read");
+  // The whole reply is handled before any model: an allowlisted sender, after the allowlist, before the chief.
+  const orch = src("orchestrator.ts");
+  const allowAt = orch.indexOf("if (!isAllowed(sender))");
+  const codeAt = orch.indexOf("const codeCmd = parseCodeCommand(trimmed);");
+  const chiefAt = orch.indexOf("return this.askChief(");
+  assert.ok(allowAt > -1 && codeAt > allowAt && chiefAt > codeAt, "code <id> <the code> is matched after the allowlist and before any model");
+  assert.match(orch, /this\.otp\.redeem\(\{[\s\S]{0,160}by: sender \}\)/, "only the allowlisted sender's own message settles a code");
+  assert.equal([...orch.matchAll(/deleteInbound/g)].length, 1, "only a code message is ever tidied away");
+  assert.match(orch, /decided\.accepted && messageId\)[\s\S]{0,80}deleteInbound/, "his message goes only once the code was accepted");
+  // One job, one conversation, one site: the relay is bound to the job, and a scheduled run is refused it.
+  const jobs = src("jobs.ts");
+  assert.match(jobs, /this\.otp\?\.forJob\(\{ id, replyTo: job\.replyTo, scheduled: isScheduledRun\(job\.brief\) \}\)/, "the relay is bound to the job and its conversation");
+  assert.match(jobs, /await web\?\.close\(\)\.catch\(\(\) => undefined\);\s*this\.otp\?\.dropJob\(id\);/, "a job's waiting codes go when the job ends");
+  assert.match(relay, /if \(input\.scheduled\) \{[\s\S]{0,240}throw new OtpError/, "a scheduled run is refused a code outright");
+  assert.match(relay, /const never = neverReason\(host\);[\s\S]{0,200}throw new OtpError/, "a site the workforce may never act on is refused here too");
+  // The browser holds the page and types the code the relay got; an agent can never type one.
+  const browse = src("browse.ts");
+  assert.match(browse, /export const CODE_FIELD = /);
+  assert.match(browse, /if \(CODE_FIELD\.test\(codeish\)\) throw new Error\("one-time codes are entered by sign_in, never typed by a worker"\)/, "an agent can never type a one-time code");
+  assert.match(browse, /if \(entry\.totp\) \{[\s\S]{0,160}totp\(entry\.totp\)/, "a stored two-factor key still signs in, unchanged");
+  assert.match(browse, /const code = await this\.codeForPage\(entry\.domain/, "the browser asks the service relay for the code");
+  assert.match(browse, /if \(!onSite\(\)\) throw new Error\(`stopped: the page left \$\{entry\.domain\} while a one-time code was being fetched/, "a code is never typed into a page that has left the login's own site");
+  // The page's own delivery choice and its own button are taken only on the login's own site, and never a
+  // consequential one (pay, send, post, delete), so a code can only ever complete that sign-in.
+  const preferEmail = browse.slice(browse.indexOf("private async preferEmailCode"), browse.indexOf("private async pressCodeButton"));
+  assert.match(preferEmail, /hostMatches\(new URL\(page\.url\(\)\)\.hostname, domain\)/, "the page's delivery choice is taken only on the login's own site");
+  assert.match(preferEmail, /!CONSEQUENTIAL\.test\(words\)/, "a consequential button is never pressed there");
+  const pressButton = browse.slice(browse.indexOf("private async pressCodeButton"), browse.indexOf("private async clearCodeFields"));
+  assert.match(pressButton, /hostMatches\(new URL\(page\.url\(\)\)\.hostname, domain\)/, "the code page's own button is pressed only on the login's own site");
+  assert.match(pressButton, /CONSEQUENTIAL\.test\(words\)[\s\S]{0,140}continue;/, "only a verifying or continuing button is pressed, never a consequential one");
+  assert.match(browse, /await this\.clearCodeFields\(otpSel\);/, "the code is wiped out of the page after it is entered");
+  const browseToolLine = browse.split("\n").find((l) => l.includes("export const BROWSE_TOOLS")) ?? "";
+  assert.doesNotMatch(browseToolLine, /otp|code/i, "a worker has no tool for a code");
+  // Every browsing job is told, in its prompt, that the service handles codes and a code approves nothing else.
+  assert.match(src("web-tools.ts"), /OTP_NOTE/, "every browsing job carries the one-time code rule");
+  const note = relay.slice(relay.indexOf("export const OTP_NOTE"));
+  assert.match(note, /never ask Paul for it and never type one/, "the browsing worker never handles a code");
+  assert.match(note, /only ever completes the sign-in/, "and a code approves nothing else");
+  // The store is left out of it entirely: the code has no record to live in.
+  assert.doesNotMatch(src("store.ts"), /otp|one-?time code|verification code/i, "the store holds no code");
+});
