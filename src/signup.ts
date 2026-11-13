@@ -17,7 +17,10 @@
  *  - never a change to an existing account: this code has no route to a password, recovery address, 2FA
  *    setting or contact detail, and no route to deleting an account;
  *  - never post, comment or publish as Paul: the submit control has to be a sign-up control, and
- *    anything consequential (pay, send, post, publish, delete, close account) is refused here as well.
+ *    anything consequential (pay, send, post, publish, delete, close account) is refused here as well;
+ *  - never tick a consent box, accept terms or agree to anything Paul was not shown, and never call a
+ *    submit a success without a positive confirmation from the page: an unconfirmed submit stores
+ *    nothing and tells him so.
  *
  * The page text is untrusted content: it is read by the service, never by a model.
  */
@@ -53,6 +56,24 @@ const PHONE_AFTER = /\b(verify your (phone|mobile)|phone verification|enter your
 const IDENTITY_AFTER = /\b(verify your identity|identity verification|passport|national id|government id|age verification|verify your age|date of birth)\b/i;
 const EMAIL_AFTER = /\b(verify your email|confirm your email|check your (email|inbox)|activation link|confirm your account|click the link (in|we sent))\b/i;
 
+/**
+ * What a page says when the account really was made. Only a positive signal counts: a submit is never
+ * called a success just because the page did not complain. "unclear" is what is left, and it stores
+ * nothing and tells Paul it could not be confirmed.
+ */
+const SUCCESS_AFTER = /\b(welcome|account (has been |is )?(created|ready)|created your account|your account is ready|you'?re all set|you are all set|signed up|thanks for (signing up|joining|registering)|registration (complete|successful)|success(ful|fully)?|verify your email|confirm your email|check your (email|inbox)|activation link|we'?ve sent you|we have sent you)\b/i;
+
+/**
+ * What a page says when the submit did not work: the form came back with a complaint. Deliberately
+ * narrow, so a success page is not mistaken for a refusal ("no credit card required" must not read as
+ * "required"). A complaint beats a success word, because "welcome back" appears on the sign-in page a
+ * refused sign-up is sent to.
+ */
+const FAILURE_AFTER = /\b(already (registered|exists|taken|in use|signed up)|is (already )?taken|already have an account|invalid|not valid|incorrect|unrecognised|unrecognized|must (be|contain|include|have)|at least \d+|do(es)? not match|cannot be (blank|empty)|(is|are) required|try again|something went wrong|went wrong|error|failed|too (short|long))\b/i;
+
+/** A value that may tick a checkbox or pick a radio button. Anything else is refused, never guessed. */
+const AFFIRMATIVE = /^(yes|y|true|on|1|agree|agreed|i agree|tick|ticked|check|checked|accept|accepted)$/i;
+
 export type SignupStep = "payment" | "phone" | "identity" | "email-verification" | "unclear";
 
 /* ---------- What a worker may ask for ---------- */
@@ -67,6 +88,10 @@ export interface SignupPlan {
   url: string;
   /** The address Paul named for sign-ups (SIGNUP_EMAILS); the service checks it is on the list. */
   email: string;
+  /**
+   * The name the account is known by. The service resolves this once in prepare (src/signup-gate.ts) and
+   * records it, so what Paul is shown, what the page is given and what the vault stores are one value.
+   */
   username?: string;
   /** Everything else the form asks for: a name, a company, a short bio. Labels as the page shows them. */
   fields?: SignupField[];
@@ -116,6 +141,40 @@ export function requireUrl(raw: string, domain: string): string {
   if (!hostMatches(u.hostname, domain)) throw new SignupError(`Refused: ${u.hostname} is not ${domain}, so this is not that site's own sign-up page.`);
   if (PAYMENT_URL.test(u.pathname)) throw new SignupError(`Refused: ${u.pathname} is a payment or plan-changing page, not a sign-up page. Paying is never done here: Paul does that himself.`);
   return u.toString();
+}
+
+/** The labels that mean "the name this account is known by" on a form. */
+const USERNAME_LABEL = /user ?name|handle|screen name|display name|login/i;
+
+/**
+ * The username a plan will use, resolved once, here, before Paul is shown anything. The preview, the
+ * hash, the value written into the page's username field and the value stored in the vault are all this
+ * one string: the worker's own `username`, else a field it labelled as a username, else the address's
+ * local part. Resolving it anywhere else is how the three of them drift apart.
+ */
+export function resolveUsername(plan: SignupPlan, email: string): string {
+  const named = String(plan.username ?? "").trim();
+  if (named) return named.slice(0, 200);
+  const fromField = (Array.isArray(plan.fields) ? plan.fields : []).find((f) => USERNAME_LABEL.test(String(f?.label ?? "")) && String(f?.value ?? "").trim());
+  if (fromField) return String(fromField.value).trim().slice(0, 200);
+  return email.split("@")[0].slice(0, 200);
+}
+
+/**
+ * The one shape of a plan, trimmed and in a fixed order. It is hashed in this shape when Paul is shown
+ * it and rebuilt in this shape when he approves, so the hash covers exactly what he saw: a plan that
+ * changed in between (or that was rebuilt in a different order) is never submitted.
+ */
+export function canonicalPlan(plan: SignupPlan): SignupPlan {
+  const username = String(plan.username ?? "").trim();
+  return {
+    url: String(plan.url ?? ""),
+    email: String(plan.email ?? "").trim().toLowerCase(),
+    ...(username ? { username: username.slice(0, 200) } : {}),
+    fields: (Array.isArray(plan.fields) ? plan.fields : []).map((f) => ({ label: String(f?.label ?? "").trim().slice(0, 120), value: String(f?.value ?? "").slice(0, 400) })),
+    ...(plan.termsUrl ? { termsUrl: plan.termsUrl } : {}),
+    ...(plan.why ? { why: String(plan.why).slice(0, 300) } : {}),
+  };
 }
 
 /** The domain a plan is for, and the site rules that decide whether it may be prepared at all. */
@@ -264,6 +323,19 @@ export function outcomeStep(text: string): SignupStep | undefined {
   return undefined;
 }
 
+/**
+ * What the page the form came back on means. `"unclear"` is a real answer: a submit that produced no
+ * positive confirmation is not a created account, so nothing is stored and Paul is told so. Reading a
+ * captcha wall, a 500, "already registered" or a rejected form as success is what put a password in the
+ * vault for an account that never existed.
+ */
+export function confirmOutcome(after: { text: string }, step: SignupStep | undefined): SignupStep | undefined {
+  if (step === "payment" || step === "phone" || step === "identity") return step;
+  if (FAILURE_AFTER.test(after.text)) return "unclear";
+  if (step === "email-verification" || SUCCESS_AFTER.test(after.text)) return undefined;
+  return "unclear";
+}
+
 /** The one line of the page for Paul, whitespace collapsed and short. Never anything secret. */
 export function firstLines(text: string, max = 200): string {
   const t = text.replace(/\s+/g, " ").trim();
@@ -294,21 +366,32 @@ export function classify(page: SignupPage, plan: SignupPlan, password: string): 
   const passwordFields = page.fields.filter((f) => /password/i.test(f.type) || /password/i.test(words(f)));
   for (const f of page.fields) {
     if (used.has(f.index)) continue;
-    if (/hidden|submit|button|checkbox|radio|file/i.test(f.type)) used.add(f.index);
+    if (/hidden|submit|button|reset|file|image/i.test(f.type)) used.add(f.index);
   }
   const named = new Map((plan.fields ?? []).map((f) => [f.label.trim().toLowerCase(), f.value]));
   const missing: string[] = [];
+  // A checkbox or a radio button, such as "I agree to the Terms of Service", is never ticked unless the
+  // plan Paul was shown names it with a plain yes: accepting terms is his decision, not this code's.
+  const consent: string[] = [];
   for (const f of page.fields) {
     if (used.has(f.index) || !f.required) continue;
     const label = String(f.label ?? "").trim().toLowerCase();
     if (named.has(label)) continue;
+    if (/^(checkbox|radio)$/i.test(f.type)) {
+      consent.push(f.label || f.name || `field ${f.index}`);
+      continue;
+    }
     if (/e-?mail/i.test(words(f)) || /user ?name|login|handle/i.test(words(f)) || /password/i.test(f.type) || /name|company|organis|city|country|job|role|website|url/i.test(words(f))) continue;
     missing.push(f.label || f.name || `field ${f.index}`);
+  }
+  if (consent.length) {
+    throw new SignupError(`the page asks Paul to tick "${consent.join('", "')}", which the plan does not fill in. Whether he accepts those terms is his own decision: prepare it again with that field named and the value "yes", so he sees exactly what he is agreeing to, or he does this sign-up himself. Nothing was filled in.`);
   }
   if (missing.length) {
     throw new SignupError(`the page asks for ${missing.join(", ")}, which the plan does not fill in. Prepare it again with those fields, or Paul does this sign-up himself.`);
   }
   take(pick(/e-?mail/i) ?? page.fields.find((f) => /email/i.test(f.type)), email);
+  // One value for the username, resolved and shown to Paul in prepare: never recomputed here.
   take(pick(/user ?name|handle|login|screen name|display name/i), plan.username?.trim() || email.split("@")[0]);
   const pw = passwordFields[0];
   if (pw) take(pw, password);
@@ -316,7 +399,15 @@ export function classify(page: SignupPage, plan: SignupPlan, password: string): 
   for (const f of page.fields) {
     if (used.has(f.index)) continue;
     const value = named.get(f.label.trim().toLowerCase());
-    if (value !== undefined) take(f, value);
+    if (value === undefined) continue;
+    if (/^(checkbox|radio)$/i.test(f.type)) {
+      if (!AFFIRMATIVE.test(value.trim())) {
+        throw new SignupError(`the plan says "${f.label}: ${value}", which is not something this may tick: a checkbox or a radio button is only ever ticked when the plan says yes, and Paul saw that. Nothing was filled in.`);
+      }
+      take(f, value.trim());
+      continue;
+    }
+    take(f, value);
   }
   const unfilled = page.fields.filter((f) => f.required && !used.has(f.index));
   if (unfilled.length) throw new SignupError(`the page needs ${unfilled.map((f) => f.label || f.name).join(", ")}, and the plan has nothing for those.`);
@@ -355,8 +446,8 @@ export interface SignupSubmitter {
 /**
  * The production submitter: one browser session of its own, opened only for the site the plan named,
  * closed as soon as it is done. Fills the form itself (the password never reaches a model), checks
- * again on arrival and again on the answer, and stops the moment the site asks to be paid or asks for
- * a phone or an identity.
+ * again on arrival and again on the answer, stops the moment the site asks to be paid or asks for a
+ * phone or an identity, and reports an account only when the page positively confirms one.
  */
 export class BrowserSignupSubmitter implements SignupSubmitter {
   constructor(private readonly open: (domain: string) => SignupSession) {}
@@ -379,9 +470,14 @@ export class BrowserSignupSubmitter implements SignupSubmitter {
       if (asked) return { ok: false, url: page.url, step: asked, message: `${domain} asks for ${asked === "payment" ? "payment details" : asked === "phone" ? "a phone number" : "identity details"} before an account can be made, so nothing was filled in` };
       const fills = classify(page, plan, password);
       const after = await session.fillForm(fills.fills, fills.submit);
-      const step = outcomeStep(after.text);
+      // Only a positive signal is an account. Everything else, a captcha wall or a 500 included, is
+      // "unclear": nothing is stored and Paul is told it could not be confirmed. A confirmed sign-up
+      // keeps the site's own "check your email" as the step, so Paul is told about it.
+      const said = outcomeStep(after.text);
+      const verdict = confirmOutcome(after, said);
+      const step = verdict === undefined ? said : verdict;
       const message = firstLines(after.text) || after.title || "(the site answered with an empty page)";
-      return { ok: !(step === "payment" || step === "phone" || step === "identity"), url: after.url, message, ...(step ? { step } : {}), usedPassword: fills.passwordField !== undefined };
+      return { ok: verdict === undefined, url: after.url, message, ...(step ? { step } : {}), usedPassword: fills.passwordField !== undefined };
     } finally {
       await session.close().catch(() => undefined);
     }
