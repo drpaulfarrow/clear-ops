@@ -177,3 +177,103 @@ test(
     }
   },
 );
+
+test(
+  "a sign-in that asks for a one-time code is finished by the service relay, and the worker never sees the code",
+  { skip: (!chrome && "no Chromium here") || (noDesigner && "running as root with no designer user") },
+  async () => {
+    config.design.chromiumPath = chrome!;
+    const got: Array<{ path: string; body: string }> = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        res.setHeader("content-type", "text/html");
+        if (req.method === "POST" && req.url === "/login") {
+          got.push({ path: req.url, body });
+          // The site now wants the code it just sent: no password field on this page.
+          return res.end(`<title>Verify</title><p>Enter the verification code we sent you.</p><form action="/verify" method="post"><input name="otp" placeholder="Code"><button>Verify</button></form>`);
+        }
+        if (req.method === "POST" && req.url === "/verify") {
+          got.push({ path: req.url, body });
+          res.setHeader("set-cookie", "sid=abc; Path=/");
+          return res.end(`<title>Account</title><p>Welcome back</p>`);
+        }
+        res.end(`<title>Login</title><form action="/login" method="post"><input name="email" type="email" placeholder="Email"><input name="password" type="password" placeholder="Password"><button>Sign in</button></form>`);
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as any).port;
+    const { startEgressProxy } = await import("../src/design.js");
+    // No two-factor key in the vault: the relay is what supplies the code.
+    const entry = { domain: "127.0.0.1", username: "paul@example.com", password: PASSWORD, addedAt: "2026-11-13" };
+    const asks: Array<{ domain: string; emailOffered?: boolean }> = [];
+    const saved: string[] = [];
+    const session = new BrowseSession({
+      proxy: () => startEgressProxy({ allow: `127.0.0.1:${port}` }),
+      policy: { mayAct: (h) => h === "127.0.0.1" },
+      vault: { entryFor: (h) => (h === "127.0.0.1" ? entry : undefined), markUsed: () => undefined, savedCookies: () => [], saveSession: (d) => void saved.push(d) },
+      otp: { code: async (i) => (asks.push({ domain: i.domain, ...(i.emailOffered !== undefined ? { emailOffered: i.emailOffered } : {}) }), "112233") },
+      insecureSignInForTests: true,
+    });
+    try {
+      await session.open(`http://127.0.0.1:${port}/`);
+      const after = await session.signIn();
+      assert.match(after, /Signed in[\s\S]*Welcome back/, "the session is held and finishes the sign-in");
+      assert.equal(asks.length, 1, "the relay was asked exactly once");
+      assert.equal(asks[0]!.domain, "127.0.0.1");
+      assert.match(got.find((g) => g.path === "/verify")!.body, /otp=112233/, "the service typed the relay's code");
+      assert.ok(!after.includes("112233"), "the code never reaches the worker's view");
+      assert.deepEqual(saved, ["127.0.0.1"], "the signed-in session is saved for later jobs");
+    } finally {
+      await session.close();
+      server.close();
+    }
+  },
+);
+
+test(
+  "a stored two-factor key still signs in from the vault with no relay, unchanged",
+  { skip: (!chrome && "no Chromium here") || (noDesigner && "running as root with no designer user") },
+  async () => {
+    config.design.chromiumPath = chrome!;
+    const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const got: string[] = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        res.setHeader("content-type", "text/html");
+        if (req.method === "POST" && req.url === "/login") {
+          return res.end(`<p>Enter the code we sent.</p><form action="/verify" method="post"><input name="otp" placeholder="Code"><button>Verify</button></form>`);
+        }
+        if (req.method === "POST" && req.url === "/verify") {
+          got.push(body);
+          res.setHeader("set-cookie", "sid=abc; Path=/");
+          return res.end(`<title>Account</title><p>Welcome back</p>`);
+        }
+        res.end(`<title>Login</title><form action="/login" method="post"><input name="email" type="email" placeholder="Email"><input name="password" type="password" placeholder="Password"><button>Sign in</button></form>`);
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as any).port;
+    const { startEgressProxy } = await import("../src/design.js");
+    const entry = { domain: "127.0.0.1", username: "paul@example.com", password: PASSWORD, totp: secret, addedAt: "2026-11-13" };
+    const session = new BrowseSession({
+      proxy: () => startEgressProxy({ allow: `127.0.0.1:${port}` }),
+      policy: { mayAct: (h) => h === "127.0.0.1" },
+      vault: { entryFor: (h) => (h === "127.0.0.1" ? entry : undefined), markUsed: () => undefined, savedCookies: () => [], saveSession: () => undefined },
+      // No relay at all: the vault's own key must be enough, exactly as before.
+      insecureSignInForTests: true,
+    });
+    try {
+      await session.open(`http://127.0.0.1:${port}/`);
+      const after = await session.signIn();
+      assert.match(after, /Signed in[\s\S]*Welcome back/);
+      assert.match(got.join(" "), new RegExp(`otp=${totp(secret)}(&|$)`), "the service generated the code from the vault key");
+    } finally {
+      await session.close();
+      server.close();
+    }
+  },
+);

@@ -98,6 +98,8 @@ export function codeTtlMs(pageText: string): number | undefined {
 /** The site's name as Paul knows it: "amazon.co.uk" is "Amazon UK", "en.wikipedia.org" is "Wikipedia". */
 export function siteLabel(host: string): string {
   const parts = host.replace(/^www\./i, "").split(".");
+  // A leading two-letter language label ("en.wikipedia.org") is the language, not the site's name.
+  if (parts.length > 2 && /^[a-z]{2}$/i.test(parts[0] ?? "")) parts.shift();
   const name = parts[0] ?? host;
   const cc = ["co", "com", "org", "net", "ac", "gov"].includes(parts[1] ?? "") ? parts[2] : parts[1];
   const tail = cc && cc.length === 2 && cc !== name ? ` ${cc.toUpperCase()}` : "";
@@ -176,7 +178,9 @@ export class OtpRelay {
       logOtp({ at: this.now().toISOString(), event: "refused", host, jobId: input.jobId, reason: "no chat" });
       return undefined;
     }
-    const ttlMs = Math.max(60_000, Math.min(input.ttlMs ?? this.ttlMs, this.ttlMs));
+    // The page's own lifetime wins when it is shorter, so a code that expires sooner is not waited on
+    // past its life; the relay's ten minutes is the cap otherwise. No floor: the caller's ttl is honoured.
+    const ttlMs = Math.max(0, Math.min(input.ttlMs ?? this.ttlMs, this.ttlMs));
     const since = input.since ?? this.now().getTime();
 
     // Rate limits: a site cannot be asked over and over, and neither can Paul.
@@ -224,22 +228,29 @@ export class OtpRelay {
     };
     this.jobAsks.set(input.jobId ?? input.replyTo, [...(this.jobAsks.get(input.jobId ?? input.replyTo) ?? []), input.since]);
     this.hostAsks.set(input.host, input.since);
-    // The wait is registered before the ask goes out, so a reply that arrives at once always lands.
+    // The wait is registered before the ask goes out, so a reply that arrives at once always lands. The
+    // timer is kept and cleared the moment the wait settles (a reply, a drop or its own expiry), so a
+    // settled request never leaves a stray timer behind.
+    let timer: NodeJS.Timeout | undefined;
     const wait = new Promise<string | undefined>((resolve) => {
       this.waiting.set(id, { req, resolve });
-      setTimeout(() => resolve(undefined), input.ttlMs).unref();
+      timer = setTimeout(() => resolve(undefined), input.ttlMs);
     });
+    const finish = () => {
+      this.waiting.delete(id);
+      if (timer) clearTimeout(timer);
+    };
     const sent = await this.opts.messenger
       ?.send(input.replyTo, this.askText(req, input.ttlMs))
       .then(() => true)
       .catch(() => false);
     if (sent === false) {
       // Nothing asked: no wait to keep, and the caller reports that the code could not be got.
-      this.waiting.delete(id);
+      finish();
       logOtp({ at: this.now().toISOString(), event: "refused", host: req.host, id, jobId: req.jobId, reason: "could not ask Paul" });
       return undefined;
     }
-    const code = await wait.finally(() => this.waiting.delete(id));
+    const code = await wait.finally(finish);
     if (code) {
       await this.opts.messenger?.send(input.replyTo, `Got it. Putting that into ${siteLabel(req.host)} now; nothing else is done with it.`).catch(() => undefined);
       return code;

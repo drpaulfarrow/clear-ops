@@ -531,8 +531,7 @@ export class BrowseSession {
           // Paul's own chat, and types it in here; the session is never thrown away and no model, log,
           // report or job output ever sees the code (src/otp.ts). Nothing arriving means the sign-in
           // stops at the code step rather than guessing.
-          const text = await page.evaluate(OTP_TEXT_JS).catch(() => "");
-          const code = await this.codeForPage(entry.domain, text);
+          const code = await this.codeForPage(entry.domain, await this.pageText());
           if (!code) throw new Error(`${entry.domain} asked for a one-time code and I could not get one, so nothing was signed in`);
           // The page must still be the login's own site: a redirect that happened while the code was
           // being fetched means the code is not entered anywhere.
