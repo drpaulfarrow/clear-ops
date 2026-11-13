@@ -44,7 +44,7 @@ image = (
         "mkdir -p /opt/moshi",
         f"cd /opt/moshi && wget -q https://raw.githubusercontent.com/kyutai-labs/moshi/{MOSHI_PY_COMMIT}/rust/moshi-server/pyproject.toml",
         f"cd /opt/moshi && wget -q https://raw.githubusercontent.com/kyutai-labs/moshi/{MOSHI_PY_COMMIT}/rust/moshi-server/uv.lock",
-        "cd /opt/moshi && uv sync --locked",
+        "cd /opt/moshi && uv sync --frozen",
         "cd /opt/moshi && export LD_LIBRARY_PATH=$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var(\"LIBDIR\"))')"
         " && export PATH=/opt/moshi/.venv/bin:$PATH && export CXXFLAGS='-include cstdint'"
         f" && cargo install --features cuda moshi-server@{MOSHI_SERVER_VERSION}",
@@ -52,7 +52,7 @@ image = (
     # Unmute's backend in its own environment, and the moshi-server configs it ships.
     .run_commands(
         f"git clone https://github.com/kyutai-labs/unmute.git /opt/unmute && cd /opt/unmute && git checkout {UNMUTE_COMMIT}",
-        "cd /opt/unmute && uv sync --locked --no-dev",
+        "cd /opt/unmute && uv sync --frozen --no-dev",
     )
     # The gateway runs in the image's own Python.
     .pip_install("fastapi==0.162.5", "websockets==17.4", "sphn==0.2.1", "numpy==2.5.3", "httpx==0.28.1")
@@ -113,7 +113,7 @@ class Voice:
         backend.pop("KYUTAI_RECORDINGS_DIR", None)
         self.procs.append(
             subprocess.Popen(
-                ["uv", "run", "--no-dev", "uvicorn", "unmute.main_websocket:app", "--host", "127.0.0.1", "--port", "8000", "--ws-per-message-deflate=false"],
+                ["uv", "run", "--frozen", "--no-dev", "uvicorn", "unmute.main_websocket:app", "--host", "127.0.0.1", "--port", "8000", "--ws-per-message-deflate=false"],
                 cwd="/opt/unmute",
                 env=backend,
             )

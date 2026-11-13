@@ -134,6 +134,7 @@ jobs:
       - name: Deploy the voice app
         if: steps.check.outputs.ready == 'true'
         run: |
+          set -o pipefail
           modal deploy voice/voice.py 2>&1 | tee /tmp/modal.log
           url=$(grep -oE 'https://[a-z0-9-]+--clearops-voice\.modal\.run' /tmp/modal.log | head -1 || true)
           echo "Gateway: ${url:-not printed}"
