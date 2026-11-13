@@ -1,6 +1,8 @@
 import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config } from "./config.js";
+import { termsWarning } from "./site-policy.js";
+import { vault, VAULT_ADD_PATH, VaultError } from "./vault.js";
 import { modelLine } from "./llm.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
@@ -54,6 +56,23 @@ export const GOOGLE_CALLBACK_PATH = "/google/callback";
 const page = (title: string, text: string) =>
   `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">${title}</h1><p>${text}</p></body>`;
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** Pages that carry secrets are never cached, framed or allowed to load anything from elsewhere. */
+function noStore(res: express.Response): void {
+  res.set({
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+  });
+}
+
+/** The add-a-login form. The token rides in a hidden field so it never reaches a referrer or a log line. */
+function vaultForm(token: string, domain?: string): string {
+  const field = (label: string, name: string, type: string, extra = "") =>
+    `<label style="display:block;margin:.8rem 0 .2rem">${label}</label><input name="${name}" type="${type}" ${extra} style="width:100%;padding:.5rem;font-size:1rem">`;
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Add a login</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">Add a login for ClearOps</h1><p>Stored encrypted. Agents use it to sign in to this site only; they never see the password.</p><form method="post" action="${VAULT_ADD_PATH}" autocomplete="off"><input type="hidden" name="t" value="${escapeHtml(token)}">${field("Site (domain)", "domain", "text", `required placeholder="crunchbase.com" value="${escapeHtml(domain ?? "")}"`)}${field("Username or email", "username", "text", "required")}${field("Password", "password", "password", 'required autocomplete="new-password"')}${field("Two-factor setup key (optional)", "totp", "text", 'placeholder="the text code shown next to the QR code"')}<p style="font-size:.85rem;color:#555">Storing the two-factor key lets agents sign in without you, but the vault then holds both factors for this site.</p>${field("Login page address (optional)", "loginUrl", "url", 'placeholder="https://example.com/login"')}<button style="margin-top:1rem;padding:.6rem 1rem;font-size:1rem">Save</button></form></body>`;
+}
 
 /** Builds the Express app. Dependencies are injectable so tests can run it without the network. */
 export function buildApp(deps: AppDeps) {
@@ -161,6 +180,31 @@ export function buildApp(deps: AppDeps) {
     } catch (err) {
       const msg = err instanceof GoogleError ? err.message : "Something went wrong talking to Google. Ask for a new link in chat.";
       res.status(400).type("html").send(page("Not connected", escapeHtml(msg)));
+    }
+  });
+
+  // Paul's private page for adding a website login to the vault. Opened from a one-time link the chief
+  // sent in chat; nothing typed here is echoed back or logged.
+  app.get(VAULT_ADD_PATH, (req, res) => {
+    noStore(res);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    const p = token ? vault.peek(token) : undefined;
+    if (!p) return res.status(400).type("html").send(page("Link expired", "This link has expired or was already used. Ask ClearOps for a new one."));
+    res.type("html").send(vaultForm(token, p.domain));
+  });
+  app.post(VAULT_ADD_PATH, express.urlencoded({ extended: false, limit: "8kb" }), async (req, res) => {
+    noStore(res);
+    const b = (req.body ?? {}) as Record<string, string>;
+    try {
+      const r = vault.add(String(b.t ?? ""), { domain: String(b.domain ?? ""), username: String(b.username ?? ""), password: String(b.password ?? ""), totp: String(b.totp ?? ""), loginUrl: String(b.loginUrl ?? "") });
+      const warn = termsWarning(r.summary.domain);
+      res.type("html").send(page("Saved", `The login for ${escapeHtml(r.summary.domain)} is in the vault. Agents can now sign in there and act on the site, except paying, sending, posting and deleting. You can close this tab.`));
+      await deps.messenger
+        .send(r.replyTo, `Vault: saved the login for ${r.summary.domain} (${r.summary.username}${r.summary.twoFactor ? ", with two-factor" : ""}). Agents can now sign in and act there; paying, sending, posting and deleting still need you.${warn ? ` Note: ${warn}.` : ""} Say remove the ${r.summary.domain} login to delete it.`)
+        .catch(() => undefined);
+    } catch (err) {
+      const msg = err instanceof VaultError ? err.message : "That could not be saved. Check the site and the login page address, and ask ClearOps for a new link if this one has expired.";
+      res.status(400).type("html").send(page("Not saved", escapeHtml(msg)));
     }
   });
 

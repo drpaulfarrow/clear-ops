@@ -1,3 +1,5 @@
+import { SitePolicy } from "./site-policy.js";
+import { safeVaultDomains, vault } from "./vault.js";
 import { webToolsFor, type WebTools } from "./web-tools.js";
 import { runRoute } from "./llm.js";
 import { execFile } from "node:child_process";
@@ -509,7 +511,7 @@ export class JobRunner {
       // The cv and advisor workers' own save tools, from their specs alone (toolsFor gives them nothing else).
       const cvTools = job.kind === "cv" || job.kind === "advisor" ? perJob.mcpServers : undefined;
       // The service's own search and read-only browser, for research-type kinds only (src/web-tools.ts).
-      web = webToolsFor(job.kind);
+      web = webToolsFor(job.kind, { browse: { policy: new SitePolicy(this.store, safeVaultDomains), vault } });
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
