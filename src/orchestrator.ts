@@ -23,6 +23,8 @@ import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
 import { creditUrl, keyName, modelNote, providerName } from "./llm.js";
 import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
+import { normaliseDomain, SitePolicy } from "./site-policy.js";
+import { safeVaultDomains, vault } from "./vault.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
@@ -462,6 +464,51 @@ export class Orchestrator {
     return [...dns.map((a) => this.dns!.preview(a)), ...out.map((a) => this.outbound!.preview(a)), ...p.map((a) => `${a.id} ${a.kind}: ${a.description}\nReply YES ${a.id} or NO ${a.id}`)].join("\n\n");
   }
 
+  /* ---------- The browser's vault and site rules (src/vault.ts, src/site-policy.ts) ---------- */
+
+  private vaultAddLink(from: string, domain?: string): string {
+    try {
+      const url = vault.addLink(from, domain);
+      return `Send Paul this private link (single use, 15 minutes). He types the login there, never in chat:\n${url}`;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  private vaultList(): string {
+    try {
+      const rows = vault.list();
+      if (!rows.length) return "The vault is empty.";
+      return rows.map((r) => `${r.domain}: ${r.username}${r.twoFactor ? ", two-factor key stored" : ""}, added ${r.addedAt.slice(0, 10)}${r.lastUsedAt ? `, last used ${r.lastUsedAt.slice(0, 10)}` : ""}`).join("\n");
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  private async vaultRemove(from: string, domain: string): Promise<string> {
+    try {
+      const d = normaliseDomain(domain);
+      const gone = vault.remove(d);
+      const text = gone ? `Removed the login and saved session for ${d} from the vault.` : `There was no login for ${d} in the vault.`;
+      // Said by the service, not only relayed by the model, so a change Paul did not ask for is visible.
+      if (gone) await this.messenger.send(from, text).catch(() => undefined);
+      return text;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  private async siteRule(from: string, which: "allow" | "disallow", domain: string): Promise<string> {
+    try {
+      const policy = new SitePolicy(this.store, safeVaultDomains);
+      const text = which === "allow" ? policy.allow(domain) : policy.disallow(domain);
+      await this.messenger.send(from, `Browser rule: ${text}`).catch(() => undefined);
+      return `${text} (Paul has been told directly; no need to repeat it.)`;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
   /** The chief's tools. Each call closes over the requester and conversation so results route back correctly. */
   private opsServer(sender: string, from: string, messageId?: string) {
     const store = this.store;
@@ -731,6 +778,44 @@ export class Orchestrator {
           "Store Paul's Google Calendar appointment-schedule booking link, which the assistant offers in scheduling drafts. Only a link Paul gave in chat or a standing instruction.",
           { url: z.string() },
           async ({ url }) => ({ content: [{ type: "text", text: this.setBookingLink(url) }] }),
+        ),
+        tool(
+          "vault_add_link",
+          "A one-time private link (15 minutes) where Paul types a website login into the workforce's vault: site, username, password and optionally the two-factor setup key. Never ask Paul to send a password in chat; send him this link instead. With a login stored, browsing agents sign in to that site and act there freely, except paying, sending, posting and deleting.",
+          { domain: z.string().optional().describe("The site, if Paul named one, e.g. crunchbase.com") },
+          async ({ domain }) => ({ content: [{ type: "text", text: this.vaultAddLink(from, domain) }] }),
+        ),
+        tool(
+          "vault_list",
+          "The sites with a login in the vault: domain, username, whether a two-factor key is stored, when added and last used. Never passwords.",
+          {},
+          async () => ({ content: [{ type: "text", text: this.vaultList() }] }),
+          { annotations: { readOnlyHint: true } },
+        ),
+        tool(
+          "vault_remove",
+          "Delete a site's login and saved session from the vault. Only when Paul asks.",
+          { domain: z.string() },
+          async ({ domain }) => ({ content: [{ type: "text", text: await this.vaultRemove(from, domain) }] }),
+        ),
+        tool(
+          "site_allow",
+          "Let browsing agents act on a site (fill forms, run searches, use it signed in if its login is in the vault), when Paul asks. Paying, sending, posting and deleting stay refused everywhere, and money, email, Microsoft, password-manager, government-identity and infrastructure sites cannot be allowed.",
+          { domain: z.string() },
+          async ({ domain }) => ({ content: [{ type: "text", text: await this.siteRule(from, "allow", domain) }] }),
+        ),
+        tool(
+          "site_disallow",
+          "Make a site read-only for browsing agents again, when Paul asks.",
+          { domain: z.string() },
+          async ({ domain }) => ({ content: [{ type: "text", text: await this.siteRule(from, "disallow", domain) }] }),
+        ),
+        tool(
+          "site_rules",
+          "Which sites browsing agents may act on: the count, Paul's additions and the defaults he removed.",
+          {},
+          async () => ({ content: [{ type: "text", text: new SitePolicy(this.store, safeVaultDomains).describe() }] }),
+          { annotations: { readOnlyHint: true } },
         ),
         tool(
           "remember",

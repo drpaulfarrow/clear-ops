@@ -39,7 +39,9 @@ export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: B
     session = new BrowseSession(deps.browse);
     servers[BROWSE_SERVER] = browseServer(session);
     allowed.push(...BROWSE_TOOLS);
-    notes.push("Browser: open, read, click, type and back drive a real read-only browser. Use it when WebFetch returns an empty or blocked page or you need to navigate a site. It cannot sign in or submit anything that changes a site.");
+    notes.push(
+      "Browser: open, read, click, type, back and sign_in drive a real browser. Use it when WebFetch returns an empty or blocked page, or to use a site. You may fill forms and run searches on sites Paul lets agents act on, and sign_in signs in with his stored login (you never see the password). Paying, sending, posting, deleting and the like are refused everywhere: when a task needs one, stop and say exactly what you would do so Paul can decide.",
+    );
   }
   return {
     servers,
