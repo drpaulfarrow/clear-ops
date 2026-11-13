@@ -112,6 +112,19 @@ export function llmEnv(): Record<string, string> {
   };
 }
 
+/** Gateway settings removed from a run pinned to Anthropic, whatever set them. */
+export const DIRECT_STRIPPED = [
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+  "OPENROUTER_API_KEY",
+];
+
 /** Variables removed from the worker environment in OpenRouter mode (llmEnv supplies what is needed). */
 export const LLM_STRIPPED = ["OPENROUTER_API_KEY", "OPENROUTER_PRICES"];
 
@@ -185,4 +198,18 @@ export function runRoute(job: { kind: string; title?: string }, specModel: strin
 /** A follow-up job: the drafted nudge for one follow-up, started by `draft nudge <id>`. */
 export function isFollowUpJob(job: { kind: string; title?: string }): boolean {
   return job.kind === "ea" && /^Draft nudge \S+$/.test(job.title ?? "");
+}
+
+/**
+ * What the chief is told about the models, so it can answer "which model are you using?" from the
+ * truth rather than from a stale reading of the code.
+ */
+export function modelNote(): string {
+  if (provider() !== "openrouter") {
+    const gw = process.env.ANTHROPIC_BASE_URL;
+    return `\n\nModels: Anthropic API${gw ? ` through ANTHROPIC_BASE_URL ${gw}` : ""}; the chief, workers, engineers and designer use the aliases ${config.models.chief}, ${config.models.worker}, ${config.models.engineer} and ${config.design.model}; the executive assistant uses ${config.models.ea}.`;
+  }
+  const m = openrouterModels();
+  const alias = (a: string) => (isAlias(a) ? `${a} (${m[a.toLowerCase() as ModelAlias]})` : a);
+  return `\n\nModels: OpenRouter (src/llm.ts, OPENROUTER_API_KEY set). The aliases in the config are mapped to OpenRouter models by the code: chief ${alias(config.models.chief)}, workers ${alias(config.models.worker)}, engineers and maintainer ${alias(config.models.engineer)}, designer ${alias(config.design.model)}. The executive assistant runs on ${config.models.ea} on Anthropic's API directly, except "Draft nudge" follow-up jobs, which use the worker model. Claude Code's own background calls are mapped too. Nothing here needs changing to "use OpenRouter"; it already does.`;
 }

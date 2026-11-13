@@ -127,3 +127,19 @@ test("an Anthropic-pinned run never falls back to OpenRouter: no Anthropic key m
   if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
   useOpenRouter(false);
 });
+
+test("the chief is told the truth about its models, so it stops guessing from the code", () => {
+  useOpenRouter(true);
+  const note = llm.modelNote();
+  assert.match(note, /Models: OpenRouter/);
+  assert.match(note, new RegExp(`chief haiku \\(${llm.DEFAULT_OPENROUTER_MODELS.haiku.replace(/[./]/g, "\\$&")}\\)`));
+  assert.match(note, /executive assistant runs on sonnet on Anthropic's API directly/);
+  useOpenRouter(false);
+  assert.match(llm.modelNote(), /^\n\nModels: Anthropic API/);
+});
+
+test("a run pinned to Anthropic drops every gateway variable, however it got into the environment", () => {
+  for (const k of ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "OPENROUTER_API_KEY"]) {
+    assert.ok(llm.DIRECT_STRIPPED.includes(k), k);
+  }
+});
