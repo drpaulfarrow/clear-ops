@@ -112,24 +112,22 @@ export const config = {
     language: process.env.TRANSCRIBE_LANGUAGE ?? "",
   },
   /**
-   * Live voice in a Discord voice channel (src/voice.ts). On when VOICE_KEY and VOICE_GATEWAY_URL are
-   * set (the deploy workflow sets both once the Modal app is deployed) and VOICE is not "off".
-   * VOICE_KEY is shared with the Modal gateway and is what Unmute sends when it calls the voice brain.
+   * Live voice with Cleo in a Discord voice channel (src/voice.ts, src/voice-bridge.ts). Everything goes
+   * through OpenRouter: speech to text (the transcription settings above), the voice brain, and text to
+   * speech. Nothing to warm up. On when OPENROUTER_API_KEY is set and VOICE is not "off".
    */
   voice: {
     enabled: (process.env.VOICE ?? "on").toLowerCase() !== "off",
-    key: process.env.VOICE_KEY ?? "",
-    gatewayUrl: (process.env.VOICE_GATEWAY_URL ?? "").replace(/\/+$/, ""),
-    /** The model the voice brain talks with, an alias or an OpenRouter id. Fast matters more than clever: ClearOps does the work. */
+    /** The model Cleo talks with, an alias or an OpenRouter id. Fast matters more than clever: ClearOps does the work. */
     model: process.env.VOICE_MODEL || "haiku",
-    /**
-     * Kyutai TTS voice, a path in kyutai/tts-voices. Cleo is VCTK speaker p225, a woman from southern England.
-     * Only voices the image loads can be used (voice/voice.py: the default and vctk/p22x).
-     */
-    voiceName: process.env.VOICE_NAME || "vctk/p225_023.wav",
-    /** Leave the channel after this many minutes with nobody speaking, so the GPU can stop. */
+    /** OpenRouter text-to-speech model and voice. Default: Mistral Voxtral, "Jane", British English. */
+    ttsModel: process.env.VOICE_TTS_MODEL || "mistralai/voxtral-mini-tts-3-0",
+    ttsVoice: process.env.VOICE_TTS_VOICE || "gb_jane_neutral",
+    /** How long Paul must be quiet before his turn is over. */
+    silenceMs: positive(process.env.VOICE_SILENCE_MS, 700),
+    /** Leave the channel after this many minutes with nobody speaking. */
     idleMinutes: positive(process.env.VOICE_IDLE_MINUTES, 10),
-    /** How long the voice brain waits for ClearOps to answer before saying it will post in chat. */
+    /** How long Cleo waits for ClearOps to answer before saying it is on it. */
     answerWaitSeconds: positive(process.env.VOICE_ANSWER_WAIT_SECONDS, 12),
   },
   /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */

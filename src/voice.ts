@@ -1,15 +1,16 @@
-import { timingSafeEqual } from "node:crypto";
-import type express from "express";
+import { spawn } from "node:child_process";
 import { config } from "./config.js";
 import { resolveModel } from "./llm.js";
+import { transcriptionAvailable } from "./transcribe.js";
 import type { Messenger } from "./whatsapp.js";
 
 /**
- * Live voice, the Fly half. Paul talks in a Discord voice channel; src/voice-bridge.ts carries the
- * audio to the voice GPU on Modal (voice/), where Kyutai's Unmute turns speech into text, decides
- * when he has finished, and calls back here, to the voice brain, for what to say. The brain is a
- * fast OpenRouter model with one tool, ask_clearops, which hands the request to the chief exactly as
- * if Paul had typed it in the voice channel's chat, waits a little for the chief's reply and says it.
+ * Live voice with Cleo. Paul talks in a Discord voice channel; src/voice-bridge.ts records each turn
+ * (until he pauses), and everything else goes through OpenRouter, so there is nothing to warm up:
+ * speech to text (src/transcribe.ts, the same call voice notes use), the voice brain below, and text
+ * to speech (`speak`). The brain is a fast model with one tool, ask_clearops, which hands the request
+ * to the chief exactly as if Paul had typed it in the voice channel's chat, waits a little for the
+ * chief's reply and says it.
  *
  * What a spoken request can never do: approve anything. It reaches the chief prefixed "Voice request
  * from Paul", so no approval command (send, dns apply, yes <id>, buy) can match it, and the brain
@@ -24,15 +25,7 @@ export function voiceRequestText(request: string): string {
 }
 
 export function voiceEnabled(): boolean {
-  return config.voice.enabled && !!config.voice.key && !!config.voice.gatewayUrl && !!config.openrouter.apiKey;
-}
-
-/** Bearer check in constant time; no key configured lets nobody in. */
-export function voiceAuthorised(header: string | undefined, key = config.voice.key): boolean {
-  if (!key || !header?.startsWith("Bearer ")) return false;
-  const a = Buffer.from(header.slice(7));
-  const b = Buffer.from(key);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return config.voice.enabled && !!config.openrouter.apiKey && transcriptionAvailable();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -90,7 +83,11 @@ export class VoiceTap {
     const list = this.news.get(to) ?? [];
     list.push({ text, at: this.now() });
     this.news.set(to, list.slice(-5));
+    this.onNews?.(to);
   }
+
+  /** Called when news arrives for a watched address, so the voice bridge can pass it on at once. */
+  onNews?: (address: string) => void;
 
   /** The next message to `address`, or undefined after `ms`. Register before sending the request. */
   next(address: string, ms: number): Promise<string | undefined> {
@@ -122,7 +119,7 @@ export class VoiceTap {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The voice brain: an OpenAI-compatible chat endpoint that Unmute calls.
+// The voice brain: what Cleo says.
 
 export interface VoiceSession {
   /** Where chat replies go and the conversation key: the voice channel's own text chat. */
@@ -146,7 +143,7 @@ What you can do: you speak for the ClearOps workforce, which has research, writi
 
 Never say something was done unless ask_clearops said so. You cannot approve anything: sending an email or invitation, a DNS change or a purchase is approved only by Paul typing the command in the Discord chat, so if he asks you to approve one, tell him that.
 
-A user message of "..." means he has gone quiet. Then say nothing at all, unless there is news from ClearOps below, in which case pass it on in a sentence.`;
+A user message of "..." means news has arrived from ClearOps while he was quiet: pass it on in a sentence or two.`;
 
 const ASK_TOOL = {
   type: "function",
@@ -168,12 +165,6 @@ export interface VoiceBrainDeps {
   fetch?: typeof fetch;
   /** Seconds to wait for the chief before saying the answer will come in chat. */
   answerWaitMs?: number;
-}
-
-/** One OpenAI-style SSE chunk of text. */
-function sseChunk(id: string, content: string | null, finish: string | null = null): string {
-  const delta = content === null ? {} : { content };
-  return `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "clearops-voice", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
 }
 
 /** Strips what a voice must not say aloud: links, markdown, ids in code marks. */
@@ -206,40 +197,9 @@ export class VoiceBrain {
     return this.session;
   }
 
-  /** Mounts GET /voice/v1/models and POST /voice/v1/chat/completions. */
-  mount(app: express.Express): void {
-    const guard = (req: express.Request, res: express.Response): boolean => {
-      if (voiceAuthorised(req.get("authorization"))) return true;
-      res.status(401).json({ error: { message: "unauthorised" } });
-      return false;
-    };
-    app.get("/voice/v1/models", (req, res) => {
-      if (!guard(req, res)) return;
-      res.json({ object: "list", data: [{ id: "clearops-voice", object: "model", owned_by: "clear-ops" }] });
-    });
-    app.post("/voice/v1/chat/completions", async (req, res) => {
-      if (!guard(req, res)) return;
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-store");
-      res.flushHeaders?.();
-      const id = `chatcmpl-${Date.now().toString(36)}`;
-      const write = (t: string) => res.write(sseChunk(id, t));
-      const aborted = new AbortController();
-      res.on("close", () => aborted.abort());
-      try {
-        await this.reply((req.body?.messages ?? []) as ChatMessage[], write, aborted.signal);
-      } catch (err) {
-        if (!aborted.signal.aborted) {
-          console.warn(`voice brain: ${err instanceof Error ? err.message : err}`);
-          write("Sorry, I lost my train of thought there. Could you say that again?");
-        }
-      }
-      if (!aborted.signal.aborted) {
-        res.write(sseChunk(id, null, "stop"));
-        res.write("data: [DONE]\n\n");
-        res.end();
-      }
-    });
+  /** Called when ClearOps sends news to the voice channel's chat while no answer is waiting for it. */
+  onNews(cb: (address: string) => void): void {
+    this.deps.tap.onNews = cb;
   }
 
   /** Writes the spoken answer to `messages`, a piece at a time. */
@@ -248,19 +208,16 @@ export class VoiceBrain {
     const history = incoming.filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim()).slice(-20);
     const last = history[history.length - 1];
     const news = session ? this.deps.tap.takeNews(session.address) : [];
-    const quiet = !last || last.role !== "user" || last.content?.replace(/\.+/g, "").trim() === "" || (history.length === 1 && last.content?.trim() === "Hello.");
-    if (quiet && !news.length) {
-      // Unmute's opening turn has no real words from Paul; greet. A silence marker with no news: say nothing.
-      if (!last || history.every((m) => m.role !== "assistant")) write("Hi Paul, it's Cleo. I'm listening.");
-      return;
-    }
+    const quiet = !last || last.role !== "user" || last.content?.replace(/\.+/g, "").trim() === "";
+    // A pause ("...") with no news: say nothing, and make no model call.
+    if (quiet && !news.length) return;
     const system = news.length ? `${VOICE_SYSTEM}\n\nNews from ClearOps since you last spoke (pass it on briefly):\n${news.map((n) => `- ${speakable(n)}`).join("\n")}` : VOICE_SYSTEM;
     const messages: ChatMessage[] = [{ role: "system", content: system }, ...history];
 
     const first = await this.complete(messages, true, write, signal);
     if (!first.toolCall) return;
-    // Say something now: Unmute speaks a word only once the next whitespace arrives, so end with a space,
-    // and never leave Paul in silence while ClearOps works.
+    // Say something now, ending the sentence with a space so it is spoken straight away, and never leave
+    // Paul in silence while ClearOps works.
     write(first.text.trim() ? " " : "One moment. ");
     let request = "";
     try {
@@ -333,7 +290,7 @@ export class VoiceBrain {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Audio: Discord speaks 48 kHz stereo, the voice GPU 24 kHz mono, both 16-bit little-endian PCM.
+// Audio. Discord speaks 48 kHz stereo 16-bit PCM; speech to text gets a 24 kHz mono WAV.
 
 /** 48 kHz stereo to 24 kHz mono: average the channels, then each pair of samples (a gentle low-pass). */
 export function discordToVoice(pcm: Buffer): Buffer {
@@ -347,56 +304,85 @@ export function discordToVoice(pcm: Buffer): Buffer {
   return out;
 }
 
-/** 24 kHz mono to 48 kHz stereo, by linear interpolation. `prev` carries the last sample across chunks. */
-export function voiceToDiscord(pcm: Buffer, prev = { last: 0 }): Buffer {
-  const n = Math.floor(pcm.length / 2);
-  const out = Buffer.alloc(n * 8);
-  let last = prev.last;
-  for (let i = 0; i < n; i++) {
-    const s = pcm.readInt16LE(i * 2);
-    const mid = Math.round((last + s) / 2);
-    out.writeInt16LE(mid, i * 8);
-    out.writeInt16LE(mid, i * 8 + 2);
-    out.writeInt16LE(s, i * 8 + 4);
-    out.writeInt16LE(s, i * 8 + 6);
-    last = s;
-  }
-  prev.last = last;
-  return out;
+/** A WAV file around 16-bit mono PCM. */
+export function wav(pcm: Buffer, rate = 24000): Buffer {
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0);
+  h.writeUInt32LE(36 + pcm.length, 4);
+  h.write("WAVE", 8);
+  h.write("fmt ", 12);
+  h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20);
+  h.writeUInt16LE(1, 22);
+  h.writeUInt32LE(rate, 24);
+  h.writeUInt32LE(rate * 2, 28);
+  h.writeUInt16LE(2, 32);
+  h.writeUInt16LE(16, 34);
+  h.write("data", 36);
+  h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
 }
 
-/** 20 ms of 24 kHz mono 16-bit audio. */
-export const VOICE_FRAME_BYTES = 960;
+/** Root-mean-square level of 16-bit PCM, 0 to 1: a turn quieter than a whisper is not sent anywhere. */
+export function level(pcm: Buffer): number {
+  const n = Math.floor(pcm.length / 2);
+  if (!n) return 0;
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const v = pcm.readInt16LE(i * 2) / 32768;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / n);
+}
 
 /**
- * Turns Discord's bursty audio (packets only while Paul speaks) into a steady 20 ms stream, with
- * silence in the gaps: the speech model needs the silence to know he has stopped.
+ * Splits streamed text into sentences, so the first sentence is spoken while the rest is still being
+ * written. A sentence ends at . ! or ? followed by a space; whatever is left is flushed at the end.
  */
-export class InputPump {
-  private queue: Buffer[] = [];
-  private queued = 0;
-  /** At most half a second waits; older audio is dropped so a hiccup does not add lasting delay. */
-  static readonly MAX_BACKLOG = VOICE_FRAME_BYTES * 25;
+export class SentenceSplitter {
+  private buffer = "";
+  constructor(private readonly emit: (sentence: string) => void) {}
 
-  push(pcm: Buffer): void {
-    this.queue.push(pcm);
-    this.queued += pcm.length;
-    while (this.queued > InputPump.MAX_BACKLOG && this.queue.length) this.queued -= this.queue.shift()!.length;
-  }
-
-  /** The next 20 ms frame: queued audio, padded with silence. */
-  frame(): Buffer {
-    const out = Buffer.alloc(VOICE_FRAME_BYTES);
-    let filled = 0;
-    while (filled < VOICE_FRAME_BYTES && this.queue.length) {
-      const head = this.queue[0];
-      const take = Math.min(head.length, VOICE_FRAME_BYTES - filled);
-      head.copy(out, filled, 0, take);
-      filled += take;
-      if (take === head.length) this.queue.shift();
-      else this.queue[0] = head.subarray(take);
-      this.queued -= take;
+  push(text: string): void {
+    this.buffer += text;
+    let m: RegExpMatchArray | null;
+    while ((m = this.buffer.match(/^([\s\S]*?[.!?])\s+/))) {
+      const sentence = m[1].trim();
+      this.buffer = this.buffer.slice(m[0].length);
+      if (sentence) this.emit(sentence);
     }
-    return out;
   }
+
+  flush(): void {
+    const rest = this.buffer.trim();
+    this.buffer = "";
+    if (rest) this.emit(rest);
+  }
+}
+
+/** Text to speech through OpenRouter: MP3 bytes for one sentence. */
+export async function speak(text: string, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<Buffer> {
+  const res = await fetchImpl("https://openrouter.ai/api/v1/audio/speech", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.openrouter.apiKey}`, "Content-Type": "application/json", "X-Title": "ClearOps voice" },
+    body: JSON.stringify({ model: config.voice.ttsModel, voice: config.voice.ttsVoice, input: text, response_format: "mp3" }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`OpenRouter speech answered ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/** MP3 to Discord's 48 kHz stereo 16-bit PCM, with ffmpeg. */
+export function decodeToDiscord(mp3: Buffer, ffmpeg = "ffmpeg"): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const p = spawn(ffmpeg, ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { stdio: ["pipe", "pipe", "pipe"] });
+    const out: Buffer[] = [];
+    let err = "";
+    p.stdout.on("data", (d: Buffer) => out.push(d));
+    p.stderr.on("data", (d: Buffer) => (err += d.toString()));
+    p.on("error", reject);
+    p.on("close", (code) => (code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(`ffmpeg exited ${code}: ${err.slice(0, 200)}`))));
+    p.stdin.on("error", () => undefined);
+    p.stdin.end(mp3);
+  });
 }

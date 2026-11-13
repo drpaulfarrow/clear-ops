@@ -643,17 +643,14 @@ test("the advisor worker is read-only apart from one confined deck save tool, ne
 test("live voice listens only to the allowlisted speaker and can never approve anything", () => {
   const bridge = src("voice-bridge.ts");
   const allowAt = bridge.indexOf("!this.opts.isAllowed(dcUser(userId))");
-  const joinAt = bridge.indexOf("await this.join(after, userId)");
+  const joinAt = bridge.indexOf("await this.join(after.guild, after.channelId, userId)");
   assert.ok(allowAt > -1 && joinAt > allowAt, "the voice bridge must check the allowlist before joining");
+  assert.match(bridge, /this\.opts\.isAllowed\(dcUser\(state\.id\)\)\) return this\.join/, "after a restart it joins only an allowlisted user");
   const subs = bridge.match(/receiver\.subscribe\(([^,]+),/g) ?? [];
-  assert.deepEqual(subs, ["receiver.subscribe(userId,"], "only the allowlisted speaker's audio is subscribed to");
+  assert.deepEqual(subs, ["receiver.subscribe(call.userId,"], "only the allowlisted speaker's audio is subscribed to");
+  assert.match(bridge, /if \(id !== userId \|\| call\.leaving\) return;/, "speech from anyone else in the channel is ignored");
   const voice = src("voice.ts");
   assert.match(voice, /voiceRequestText\(request\)/, "spoken requests reach the chief only through voiceRequestText");
   assert.match(voice, /export const VOICE_PREFIX = "Voice request from Paul/, "every spoken request starts with the voice prefix, so no approval command can match");
-  assert.match(voice, /timingSafeEqual/, "the voice brain's key is checked in constant time");
-  const index = src("index.ts");
-  assert.match(index, /if \(config\.voice\.key\) voice\.mount\(app\)/, "the voice brain is mounted only with a key");
-  const gateway = fs.readFileSync(new URL("../voice/gateway.py", import.meta.url), "utf8");
-  assert.match(gateway, /"allow_recording": False/, "the voice GPU never records");
-  assert.match(gateway, /hmac\.compare_digest/, "the gateway checks the key in constant time");
+  assert.doesNotMatch(voice + bridge, /writeFile|appendFile|createWriteStream/, "voice audio is never saved");
 });

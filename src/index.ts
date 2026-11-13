@@ -119,6 +119,8 @@ export function buildApp(deps: AppDeps) {
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
+  // Cleo, the voice brain: hands spoken requests to the chief as if typed in the voice channel's chat.
+  const voice = new VoiceBrain({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address }), tap });
   const holdWatcher = new HoldWatcher(deps.store, googleApi, deps.messenger);
 
   /**
@@ -144,10 +146,6 @@ export function buildApp(deps: AppDeps) {
 
   app.get("/health", (_req, res) => res.json({ ok: true, jobs: deps.store.listJobs(3).length }));
 
-  // The voice brain Unmute calls (OpenAI-compatible, VOICE_KEY only). Mounted whenever a key exists, so the
-  // GPU's health check passes; it answers only while a voice session is open.
-  const voice = new VoiceBrain({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address }), tap });
-  if (config.voice.key) voice.mount(app);
 
   // Meta webhook verification handshake
   app.get("/webhook", (req, res) => {
@@ -258,12 +256,12 @@ if (isMain) {
   if (config.channels.includes("telegram")) {
     void new TelegramPoller((from, text, ctx) => orchestrator.handle(from, text, ctx), messenger, isAllowed).start();
   }
-  if (discord) await discord.start();
-  // Live voice: join Paul in a Discord voice channel and talk through the voice GPU on Modal.
+  // Live voice: Cleo joins Paul in a Discord voice channel. Must be wired before the gateway connects.
   if (discord && voiceEnabled()) {
     new VoiceBridge(discord.client, voice, { isAllowed, notify: (to, text) => messenger.send(to, text) }).start();
     console.log("voice: on");
   }
+  if (discord) await discord.start();
 
   // A repository that could not be cloned: tell Paul once, in plain English, exactly what to change.
   const problem = repoProblemsMessage(repoProblems);
