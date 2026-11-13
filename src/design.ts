@@ -89,7 +89,7 @@ export function designIdentity(): Promise<Identity> {
 }
 
 /** A fresh temporary folder owned by the designer, so the browser or preview can write only there. */
-function designerTemp(prefix: string, who: Identity): string {
+export function designerTemp(prefix: string, who: Identity): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   if (process.getuid?.() === 0) fs.chownSync(dir, who.uid, who.gid);
   return dir;

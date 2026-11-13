@@ -87,6 +87,16 @@ export const config = {
     },
     prices: process.env.OPENROUTER_PRICES ?? "",
   },
+  /** Web search the service runs itself (src/search.ts); a tool appears only when its key is set. */
+  search: {
+    braveKey: process.env.BRAVE_API_KEY ?? "",
+    exaKey: process.env.EXA_API_KEY ?? "",
+  },
+  /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */
+  browse: {
+    enabled: (process.env.BROWSE ?? "on").toLowerCase() !== "off",
+    maxActions: Number(process.env.BROWSE_MAX_ACTIONS ?? 60),
+  },
   models: {
     chief: process.env.CHIEF_MODEL ?? "haiku",
     worker: process.env.WORKER_MODEL ?? "haiku",

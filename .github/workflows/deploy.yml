@@ -57,6 +57,8 @@ jobs:
             OPENROUTER_OPUS_MODEL="${{ vars.OPENROUTER_OPUS_MODEL }}" \
             OPENROUTER_PRICES="$OPENROUTER_PRICES" \
             EA_MODEL="${{ vars.EA_MODEL }}" \
+            BRAVE_API_KEY="${{ secrets.BRAVE_API_KEY }}" \
+            EXA_API_KEY="${{ secrets.EXA_API_KEY }}" \
             GH_TOKEN="${{ secrets.GH_TOKEN }}" \
             TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" \
             ALLOWED_TELEGRAM_IDS="${{ secrets.ALLOWED_TELEGRAM_IDS }}" \

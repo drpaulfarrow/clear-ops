@@ -1,3 +1,4 @@
+import { webToolsFor, type WebTools } from "./web-tools.js";
 import { runRoute } from "./llm.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -484,6 +485,7 @@ export class JobRunner {
     this.running.add(id);
     const at = new Date(now).toISOString();
     this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at });
+    let web: WebTools | undefined;
     try {
       // A design round after a merge looks only once the product's deploy of that merge is live.
       if (job.awaitDeploy) {
@@ -506,6 +508,8 @@ export class JobRunner {
       const ownTools = job.kind === "design" ? perJob.mcpServers : undefined;
       // The cv and advisor workers' own save tools, from their specs alone (toolsFor gives them nothing else).
       const cvTools = job.kind === "cv" || job.kind === "advisor" ? perJob.mcpServers : undefined;
+      // The service's own search and read-only browser, for research-type kinds only (src/web-tools.ts).
+      web = webToolsFor(job.kind);
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
@@ -524,15 +528,15 @@ export class JobRunner {
       // Every run is capped; deep research gets more turns and budget than the default.
       const limits = runLimits(job.kind, job.depth);
       const result = await this.run({
-        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${depth}${standing}${resume}${carryOn}`,
+        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${depth}${web.note}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
         ...runRoute(job, spec.model),
         cwd: spec.cwd,
-        allowedTools: createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools,
+        allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...web.allowed],
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        mcpServers: ownTools || extraTools || cvTools ? { ...extraTools, ...ownTools, ...cvTools } : undefined,
+        mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers } : undefined,
         additionalDirectories: dirs,
         maxTurns: limits.maxTurns,
         maxBudgetUsd: limits.maxBudgetUsd,
@@ -624,6 +628,8 @@ export class JobRunner {
       if (live.stop) await this.recordStop(job, live);
       else await this.recordFailure(job, failureFromError(err));
     } finally {
+      // The job's browser, if it opened one, goes with it.
+      await web?.close().catch(() => undefined);
       // A worker that would not let go after a stop was already finished without it; nothing more here.
       const mine = this.live.get(id) === live;
       if (mine) {
