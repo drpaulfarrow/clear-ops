@@ -188,6 +188,9 @@ export function buildApp(deps: AppDeps) {
   app.use(express.json({ verify: (req, _res, buf) => ((req as express.Request & { rawBody?: Buffer }).rawBody = buf) }));
 
   app.get("/health", (_req, res) => res.json({ ok: true, jobs: deps.store.listJobs(3).length }));
+  // What the deploy waits on (.github/workflows/deploy.yml): how many workers are running right now.
+  // A count only, nothing about the jobs themselves.
+  app.get("/busy", (_req, res) => res.json({ running: jobs.activeCount() }));
 
 
   // Meta webhook verification handshake
