@@ -240,6 +240,11 @@ export const config = {
   /** Minutes a running job may show no activity from its worker before it is stopped as stalled. */
   /** The most the workforce spends on jobs finished in one London day; past it, new jobs wait. */
   dailyBudgetUsd: positive(process.env.DAILY_BUDGET_USD, 20),
+  /**
+   * Engineering jobs (engineer, create_agent) that may run at once on one repository, each in its own
+   * working copy (the checkout, then git worktrees beside it). Paul's call (13 Nov 2026): two. At most 3.
+   */
+  engineerSlots: Math.min(Math.floor(positive(process.env.ENGINEER_SLOTS, 2)), 3),
   jobStallMinutes: positive(process.env.JOB_STALL_MINUTES, 30),
   /** The longest any job may run, in minutes, before it is stopped. */
   jobMaxRuntimeMinutes: positive(process.env.JOB_MAX_RUNTIME_MINUTES, 240),

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+process.env.ENGINEER_SLOTS = "1"; // the queue with one engineer per repository; test/parallel-engineers.test.ts covers two
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-jobs-"));
 
