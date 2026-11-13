@@ -204,6 +204,26 @@ export const config = {
       .filter(Boolean),
     ttlHours: positive(process.env.DNS_TTL_HOURS, 2),
   },
+  /**
+   * Signing Paul up for a site he named in chat (src/signup.ts, src/signup-gate.ts). `emails` are the
+   * addresses he named for sign-ups: with none, no sign-up can be prepared at all, which is the safe
+   * default. `sites` is an extra allowlist of domains where a sign-up may be prepared, on top of the
+   * sites agents may already act on; the never-list in src/site-policy.ts still blocks money sites,
+   * email providers, Microsoft, password managers, government identity services and this service's own
+   * infrastructure, whatever is set here. Nothing is ever submitted without Paul's own "signup apply <id>".
+   */
+  signup: {
+    emails: (process.env.SIGNUP_EMAILS ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    sites: (process.env.SIGNUP_SITES ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    ttlHours: positive(process.env.SIGNUP_TTL_HOURS, 6),
+    dailyCap: positive(process.env.SIGNUP_DAILY_CAP, 3),
+  },
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */

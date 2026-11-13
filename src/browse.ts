@@ -21,6 +21,7 @@ import type { Browser, BrowserContext, Page } from "playwright-core";
 import { config } from "./config.js";
 import { designIdentity, designerTemp, startEgressProxy, type EgressProxy } from "./design.js";
 import { CONSEQUENTIAL, neverReason } from "./site-policy.js";
+import type { SignupPage } from "./signup.js";
 import { hostMatches, totp, type VaultEntry } from "./vault.js";
 
 export const BROWSE_SERVER = "browser";
@@ -52,6 +53,88 @@ const SNAPSHOT_JS = `function (maxText, maxEls) {
   var text = ((document.body && document.body.innerText) || "").replace(/\\n{3,}/g, "\\n\\n").slice(0, maxText);
   return { title: document.title, url: location.href, text: text, items: items };
 }`;
+
+/**
+ * Runs in the page for the sign-up gate only: the form's own fields and submit buttons, numbered, with
+ * the labels the page shows. It decides nothing: src/signup.ts reads this and says what may be filled.
+ */
+const FORM_JS = `function () {
+  function labelfor(el) {
+    var parts = [];
+    var id = el.getAttribute("id");
+    if (id) {
+      try { document.querySelectorAll('label[for="' + CSS.escape(id) + '"]').forEach(function (l) { parts.push(l.innerText); }); } catch (e) {}
+    }
+    var wrap = el.closest("label");
+    if (wrap) parts.push(wrap.innerText);
+    var cell = el.closest("td, li, div");
+    if (cell && cell.innerText && cell.innerText.length < 80) parts.push(cell.innerText);
+    return parts;
+  }
+  function label(el, name) {
+    var parts = [el.getAttribute("aria-label") || "", el.getAttribute("placeholder") || "", el.getAttribute("title") || ""].concat(labelfor(el));
+    var out = "";
+    for (var i = 0; i < parts.length; i++) {
+      var t = String(parts[i] || "").replace(/\\s+/g, " ").trim();
+      if (t) { out = t; break; }
+    }
+    return (out || name || "").slice(0, 120);
+  }
+  var pick = null;
+  var best = -1;
+  Array.prototype.slice.call(document.querySelectorAll("form")).forEach(function (f) {
+    var score = f.querySelectorAll("input[type=email], input[type=password]").length * 100 + f.querySelectorAll("input, textarea, select").length;
+    if (score > best) { best = score; pick = f; }
+  });
+  document.querySelectorAll("[data-clearops-field], [data-clearops-submit]").forEach(function (e) { e.removeAttribute("data-clearops-field"); e.removeAttribute("data-clearops-submit"); });
+  var fields = [];
+  var submits = [];
+  if (pick) {
+    var els = Array.prototype.slice.call(pick.querySelectorAll("input, textarea, select"));
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var type = String(el.type || el.tagName).toLowerCase();
+      if (type === "hidden" || type === "submit" || type === "button" || type === "reset" || type === "file" || type === "image") continue;
+      el.setAttribute("data-clearops-field", String(fields.length + 1));
+      fields.push({ index: fields.length + 1, label: label(el, el.getAttribute("name")), type: type, name: el.getAttribute("name") || "", required: el.required === true || el.getAttribute("aria-required") === "true" });
+      if (fields.length >= 40) break;
+    }
+    var bs = Array.prototype.slice.call(pick.querySelectorAll("button, input[type=submit], [role=button]"));
+    for (var j = 0; j < bs.length; j++) {
+      var b = bs[j];
+      var words = (b.innerText || b.value || b.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim().slice(0, 60);
+      b.setAttribute("data-clearops-submit", String(submits.length + 1));
+      submits.push({ index: submits.length + 1, label: words });
+      if (submits.length >= 12) break;
+    }
+  }
+  var body = ((document.body && document.body.innerText) || "").replace(/\\n{3,}/g, "\\n\\n").slice(0, 12000);
+  var action = pick ? String(pick.getAttribute("action") || "") : "";
+  var note = action ? "\\n[form action: " + action.slice(0, 200) + "]" : "\\n[no form found on this page]";
+  var text = body + note;
+  return { url: location.href, title: document.title, text: text, fields: fields, submits: submits };
+}`;
+
+/** Runs in the page: fills the numbered fields and clicks the numbered button, the way a browser would. */
+const FILL_JS = `function (fills, submit) {
+  for (var i = 0; i < fills.length; i++) {
+    var el = document.querySelector('[data-clearops-field="' + fills[i].index + '"]');
+    if (!el) continue;
+    var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : (el.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
+    var desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(el, fills[i].value); else el.value = fills[i].value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new Event("blur", { bubbles: true }));
+  }
+  var b = document.querySelector('[data-clearops-submit="' + submit + '"]');
+  if (!b) return false;
+  b.click();
+  return true;
+}`;
+
+/** A value as a JavaScript literal for a page script, safe for the two characters that break a script. */
+const literal = (v: unknown) => JSON.stringify(v).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 
 /** Only public http(s) pages; the proxy then checks the address the name resolves to. */
 export function checkUrl(raw: string): string {
@@ -371,6 +454,36 @@ export class BrowseSession {
     vault.saveSession(entry.domain, { cookies: state.cookies.filter((c) => hostMatches(c.domain.replace(/^\./, ""), entry!.domain)) });
     entry = undefined;
     return `Signed in.\n\n${await this.snapshot()}`;
+  }
+
+  /**
+   * The form on a page as data, for the sign-up gate only (src/signup-gate.ts): its fields with the
+   * labels the page shows, which are required, and the buttons that would submit it. It decides
+   * nothing: src/signup.ts reads this and says what may be filled in. The text is untrusted content
+   * and is never shown to a model.
+   */
+  async formData(url: string): Promise<SignupPage> {
+    this.count();
+    const page = await this.ensure();
+    const res = await page.goto(checkUrl(url), { waitUntil: "domcontentloaded" });
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
+    if (res && res.status() >= 400) throw new Error(`the sign-up page answered ${res.status()}`);
+    return (await page.evaluate(`(${FORM_JS})()`)) as SignupPage;
+  }
+
+  /**
+   * Fills the numbered fields and clicks the numbered button. Reached only from the sign-up gate, after
+   * Paul approved that exact plan: the generated password is written into the page here and nowhere else.
+   */
+  async fillForm(fills: Array<{ index: number; value: string }>, submit: number): Promise<{ url: string; title: string; text: string }> {
+    this.count();
+    const page = await this.ensure();
+    const clicked = (await page.evaluate(`(${FILL_JS})(${literal(fills)}, ${Math.floor(submit)})`)) as boolean;
+    if (!clicked) throw new Error("the button that would submit the form is no longer on the page, so nothing was sent");
+    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => undefined);
+    const text = (await page.evaluate(`((document.body && document.body.innerText) || "").slice(0, ${MAX_TEXT})`)) as string;
+    return { url: page.url(), title: await page.title(), text };
   }
 
   async back(): Promise<string> {

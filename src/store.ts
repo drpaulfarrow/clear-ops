@@ -17,7 +17,7 @@ export type EaPermit = "drafts" | "holds" | "send";
  */
 export type JobTarget = string;
 /** What a job may do beyond its kind's defaults, granted per job by the chief only when Paul asked in chat. */
-export type JobPermit = EaPermit | "create_repo" | "dns";
+export type JobPermit = EaPermit | "create_repo" | "dns" | "signup";
 /** A repository the workforce created, kept so it can be worked on straight away and after a restart. */
 export interface CreatedRepo {
   slug: string;
@@ -265,6 +265,41 @@ export interface DnsAction {
   note?: string;
 }
 
+/**
+ * A sign-up prepared for Paul's approval (src/signup-gate.ts). Nothing is filled in or sent until Paul
+ * replies "signup apply <id>" himself. The record is also the audit trail; it never holds the password,
+ * which is generated at approval time and written straight into the vault.
+ */
+export type SignupStatus = "pending" | "executing" | "executed" | "needsPaul" | "cancelled" | "expired" | "changed" | "failed";
+export interface SignupAction {
+  id: string;
+  status: SignupStatus;
+  createdAt: string;
+  expiresAt: string;
+  jobId?: string;
+  replyTo: string;
+  domain: string;
+  url: string;
+  email: string;
+  username?: string;
+  /** The other details the service would fill in, label and value. */
+  fields: Array<{ label: string; value: string }>;
+  termsUrl?: string;
+  why?: string;
+  /** Digest of the domain and the plan Paul saw. */
+  hash: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  executedAt?: string;
+  /** What the site said, one short line. Never the password. */
+  outcome?: string;
+  /** "payment", "phone", "identity" or "email-verification" when the site asked for something only Paul can do. */
+  step?: string;
+  /** True when a login was stored in the vault. */
+  stored?: boolean;
+  note?: string;
+}
+
 /** Runtime settings Paul sets from chat. */
 export interface Settings {
   /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */
@@ -290,6 +325,7 @@ interface State {
   settings: Settings;
   outbound?: Record<string, OutboundAction>;
   dns?: Record<string, DnsAction>;
+  signups?: Record<string, SignupAction>;
   /** Gmail drafts the assistant created: the only drafts it may prepare for sending. */
   createdDrafts?: Record<string, { at: string; jobId?: string }>;
   /** Repositories the workforce created, by alias. */
@@ -488,6 +524,25 @@ export class Store {
   }
   listDns(): DnsAction[] {
     return Object.values(this.state.dns ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  // Sign-up approvals and their audit trail
+  putSignup(a: SignupAction): SignupAction {
+    (this.state.signups ??= {})[a.id] = a;
+    this.save();
+    return a;
+  }
+  getSignup(id: string): SignupAction | undefined {
+    return this.state.signups?.[id];
+  }
+  updateSignup(id: string, patch: Partial<SignupAction>): SignupAction {
+    const a = this.state.signups?.[id];
+    if (!a) throw new Error(`No sign-up ${id}`);
+    Object.assign(a, patch);
+    this.save();
+    return a;
+  }
+  listSignups(): SignupAction[] {
+    return Object.values(this.state.signups ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
   recordCreatedDraft(draftId: string, jobId?: string): void {
     (this.state.createdDrafts ??= {})[draftId] = { at: new Date().toISOString(), jobId };

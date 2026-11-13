@@ -1,8 +1,8 @@
 import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config } from "./config.js";
-import { termsWarning } from "./site-policy.js";
-import { vault, VAULT_ADD_PATH, VaultError } from "./vault.js";
+import { SitePolicy, termsWarning } from "./site-policy.js";
+import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError } from "./vault.js";
 import { modelLine } from "./llm.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
@@ -24,6 +24,9 @@ import { GoogleApi, GoogleAuth, GoogleError, type Fetch } from "./google.js";
 import { OutboundGate } from "./outbound.js";
 import { GoDaddyClient } from "./dns.js";
 import { DnsGate, dnsServer, DNS_SERVER } from "./dns-gate.js";
+import { BrowserSignupSubmitter } from "./signup.js";
+import { SignupGate, signupServer, SIGNUP_SERVER } from "./signup-gate.js";
+import { BrowseSession } from "./browse.js";
 import { EA_SERVER, EaTools, eaServer, ensureEaSchedules, upgradeEaSchedules } from "./ea.js";
 import cron from "node-cron";
 import { nudgeStale } from "./followups.js";
@@ -98,6 +101,18 @@ export function buildApp(deps: AppDeps) {
   // The approval gate for DNS changes: shared by the dns agent's prepare tool and the chat approval.
   const dnsClient = new GoDaddyClient(deps.dnsFetch);
   const dns = new DnsGate(deps.store, dnsClient, deps.messenger);
+  // The approval gate for creating an account for Paul on a site he named: the job only PREPARES a plan,
+  // and his own "signup apply <id>" is what fills the form in and submits it. The submission is the
+  // service's own browser, opened for that one site only, with the same containment and egress proxy as
+  // the workers' browser and a policy that lets it act on that site alone.
+  const sitePolicy = new SitePolicy(deps.store, safeVaultDomains);
+  const signup = new SignupGate(
+    deps.store,
+    new BrowserSignupSubmitter((domain) => new BrowseSession({ policy: { mayAct: (host) => hostMatches(host, domain) || sitePolicy.mayAct(host) }, vault })),
+    vault,
+    sitePolicy,
+    deps.messenger,
+  );
   // Repositories the workforce created in earlier runs are managed again from the first request.
   repoRegistry.load(deps.store);
   const toolsFor = (job: { id: string; kind: string; brief: string; replyTo?: string; permits?: JobPermit[] }): Record<string, McpServerConfig> | undefined =>
@@ -112,10 +127,14 @@ export function buildApp(deps: AppDeps) {
       : // Only an engineer job the chief gave the create_repo permit (Paul asked in chat) gets the tool.
         job.kind === "engineer" && job.permits?.includes("create_repo")
         ? { [REPO_SERVER]: repoServer({ store: deps.store, jobId: job.id, createDeps: { fetch: deps.repoFetch, clone: deps.repoClone } }) }
-        : undefined;
+        : // And a job the chief gave the signup permit (Paul asked in chat): the one tool that prepares
+          // a sign-up plan for his approval. The tool exists only with the permit; nothing here approves.
+          job.permits?.includes("signup")
+          ? { [SIGNUP_SERVER]: signupServer({ gate: signup, jobId: job.id, replyTo: job.replyTo }) }
+          : undefined;
   const jobs = new JobRunner(deps.store, tapped, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined });
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns);
+  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup);
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
