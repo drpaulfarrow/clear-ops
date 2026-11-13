@@ -92,6 +92,25 @@ export const config = {
     braveKey: process.env.BRAVE_API_KEY ?? "",
     exaKey: process.env.EXA_API_KEY ?? "",
   },
+  /**
+   * Voice notes: audio Paul sends in chat, transcribed by the service before the chief sees it
+   * (src/transcribe.ts). One plain HTTPS call to an OpenAI-compatible /audio/transcriptions
+   * endpoint, OpenRouter by default: its key is already set for the models, so transcription needs
+   * no second account. TRANSCRIBE_API_KEY (and TRANSCRIBE_BASE_URL) point it at another provider
+   * instead. The key is read from the environment only, never logged, stored or sent to a worker.
+   */
+  transcribe: {
+    enabled: (process.env.TRANSCRIBE ?? "on").toLowerCase() !== "off",
+    apiKey: process.env.TRANSCRIBE_API_KEY ?? "",
+    baseUrl: (process.env.TRANSCRIBE_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, ""),
+    model: process.env.TRANSCRIBE_MODEL || "openai/whisper-large-v3",
+    /** Largest audio file sent for transcription, in megabytes, and the longest clip in seconds. */
+    maxMb: positive(process.env.TRANSCRIBE_MAX_MB, 12),
+    maxSeconds: positive(process.env.TRANSCRIBE_MAX_SECONDS, 300),
+    timeoutMs: positive(process.env.TRANSCRIBE_TIMEOUT_MS, 60_000),
+    /** ISO-639-1, e.g. "en"; empty lets the provider detect it. */
+    language: process.env.TRANSCRIBE_LANGUAGE ?? "",
+  },
   /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */
   browse: {
     enabled: (process.env.BROWSE ?? "on").toLowerCase() !== "off",

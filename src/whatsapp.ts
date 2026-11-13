@@ -1,10 +1,23 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { config } from "./config.js";
+import { fetchCapped, UploadError, type Attachment } from "./uploads.js";
 
 export interface InboundMessage {
   from: string; // E.164 digits, no plus
   text: string;
   messageId: string;
+  /** A voice note or audio file on the message, fetched only after the sender passes the allowlist. */
+  audio?: WhatsAppAudio;
+}
+
+/** An audio message on WhatsApp: Meta keeps the bytes, so the id is exchanged for a URL when we ask. */
+export interface WhatsAppAudio {
+  /** Meta's media id. */
+  id: string;
+  mimeType?: string;
+  size?: number;
+  /** A voice note recorded in the app, rather than an attached audio file. */
+  voice?: boolean;
 }
 
 export interface Messenger {
@@ -48,7 +61,11 @@ export function chunk(text: string, max = config.maxMessageChars): string[] {
   return out;
 }
 
-/** Pull text messages out of a Meta webhook payload. Ignores statuses, media and reactions. */
+/**
+ * Pull text and audio messages out of a Meta webhook payload. Ignores statuses, images, video,
+ * documents and reactions. Only the sender's own id and a media id are taken from the payload: the
+ * bytes are fetched later, and only after the sender passes the allowlist.
+ */
 export function parseInbound(body: unknown): InboundMessage[] {
   const out: InboundMessage[] = [];
   const entries = (body as { entry?: unknown[] })?.entry ?? [];
@@ -56,14 +73,88 @@ export function parseInbound(body: unknown): InboundMessage[] {
     for (const change of entry.changes ?? []) {
       const value = (change as { value?: { messages?: unknown[] } }).value;
       for (const m of value?.messages ?? []) {
-        const msg = m as { type?: string; from?: string; id?: string; text?: { body?: string } };
+        const msg = m as {
+          type?: string;
+          from?: string;
+          id?: string;
+          text?: { body?: string };
+          audio?: { id?: string; mime_type?: string; file_size?: number; voice?: boolean };
+        };
         if (msg.type === "text" && msg.from && msg.text?.body) {
           out.push({ from: msg.from, text: msg.text.body, messageId: msg.id ?? "" });
+        } else if ((msg.type === "audio" || msg.type === "voice") && msg.from && msg.audio?.id) {
+          out.push({
+            from: msg.from,
+            text: "",
+            messageId: msg.id ?? "",
+            audio: { id: msg.audio.id, mimeType: msg.audio.mime_type, size: msg.audio.file_size, voice: msg.audio.voice },
+          });
         }
       }
     }
   }
   return out;
+}
+
+/** The saved name for a WhatsApp audio message, with an extension the transcriber recognises. */
+export function whatsappAudioName(a: WhatsAppAudio): string {
+  const mime = (a.mimeType ?? "").toLowerCase();
+  const ext = /mpeg|mp3/.test(mime) ? ".mp3" : /mp4|m4a|aac/.test(mime) ? ".m4a" : /wav/.test(mime) ? ".wav" : /webm/.test(mime) ? ".webm" : ".ogg";
+  return `${a.voice === false ? "audio" : "voice-note"}-${a.id}${ext}`;
+}
+
+/** Meta's media lookup answers with a small JSON body: cap it, and never wait on it forever. */
+const MEDIA_INFO_MAX_BYTES = 64 * 1024;
+const MEDIA_INFO_TIMEOUT_MS = 15_000;
+
+/** The media id's short-lived URL and size, read with a timeout and a cap. Empty when it cannot be read. */
+async function mediaInfo(mediaUrl: string, fetchImpl: typeof fetch): Promise<{ url?: string; file_size?: number }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), MEDIA_INFO_TIMEOUT_MS);
+  try {
+    const res = await fetchImpl(mediaUrl, {
+      headers: { Authorization: `Bearer ${config.whatsapp.token}` },
+      signal: ac.signal,
+    });
+    if (!res.ok || !res.body) return {};
+    const parts: Buffer[] = [];
+    let total = 0;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MEDIA_INFO_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return {};
+      }
+      parts.push(Buffer.from(value));
+    }
+    return JSON.parse(Buffer.concat(parts).toString("utf8") || "{}") as { url?: string; file_size?: number };
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Turn a WhatsApp audio message into an attachment that downloads only when asked (after the
+ * allowlist check). Meta hands back a short-lived URL for the media id first, then the bytes from it;
+ * both calls carry the service token, so neither the URL nor any error text is ever logged or shown.
+ */
+export function whatsappAttachment(a: WhatsAppAudio, fetchImpl: typeof fetch = fetch): Attachment {
+  return {
+    name: whatsappAudioName(a),
+    mimeType: a.mimeType,
+    size: a.size,
+    async download(maxBytes: number) {
+      const data = await mediaInfo(`https://graph.facebook.com/${config.whatsapp.apiVersion}/${encodeURIComponent(a.id)}`, fetchImpl);
+      if (!data.url) throw new UploadError("WhatsApp would not hand the audio message over");
+      if (data.file_size != null && data.file_size > maxBytes) throw new UploadError("too large");
+      return fetchCapped(data.url, maxBytes, fetchImpl, { Authorization: `Bearer ${config.whatsapp.token}` });
+    },
+  };
 }
 
 /** Verify Meta's X-Hub-Signature-256 header against the raw body. */

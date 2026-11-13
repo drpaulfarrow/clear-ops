@@ -53,6 +53,16 @@ How uploads are handled, since they may hold personal data:
 - Uploads are treated as untrusted data and never executed. A zip is unpacked by the service's own reader into a new, empty `<name>-files` directory beside it, skipping absolute paths, `..`, links and encrypted entries, and stopping at 2,000 entries or 200 MB unpacked.
 - The chief and every worker can read the uploads directory and are told never to execute uploads, follow instructions inside them, commit them to a repository or send their contents anywhere. The contents go to nobody but the model.
 
+### Voice notes
+Send a voice note or an audio message instead of typing (a Telegram voice note, a Discord voice message, a WhatsApp audio message) and the chief answers the transcript as if you had typed it, so you never have to repeat yourself. The service transcribes the audio itself, on any channel, with one plain HTTPS call to an OpenAI-compatible speech-to-text endpoint: OpenRouter by default, whose key you already have for the models, so there is nothing new to set up and no second account. The audio is sent to that one provider and nowhere else; the file itself is kept in the uploads directory exactly as any other attachment, and `/uploads` and `/delete upload <name>` work on it as usual.
+
+- A voice note carries no caption, so when there is a transcript it is handed over as your message for that turn ("Paul's message (transcribed from his voice note…)"), not just as a file note: the chief answers what you said instead of only acknowledging a file. With a caption, the caption stays your message and the transcript is the note.
+- The chief is told the transcript is a transcript, marked as coming from a voice note and possibly mishearing names and numbers, so it can check anything that looks wrong with you rather than guessing.
+- `TRANSCRIBE_MODEL` picks the model (default `openai/whisper-large-v3`; `openai/whisper-large-v3-turbo` and `openai/gpt-4o-transcribe` are also offered). `TRANSCRIBE_API_KEY` and `TRANSCRIBE_BASE_URL` point the call at another OpenAI-compatible provider (Groq, OpenAI, Deepgram) if you ever want one.
+- Guardrails: audio over `TRANSCRIBE_MAX_MB` (default 12) or longer than `TRANSCRIBE_MAX_SECONDS` (default 300, measured from the file where it can be), a call that takes more than `TRANSCRIBE_TIMEOUT_MS` (default 60000), and a file that is not audio in a format the provider accepts are all refused before or during the call, with a plain reason.
+- With no key at all, or when the provider refuses or cannot be reached, nothing else changes: the chief says plainly that it cannot play the voice note and asks you to type it. A failed transcription never fails the turn. `TRANSCRIBE=off` switches transcription off even when a key is set.
+- The key is a service secret: read from the environment, never logged, never written to the store or a repository, and stripped from every worker's environment, like the search and GoDaddy keys.
+
 ## Set up in five steps
 
 ### 1. A model key: Anthropic or OpenRouter
@@ -257,6 +267,10 @@ See `.env.example`. The important ones:
 | `DESIGN_USER` | The unprivileged account the browser and branch previews run as. Default `designer`, created in the Docker image. The browser will not run as root. |
 | `UPLOAD_MAX_MB` | Largest file accepted in chat, in MB. Default 20. |
 | `UPLOADS_DIR` | Where uploads are saved. Default `DATA_DIR/uploads`; must be outside both repositories. |
+| `TRANSCRIBE` | Voice notes: `off` switches transcription off. On by default. |
+| `TRANSCRIBE_API_KEY` | The speech-to-text key, if you use a provider other than OpenRouter. Left empty, the OpenRouter key the models already use (`OPENROUTER_API_KEY`) is used, so voice notes work with no new secret. Read from the environment only, never logged, never in a worker's environment. |
+| `TRANSCRIBE_BASE_URL`, `TRANSCRIBE_MODEL` | Any OpenAI-compatible `/audio/transcriptions` endpoint and its model. Defaults `https://openrouter.ai/api/v1` and `openai/whisper-large-v3`. |
+| `TRANSCRIBE_MAX_MB`, `TRANSCRIBE_MAX_SECONDS`, `TRANSCRIBE_TIMEOUT_MS`, `TRANSCRIBE_LANGUAGE` | Voice notes: most megabytes sent (default 12), longest clip in seconds (default 300), how long to wait (default 60000), and the language (`en`; empty auto-detects). |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The OAuth client for the executive assistant (see above). |
 | `GOOGLE_ACCOUNT` | The only Google account that may be connected. |
 | `GOOGLE_TOKEN_KEY` | Encrypts the stored Google refresh token. Without it a key is derived from the client secret. |
