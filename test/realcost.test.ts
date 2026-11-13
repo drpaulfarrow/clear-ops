@@ -141,7 +141,7 @@ test("the stopped-for-budget sentence states the spend, the cap and the measure"
   );
   assert.equal(
     budgetReason({ spentUsd: 4.2, capUsd: 1000, measure: "estimate" }),
-    "it was stopped by the SDK's own runaway guard of $1000, an internal estimate and not a bill, by which time OpenRouter had really charged $4.20",
+    "it was stopped by the SDK's own runaway guard of $1000.00, an internal estimate and not a bill, by which time OpenRouter had really charged $4.20",
   );
   assert.match(budgetReason({ capUsd: 1000, measure: "estimate" }), /could not be read/);
 });

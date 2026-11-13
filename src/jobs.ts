@@ -99,18 +99,18 @@ const minutes = (ms: number) => Math.round(ms / MINUTE);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Starts worker jobs in the background and reports back over WhatsApp when they finish. */
+/** A browse kind's permits: the sign-up permit as granted, plus the purchase permit if granted. */
+function withPurchase(kept: JobPermit[], granted: JobPermit[] | undefined): JobPermit[] | undefined {
+  const all = granted?.includes("purchase") ? [...kept, "purchase" as const] : kept;
+  return all.length ? all : undefined;
+}
+
 /**
  * Builds the meter that counts one job's real cost, given the job's cap in the provider's money and
  * the way to stop the run when the provider's own figures pass it. Tests inject one with their own
  * fetch, so the accounting is covered offline.
  */
 export type CostWatchFactory = (capUsd: number | undefined, stop: () => void) => JobCostWatch;
-
-/** A browse kind's permits: the sign-up permit as granted, plus the purchase permit if granted. */
-function withPurchase(kept: JobPermit[], granted: JobPermit[] | undefined): JobPermit[] | undefined {
-  const all = granted?.includes("purchase") ? [...kept, "purchase" as const] : kept;
-  return all.length ? all : undefined;
-}
 
 export class JobRunner {
   private running = new Set<string>();
