@@ -62,7 +62,7 @@ test("past the daily cap new jobs stay queued, Paul is told once, and /resume li
   // One message for three blocked jobs, saying what was spent and that /resume lifts it.
   const notices = sent.filter((t) => /daily spend cap/.test(t));
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /\$10 is hit: \$12\.00 spent today/);
+  assert.match(notices[0], /\$10\.00 is hit: \$12\.00 spent today/);
   assert.match(notices[0], /\/resume/);
 
   const result = await jobs.resume();
