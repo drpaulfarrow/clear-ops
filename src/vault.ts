@@ -132,10 +132,12 @@ export class Vault {
     return { domain: p.domain };
   }
 
-  /** Saves a login from the add page. Uses up the token. Returns the chat to confirm in. */
-  add(token: string, input: { domain: string; username: string; password: string; totp?: string; loginUrl?: string }): { replyTo: string; summary: VaultSummary } {
-    const p = this.pending.get(token);
-    if (!p || p.expires < this.now()) throw new VaultError("This link has expired or was already used. Ask ClearOps for a new one.");
+  /**
+   * Validates one login, whichever way it arrived: the one-time add page, or a sign-up Paul approved.
+   * The never-list, a real username and password, a two-factor key if given, and a login address on
+   * the site's own domain over https.
+   */
+  private entry(input: { domain: string; username: string; password: string; totp?: string; loginUrl?: string }): VaultEntry {
     const domain = normaliseDomain(input.domain);
     const never = neverReason(domain);
     if (never) throw new VaultError(`${domain} cannot be stored: ${never}.`);
@@ -148,11 +150,32 @@ export class Vault {
       if (u.protocol !== "https:" || !hostMatches(u.hostname, domain)) throw new VaultError(`The login address must be https on ${domain}.`);
       loginUrl = u.toString();
     }
+    return { domain, username: input.username.trim(), password: input.password, ...(secret ? { totp: secret } : {}), ...(loginUrl ? { loginUrl } : {}), addedAt: new Date(this.now()).toISOString() };
+  }
+
+  /** Saves a login from the add page. Uses up the token. Returns the chat to confirm in. */
+  add(token: string, input: { domain: string; username: string; password: string; totp?: string; loginUrl?: string }): { replyTo: string; summary: VaultSummary } {
+    const p = this.pending.get(token);
+    if (!p || p.expires < this.now()) throw new VaultError("This link has expired or was already used. Ask ClearOps for a new one.");
+    const entry = this.entry(input);
     this.pending.delete(token);
     const entries = this.read();
-    entries[domain] = { domain, username: input.username.trim(), password: input.password, ...(secret ? { totp: secret } : {}), ...(loginUrl ? { loginUrl } : {}), addedAt: new Date(this.now()).toISOString() };
+    entries[entry.domain] = entry;
     this.write(entries);
-    return { replyTo: p.replyTo, summary: summarise(entries[domain]) };
+    return { replyTo: p.replyTo, summary: summarise(entry) };
+  }
+
+  /**
+   * Saves a login the service itself made: an account created through the sign-up gate (src/signup-gate.ts)
+   * after Paul approved it. The password is generated at that moment and never reaches a model, chat, a
+   * log or a job output; this is the only other way into the vault.
+   */
+  save(input: { domain: string; username: string; password: string; loginUrl?: string }): VaultSummary {
+    const entry = this.entry(input);
+    const entries = this.read();
+    entries[entry.domain] = entry;
+    this.write(entries);
+    return summarise(entry);
   }
 
   list(): VaultSummary[] {

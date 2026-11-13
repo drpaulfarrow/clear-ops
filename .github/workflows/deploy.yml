@@ -80,6 +80,9 @@ jobs:
             GODADDY_API_KEY="${{ secrets.GODADDY_API_KEY }}" \
             GODADDY_API_SECRET="${{ secrets.GODADDY_API_SECRET }}" \
             GODADDY_DOMAINS="${{ vars.GODADDY_DOMAINS }}" \
+            SIGNUP_EMAILS="${{ secrets.SIGNUP_EMAILS }}" \
+            SIGNUP_SITES="${{ vars.SIGNUP_SITES }}" \
+            SIGNUP_DAILY_CAP="${{ vars.SIGNUP_DAILY_CAP }}" \
             GITHUB_APP_ID="$GITHUB_APP_ID" \
             GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
             GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID"
