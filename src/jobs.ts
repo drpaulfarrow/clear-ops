@@ -19,6 +19,7 @@ import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
+import { spendSourceLabel, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 
@@ -127,6 +128,11 @@ export class JobRunner {
   private readonly onOutput?: (job: Job) => void;
   /** The purchase approval gate (src/purchase.ts), for jobs holding the purchase permit. */
   private readonly purchase?: PurchaseGate;
+  /**
+   * Where the spend figure comes from (src/spend.ts): the provider's own usage where it can be read,
+   * the Agent SDK's price table as a fallback. The daily cap uses it; the estimate alone never bills.
+   */
+  private readonly spend: SpendMeter;
 
   constructor(
     private readonly store: Store,
@@ -134,11 +140,12 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; slots?: number } = {},
+    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; slots?: number; spend?: SpendMeter } = {},
   ) {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
     this.onOutput = opts.onOutput;
     this.purchase = opts.purchase;
+    this.spend = opts.spend ?? storeMeter(store);
     this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
     const l = opts.liveness ?? {};
     this.stallMs = l.stallMs ?? config.jobStallMinutes * MINUTE;
@@ -175,6 +182,8 @@ export class JobRunner {
    */
   private dispatch(job: Job, ignoreHold = false): Job {
     const key = lockKey(job);
+    // Keep the spend figure current without waiting for it: cached, so at most one call a minute.
+    void this.refreshSpend().catch(() => undefined);
     if (!ignoreHold && this.capReached()) return this.blockForCap(job);
     if (key) {
       const holder = this.holder(key);
@@ -188,7 +197,11 @@ export class JobRunner {
     return this.store.getJob(job.id) ?? job;
   }
 
-  /** Spend on jobs that finished today (London), in dollars. */
+  /**
+   * The estimate: what the Agent SDK priced jobs that finished today (London) at, from the table in
+   * src/llm.ts. Not the bill on OpenRouter, so the cap does not use it when the provider's own
+   * figure can be read (`spendState`); it is the fallback and the per-kind breakdown.
+   */
   spentToday(): number {
     return this.spendOn(londonYmd(new Date(this.now()))).total;
   }
@@ -199,28 +212,59 @@ export class JobRunner {
     return { total: jobs.reduce((sum, j) => sum + (j.costUsd ?? 0), 0), jobs };
   }
 
+  /**
+   * Today's spend (London) with its source: OpenRouter's own figure when it has been read recently,
+   * the estimate otherwise. Never an unread or stale provider figure counted as zero.
+   */
+  spendState(): RealSpend {
+    return this.spend.today(this.spentToday(), londonYmd(new Date(this.now())));
+  }
+
+  /**
+   * Reads the provider's usage now, at most once a minute however often this is called. Never throws
+   * and never waits longer than a few seconds, so it can never hold up a job's finish.
+   */
+  async refreshSpend(): Promise<void> {
+    await this.spend.refresh();
+  }
+
   /** True when today's spend is at or past the daily cap and /resume has not lifted it for today. */
   capReached(): boolean {
     const today = londonYmd(new Date(this.now()));
-    return this.store.capDays().liftedOn !== today && this.spentToday() >= config.dailyBudgetUsd;
+    return this.store.capDays().liftedOn !== today && this.spendState().usd >= config.dailyBudgetUsd;
   }
 
-  /** Leaves a job queued because of the cap, and tells Paul the first time each London day. */
+  /** Leaves a job queued because of the cap, then confirms the figure before telling Paul. */
   private blockForCap(job: Job): Job {
     const key = lockKey(job);
     const holder = key ? this.holder(key) : undefined;
     const blocked = this.store.updateJob(job.id, { status: "queued", capBlocked: true, ...(key ? { waitingFor: holder ?? job.id, queuePos: this.nextQueuePos() } : {}) });
-    this.noticeCap(blocked);
+    void this.confirmCap(blocked).catch((err) => console.warn(`cap check failed: ${err instanceof Error ? err.message : err}`));
     return blocked;
+  }
+
+  /**
+   * The cap blocks on the provider's own figure where it can be read, never on the estimate alone
+   * while OpenRouter is reachable. This reads it once (cached, so at most one call a minute), starts
+   * the job again if the real spend is under the cap, and only tells Paul once the figure is in.
+   */
+  private async confirmCap(job: Job): Promise<void> {
+    await this.refreshSpend();
+    if (!this.capReached()) {
+      await this.releaseCapped();
+      return;
+    }
+    this.noticeCap(job);
   }
 
   private noticeCap(blocked: Job): void {
     const today = londonYmd(new Date(this.now()));
     if (this.store.capDays().notifiedOn !== today) {
       this.store.setCapDays({ notifiedOn: today });
-      const spent = this.spentToday().toFixed(2);
+      const spend = this.spendState();
+      const spent = `$${spend.usd.toFixed(2)} spent today (${spendSourceLabel(spend)})`;
       void this.messenger
-        .send(blocked.replyTo ?? blocked.requestedBy, `The daily spend cap of $${config.dailyBudgetUsd} is hit: $${spent} spent today, so new jobs are waiting, starting with ${jobLabel(blocked)}. Send /resume to lift it for the rest of today, or they start tomorrow.`)
+        .send(blocked.replyTo ?? blocked.requestedBy, `The daily spend cap of $${config.dailyBudgetUsd} is hit: ${spent}, so new jobs are waiting, starting with ${jobLabel(blocked)}. Send /resume to lift it for the rest of today, or they start tomorrow.`)
         .catch(() => undefined);
     }
   }
@@ -444,7 +488,10 @@ export class JobRunner {
     if (!next) return false;
     if (this.capReached()) {
       this.store.updateJob(next.id, { capBlocked: true });
-      this.noticeCap(next);
+      // Same path as a job blocked as it arrives: read the provider's own figure (cached, so at most
+      // a call a minute) and only then tell Paul, so a stale estimate cannot hold the queue back.
+      // If the real spend is under the cap, `confirmCap` releases the queue and the job starts.
+      await this.confirmCap(next);
       return false;
     }
     this.store.updateJob(next.id, { capBlocked: undefined });
@@ -467,6 +514,9 @@ export class JobRunner {
    * lock stay in the queue in order; at most one job per repository is started. Called once on boot.
    */
   async resumeInterrupted(): Promise<number> {
+    // One read of the provider's usage before any queue moves, so a restart does not resume jobs on
+    // a stale day figure. Cached and time-limited; a failure falls back to the estimate.
+    await this.refreshSpend().catch(() => undefined);
     const jobs = this.store
       .interruptedJobs()
       // Anything this process already started (a request that arrived during boot) is not interrupted.
@@ -621,7 +671,7 @@ export class JobRunner {
       // it is recorded as failed, and nothing follows it (no review, no fix round, no "Finished").
       const failed = runFailure(result);
       if (failed) {
-        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
+        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd, costSource: "estimate" });
         throw new RunFailedError(failed);
       }
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
@@ -633,6 +683,7 @@ export class JobRunner {
         summary: message,
         outputPath,
         costUsd: result.costUsd,
+        costSource: result.costUsd === undefined ? undefined : "estimate",
       });
       try {
         const done = this.store.getJob(id);
@@ -795,6 +846,8 @@ export class JobRunner {
     if (this.checking) return;
     this.checking = true;
     try {
+      // Once a minute: the provider's own spend figure, so the cap and /spend stay current.
+      await this.refreshSpend().catch(() => undefined);
       const now = this.now();
       for (const [id, live] of [...this.live]) {
         if (live.stop || live.waiting || live.finishing) continue;

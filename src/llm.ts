@@ -34,10 +34,13 @@ export const DEFAULT_OPENROUTER_MODELS: Record<ModelAlias, string> = {
 };
 
 /**
- * What the SDK charges each default model at, so total_cost_usd, the per-run caps and the daily cap
- * mean something: without a row the SDK prices an unknown model as a guess at a Claude rate. Rounded
- * UP from the providers' peak list prices (Nov 2026), so the caps err towards stopping early.
- * OPENROUTER_PRICES (JSON, model id to Price) adds or replaces rows; set it when you change models.
+ * What the SDK charges each default model at, so total_cost_usd and the per-run caps mean something:
+ * without a row the SDK prices an unknown model as a guess at a Claude rate. Rounded UP from the
+ * providers' peak list prices (Nov 2026), so the caps err towards stopping early.
+ *
+ * This table is an ESTIMATE, not the bill: the daily cap counts what OpenRouter says it charged
+ * (src/spend.ts), and this is the fallback when that cannot be read. OPENROUTER_PRICES (JSON, model
+ * id to Price) adds or replaces rows; set it when you change models.
  */
 export const DEFAULT_OPENROUTER_PRICES: Record<string, Price> = {
   "deepseek/deepseek-v4.1-flash": { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.3 },
@@ -180,7 +183,7 @@ export function modelLine(): string {
     `Models: OpenRouter (haiku=${m.haiku}, sonnet=${m.sonnet}, opus=${m.opus}).`,
     ...bad,
     ...(process.env.ANTHROPIC_API_KEY ? [`Executive assistant: ${config.models.ea} on Anthropic.`] : ["ANTHROPIC_API_KEY is not set, so executive assistant jobs will fail: they run only on Anthropic."]),
-    ...(unpriced.length ? [`No price for ${unpriced.join(", ")}: set OPENROUTER_PRICES or the spend caps are guesses.`] : []),
+    ...(unpriced.length ? [`No price for ${unpriced.join(", ")}: set OPENROUTER_PRICES or the per-run caps and the estimate fall back to a guess (the daily cap uses OpenRouter's own usage figures).`] : []),
   ].join(" ");
 }
 

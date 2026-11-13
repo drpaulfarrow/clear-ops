@@ -100,7 +100,18 @@ export interface Job {
   finishedAt?: string;
   summary?: string;
   outputPath?: string;
+  /**
+   * The Agent SDK's cost for the run, priced from the table in src/llm.ts: an ESTIMATE, not the
+   * provider's bill. The daily cap uses the provider's own usage figure instead (src/spend.ts);
+   * this stays for the per-run cap, the fallback and the per-kind breakdown.
+   */
   costUsd?: number;
+  /**
+   * Which figure `costUsd` is, so no display can present an estimate as the bill. Per job it is
+   * "estimate": the SDK prices each run from its own table, and the provider's usage figure is
+   * cumulative for the account, so it is not attributed to a single job (src/spend.ts).
+   */
+  costSource?: "provider" | "estimate";
   error?: string;
   /**
    * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,
@@ -378,6 +389,8 @@ interface State {
   /** London dates (YYYY-MM-DD): the day /resume lifted the daily spend cap, and the day Paul was last told it was hit. */
   capLiftedOn?: string;
   capNotifiedOn?: string;
+  /** The provider's cumulative usage when the current London day began, for real spend (src/spend.ts). */
+  usageStart?: { ymd: string; usd: number; at: string };
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -702,6 +715,18 @@ export class Store {
   setCapDays(patch: { liftedOn?: string; notifiedOn?: string }): void {
     if (patch.liftedOn) this.state.capLiftedOn = patch.liftedOn;
     if (patch.notifiedOn) this.state.capNotifiedOn = patch.notifiedOn;
+    this.save();
+  }
+
+  /**
+   * The provider's cumulative usage when the current London day began (src/spend.ts). Kept in the
+   * store so a restart does not reset the day's real spend to zero.
+   */
+  usageStart(): { ymd: string; usd: number; at: string } | undefined {
+    return this.state.usageStart ? { ...this.state.usageStart } : undefined;
+  }
+  setUsageStart(start: { ymd: string; usd: number; at: string }): void {
+    this.state.usageStart = { ...start };
     this.save();
   }
 
