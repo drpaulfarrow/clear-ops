@@ -18,8 +18,6 @@ primary_region = "lhr"
   WORKER_MODEL = "haiku"
   ENGINEER_MODEL = "haiku"
   DESIGN_MODEL = "haiku"
-  JOB_BUDGET_USD = "5"
-  ENGINEER_BUDGET_USD = "10"
 
 [[mounts]]
   source = "clear_ops_data"

@@ -289,7 +289,7 @@ export function detectDepth(brief: string): ResearchDepth {
 export const DEEP_RESEARCH_NOTE = `Depth: deep. This is a deep research job with a larger turn and spend allowance than usual. Cover every part of the brief fully, check primary sources, and write the long, structured report described in your instructions, executive summary first.`;
 
 /** Turn and spend caps for a job run. Every run is capped; deep research gets more of both. */
-export function runLimits(kind: JobKind, depth?: ResearchDepth): { maxTurns: number; maxBudgetUsd: number } {
+export function runLimits(kind: JobKind, depth?: ResearchDepth): { maxTurns: number; maxBudgetUsd: number | undefined } {
   if (PR_KINDS.includes(kind)) return { maxTurns: 200, maxBudgetUsd: config.engineerBudgetUsd };
   if (kind === "maintain") return { maxTurns: 80, maxBudgetUsd: config.engineerBudgetUsd };
   if (kind === "design") return { maxTurns: 80, maxBudgetUsd: config.design.budgetUsd };
