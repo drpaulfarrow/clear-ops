@@ -317,7 +317,7 @@ export function buildApp(deps: AppDeps) {
           heading: "Card saved",
           icon: "tick",
           tone: "ok",
-          chip: `ending ${r.summary.last4}`,
+          chip: `Card ending ${r.summary.last4}`,
           text: `The card ending ${r.summary.last4} is in the vault. It is used only for a purchase you approve, item by item.`,
           foot: "You can close this tab.",
         }),

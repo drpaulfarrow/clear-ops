@@ -57,7 +57,7 @@ label:first-of-type{margin-top:0}
 label .lock{display:inline-block;vertical-align:-2px;margin-right:.4rem}
 input{display:block;width:100%;font:inherit;font-size:1rem;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:.85rem .9rem;-webkit-appearance:none;appearance:none}
 input::placeholder{color:#a9a096}
-input:focus{outline:none;border-color:#bdb4a7;box-shadow:0 0 0 3px rgba(51,68,60,.12)}
+input:focus{outline:none;border-color:#b3a99b;box-shadow:0 0 0 3px rgba(51,68,60,.18)}
 button{display:block;width:100%;font:inherit;font-size:1rem;font-weight:600;color:var(--accent-ink);background:var(--accent);border:0;border-radius:12px;padding:1.05rem;margin-top:2.1rem;cursor:pointer}
 button:hover{background:#2b3933}
 .hint{color:var(--muted);font-size:.85rem;margin:.55rem 0 0}
