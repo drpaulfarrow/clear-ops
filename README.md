@@ -55,8 +55,8 @@ How uploads are handled, since they may hold personal data:
 
 ## Set up in five steps
 
-### 1. Anthropic key
-Create an API key at the Claude Console and keep it for step 4. The agents run on Anthropic's API and are billed by usage; every job has a spend cap.
+### 1. A model key: Anthropic or OpenRouter
+Create an API key at the Claude Console, or at openrouter.ai to run the agents on cheaper open models (see "Models through OpenRouter" below), and keep it for step 4. Either way the agents are billed by usage, and every job has a spend cap.
 
 ### 2. A chat channel: Telegram, Discord, or both
 
@@ -114,7 +114,7 @@ npm run dev
 The workflow in `.github/workflows/deploy.yml` creates the Fly app and volume, pushes the secrets and deploys. You need two websites.
 
 1. At fly.io, sign up (a card is required; this runs on one small machine, a few dollars a month). Then Account > Tokens > create a token.
-2. In this GitHub repository: Settings > Secrets and variables > Actions > New repository secret, one for each of: `FLY_API_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, `PRODUCT_REPO` (for example `drpaulfarrow/clear-exchange`), and the bot tokens for the channels you use: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`. Leave the allowlists (`ALLOWED_TELEGRAM_IDS`, `ALLOWED_DISCORD_IDS`) out for now. A repository variable `CHANNELS` picks the channels; the default is `telegram,discord`.
+2. In this GitHub repository: Settings > Secrets and variables > Actions > New repository secret, one for each of: `FLY_API_TOKEN`, `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, `GH_TOKEN`, `PRODUCT_REPO` (for example `drpaulfarrow/clear-exchange`), and the bot tokens for the channels you use: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`. Leave the allowlists (`ALLOWED_TELEGRAM_IDS`, `ALLOWED_DISCORD_IDS`) out for now. A repository variable `CHANNELS` picks the channels; the default is `telegram,discord`.
 3. Actions tab > ci > Run workflow. The first deploy creates the app and volume, and the service starts, clones both repositories and begins polling Telegram.
 4. Message your bot on each channel. It replies with your id. Add those as the `ALLOWED_TELEGRAM_IDS` and `ALLOWED_DISCORD_IDS` secrets and run the workflow again. From then on it answers only you, and every merge to main redeploys on its own.
 
@@ -209,6 +209,15 @@ Ask for one piece of design work ("Design: critique the publisher page as a news
 4. After three implemented rounds, or sooner if the critiques find no high-impact issues, it sends a closing report with before and after images.
 
 You hear from it only when something is your call, such as picking one of three brand directions: the boards arrive as images in Telegram or Discord with a lettered question. Reply with your choice ("B, but warmer") and the loop carries on. Screenshots and assets live under `DATA_DIR/design/<job id>`.
+
+## Models through OpenRouter
+Set `OPENROUTER_API_KEY` (a GitHub Actions secret of the same name for the Fly deploy) and every agent, the chief included, runs through OpenRouter instead of Anthropic. Nothing else changes: the Agent SDK is pointed at OpenRouter's Anthropic-compatible endpoint (`src/llm.ts`), and the model aliases the roles use map to OpenRouter models. Defaults: `haiku` is `deepseek/deepseek-v4.1-flash`, `sonnet` is `z-ai/glm-5.3`, `opus` and `fable` are `moonshotai/kimi-k3.1-pro`; every role defaults to `haiku`. Change them with `OPENROUTER_HAIKU_MODEL`, `OPENROUTER_SONNET_MODEL` and `OPENROUTER_OPUS_MODEL` (repository variables of the same names), or give a role a full OpenRouter id.
+
+The executive assistant is the exception: it reads your mail and calendar, so it always runs on Claude Sonnet on Anthropic's API directly (`EA_MODEL`, default `sonnet`), and keeps `ANTHROPIC_API_KEY` in use alongside the OpenRouter key. Without that key its jobs fail rather than fall back to OpenRouter. Follow-up work ("Draft nudge <id>" jobs) and everything else, the chief included, uses the open models; the follow-up tracker and stale nudges themselves run no model.
+
+Spend caps keep working because each model in use has a price row handed to the SDK; the defaults are rounded up from list prices. A model without a row is priced as a guess, so the start-up log says so: add it to `OPENROUTER_PRICES`. Put a credit limit on the OpenRouter key too, as the hard backstop.
+
+Before relying on it: OpenRouter documents that Claude Code, which the Agent SDK runs on, is only guaranteed with Anthropic models, so try a research job, a draft and a small engineer job and read the results. Check WebSearch in particular, since it is a server-side tool. In OpenRouter's privacy settings, allow only providers with zero data retention: the chief and the follow-up drafts still see summaries and snippets of mail, and they go to whichever provider serves the model. Remove `OPENROUTER_API_KEY` to go back to Anthropic.
 
 ## Configuration
 See `.env.example`. The important ones:
