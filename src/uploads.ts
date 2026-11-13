@@ -341,6 +341,20 @@ export function describeUploads(saved: SavedUpload[], failed: Array<{ name: stri
   return lines.join("\n");
 }
 
+/**
+ * What stands in for Paul's message when a voice note arrived with no caption, which is the usual case:
+ * a Telegram voice note cannot carry one and a Discord voice message arrives with empty content. The
+ * transcript is what he said, so it is handed over as his message rather than as a file note the chief
+ * might only acknowledge. It keeps the "transcribed" mark, because a transcript may mishear names and
+ * numbers. Undefined when there is no transcript, and the caller says it has no message with the files.
+ */
+export function transcriptAsMessage(voice: VoiceNote[]): string | undefined {
+  const heard = voice.filter((v) => v.text);
+  if (!heard.length) return undefined;
+  if (heard.length === 1) return `Paul's message (transcribed from his voice note, so it may mishear names and numbers, but it is what he said): "${heard[0].text}"`;
+  return `Paul's messages (transcribed from his voice notes, so they may mishear names and numbers, but they are what he said):\n${heard.map((v) => `"${v.text}"`).join("\n")}`;
+}
+
 /** The short receipt sent to Paul before the chief replies. */
 export function receiptText(saved: SavedUpload[], failed: Array<{ name: string; reason: string }>): string {
   const parts: string[] = [];

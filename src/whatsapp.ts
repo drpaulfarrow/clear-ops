@@ -103,6 +103,41 @@ export function whatsappAudioName(a: WhatsAppAudio): string {
   return `${a.voice === false ? "audio" : "voice-note"}-${a.id}${ext}`;
 }
 
+/** Meta's media lookup answers with a small JSON body: cap it, and never wait on it forever. */
+const MEDIA_INFO_MAX_BYTES = 64 * 1024;
+const MEDIA_INFO_TIMEOUT_MS = 15_000;
+
+/** The media id's short-lived URL and size, read with a timeout and a cap. Empty when it cannot be read. */
+async function mediaInfo(mediaUrl: string, fetchImpl: typeof fetch): Promise<{ url?: string; file_size?: number }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), MEDIA_INFO_TIMEOUT_MS);
+  try {
+    const res = await fetchImpl(mediaUrl, {
+      headers: { Authorization: `Bearer ${config.whatsapp.token}` },
+      signal: ac.signal,
+    });
+    if (!res.ok || !res.body) return {};
+    const parts: Buffer[] = [];
+    let total = 0;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MEDIA_INFO_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return {};
+      }
+      parts.push(Buffer.from(value));
+    }
+    return JSON.parse(Buffer.concat(parts).toString("utf8") || "{}") as { url?: string; file_size?: number };
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Turn a WhatsApp audio message into an attachment that downloads only when asked (after the
  * allowlist check). Meta hands back a short-lived URL for the media id first, then the bytes from it;
@@ -114,11 +149,8 @@ export function whatsappAttachment(a: WhatsAppAudio, fetchImpl: typeof fetch = f
     mimeType: a.mimeType,
     size: a.size,
     async download(maxBytes: number) {
-      const res = await fetchImpl(`https://graph.facebook.com/${config.whatsapp.apiVersion}/${encodeURIComponent(a.id)}`, {
-        headers: { Authorization: `Bearer ${config.whatsapp.token}` },
-      });
-      const data = (await res.json().catch(() => ({}))) as { url?: string; file_size?: number };
-      if (!res.ok || !data.url) throw new UploadError("WhatsApp would not hand the audio message over");
+      const data = await mediaInfo(`https://graph.facebook.com/${config.whatsapp.apiVersion}/${encodeURIComponent(a.id)}`, fetchImpl);
+      if (!data.url) throw new UploadError("WhatsApp would not hand the audio message over");
       if (data.file_size != null && data.file_size > maxBytes) throw new UploadError("too large");
       return fetchCapped(data.url, maxBytes, fetchImpl, { Authorization: `Bearer ${config.whatsapp.token}` });
     },

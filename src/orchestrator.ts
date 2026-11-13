@@ -9,7 +9,7 @@ import type { Scheduler } from "./scheduler.js";
 import type { Job, JobKind, JobTarget, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
-import { describeUploads, formatSize, inlineImages, receiptText, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
+import { describeUploads, formatSize, inlineImages, receiptText, transcriptAsMessage, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
 import { isAudio, transcribe, TranscribeError, transcriptionAvailable, transcriptionUnavailableReason } from "./transcribe.js";
 import { GoogleAuth, setupSteps } from "./google.js";
 import { parseOutboundCommand, type OutboundGate } from "./outbound.js";
@@ -184,7 +184,10 @@ export class Orchestrator {
     const voice = await this.transcribeVoiceNotes(saved);
     const images = inlineImages(saved);
     const note = describeUploads(saved, failed, images.length, voice);
-    const prompt = `${note}\n\n${text ? `Paul's message: ${text}` : "Paul sent no message with the file(s). Acknowledge briefly, say what each is in a line, and ask or act as the conversation suggests."}`;
+    // A voice note carries no caption, so the transcript is Paul's message for this turn: the chief
+    // answers what he said rather than only acknowledging a file it cannot otherwise read.
+    const spoken = transcriptAsMessage(voice);
+    const prompt = `${note}\n\n${text ? `Paul's message: ${text}` : spoken ?? "Paul sent no message with the file(s). Acknowledge briefly, say what each is in a line, and ask or act as the conversation suggests."}`;
     return this.askChief(sender, from, messageId, prompt, images);
   }
 

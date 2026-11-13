@@ -117,11 +117,14 @@ function scrub(text: string): string {
   return out.replace(/\b(Bearer|sk-or-v1-|sk-)[\w.-]{6,}/gi, "***").slice(0, 200);
 }
 
+/** Extensions the endpoint itself lists. Anything else (Telegram's .oga, Discord's .opus) is renamed. */
+const ENDPOINT_EXTENSIONS = new Set(["ogg", "mp3", "m4a", "wav", "flac", "webm", "aac"]);
+
 /** A name for the upload whose extension tells the endpoint the format. */
 function sendName(name: string, format: string): string {
-  const clean = path.basename(name || `voice-note.${format}`);
-  const ext = path.extname(clean).toLowerCase();
-  if (EXTENSION_FORMATS[ext] === format) return clean;
+  const clean = path.basename(name || "");
+  const ext = path.extname(clean).slice(1).toLowerCase();
+  if (ext === format && ENDPOINT_EXTENSIONS.has(ext)) return clean;
   return `voice-note.${format}`;
 }
 

@@ -157,6 +157,22 @@ test("a provider that never answers gives up on the timeout with a plain reason"
   }
 });
 
+test("a name the endpoint does not list (.oga, .opus) is sent as voice-note.ogg rather than refused", async () => {
+  useTranscribe({ key: KEY });
+  const { calls, restore } = stubFetch(() => json({ text: "noted" }));
+  try {
+    await transcribe(ogg(2), { name: "2026-11-13-voice-note-1.oga", mimeType: "audio/ogg" });
+    await transcribe(ogg(2), { name: "voice-message.opus", mimeType: "audio/opus" });
+    await transcribe(ogg(2), { name: "voice-note-1.ogg", mimeType: "audio/ogg" });
+    assert.equal((calls[0].init.body as FormData).get("file") instanceof File, true);
+    assert.equal(((calls[0].init.body as FormData).get("file") as File).name, "voice-note.ogg");
+    assert.equal(((calls[1].init.body as FormData).get("file") as File).name, "voice-note.ogg");
+    assert.equal(((calls[2].init.body as FormData).get("file") as File).name, "voice-note-1.ogg", "a listed extension is kept");
+  } finally {
+    restore();
+  }
+});
+
 test("only audio is transcribed, and a generic file type does not hide a voice note", () => {
   assert.ok(isAudio("voice-note-1.ogg", "audio/ogg"));
   assert.ok(isAudio("voice-77.ogg", "application/octet-stream"), "Telegram may send no real type for a voice note");
@@ -254,6 +270,45 @@ test("text and other attachments behave exactly as before: no transcription, no 
   }
 });
 
+test("a captionless voice note's transcript is handed over as Paul's message, not just a file note", async () => {
+  useTranscribe({ key: KEY });
+  const { restore } = stubFetch(() => json({ text: "Move the standup to Thursday" }));
+  try {
+    const { orch, calls } = harness();
+    await orch.handle("tg:99887766", "", { attachments: [att("voice-note-1.ogg", ogg(4), "audio/ogg")] });
+    const prompt = calls[0].prompt;
+    assert.match(prompt, /Paul's message \(transcribed from his voice note/, "the transcript stands in for his message");
+    assert.match(prompt, /"Move the standup to Thursday"/);
+    assert.doesNotMatch(prompt, /Paul sent no message with the file\(s\)/, "the chief is never told to just acknowledge it");
+    assert.match(prompt, /transcribed automatically/, "and it is still marked as a transcript that may mishear things");
+    assert.ok(prompt.indexOf("transcript)") < prompt.indexOf("Paul's message ("), "the file note still comes first");
+  } finally {
+    restore();
+  }
+});
+
+test("a caption stays Paul's message and the transcript stays the note", async () => {
+  useTranscribe({ key: KEY });
+  const { restore } = stubFetch(() => json({ text: "Move the standup to Thursday" }));
+  try {
+    const { orch, calls } = harness();
+    await orch.handle("tg:99887766", "listen to this", { attachments: [att("voice-note-1.ogg", ogg(4), "audio/ogg")] });
+    const prompt = calls[0].prompt;
+    assert.match(prompt, /Paul's message: listen to this$/);
+    assert.doesNotMatch(prompt, /Paul's message \(transcribed/);
+  } finally {
+    restore();
+  }
+});
+
+test("with no key and no caption the chief is still told plainly there was no message with the file", async () => {
+  useTranscribe({ key: "" });
+  const { orch, calls } = harness();
+  await orch.handle("tg:99887766", "", { attachments: [att("voice-note-1.ogg", ogg(4), "audio/ogg")] });
+  assert.match(calls[0].prompt, /Paul sent no message with the file\(s\)/);
+  assert.doesNotMatch(calls[0].prompt, /Paul's message \(transcribed/);
+});
+
 /* ---------- WhatsApp, whose audio arrives as a media id ---------- */
 
 test("a WhatsApp audio message is parsed, named and fetched only when the download is asked for", async () => {
@@ -309,6 +364,24 @@ test("WhatsApp audio is never fetched from anywhere but https, and a refusal is 
   const { restore: restore2 } = stubFetch(() => json({ error: { message: "media expired" } }, 404));
   try {
     const a = whatsappAttachment({ id: "MEDIA3", mimeType: "audio/ogg", voice: true });
+    await assert.rejects(() => a.download(1024 * 1024), /WhatsApp would not hand the audio message over/);
+  } finally {
+    restore2();
+  }
+});
+
+test("Meta's media lookup is capped, and an oversized or hopeless answer is a plain refusal", async () => {
+  const huge = new Response("x".repeat(70 * 1024), { status: 200 });
+  const { restore } = stubFetch(() => huge);
+  try {
+    const a = whatsappAttachment({ id: "MEDIA5", mimeType: "audio/ogg", voice: true });
+    await assert.rejects(() => a.download(1024 * 1024), /WhatsApp would not hand the audio message over/);
+  } finally {
+    restore();
+  }
+  const { restore: restore2 } = stubFetch(() => new Response("not json at all", { status: 200 }));
+  try {
+    const a = whatsappAttachment({ id: "MEDIA6", mimeType: "audio/ogg", voice: true });
     await assert.rejects(() => a.download(1024 * 1024), /WhatsApp would not hand the audio message over/);
   } finally {
     restore2();
