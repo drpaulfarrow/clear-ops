@@ -273,7 +273,14 @@ test(
       await session.open(`http://127.0.0.1:${port}/`);
       const after = await session.signIn();
       assert.match(after, /Signed in[\s\S]*Welcome back/);
-      assert.match(got.join(" "), new RegExp(`otp=${totp(secret)}(&|$)`), "the service generated the code from the vault key");
+      const filled = got.join(" ").match(/(?:^|&)otp=([0-9]{6})(?:&|$)/);
+      assert.ok(filled, "the service filled a code into the page");
+      // The code comes from the vault key, not from anywhere else. It is checked against the key's own
+      // steps around now rather than one instant, because codes rotate every 30 seconds and a browser
+      // test on a loaded machine takes longer than that between filling the field and asserting.
+      const now = Date.now();
+      const fromKey = [-2, -1, 0, 1].some((i) => totp(secret, now + i * 30_000) === filled[1]);
+      assert.ok(fromKey, `the code the service filled came from the vault key (got ${filled[1]})`);
     } finally {
       await session.close();
       server.close();
