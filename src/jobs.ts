@@ -242,7 +242,9 @@ export class JobRunner {
   /** True when today's spend is at or past the daily cap and /resume has not lifted it for today. */
   capReached(): boolean {
     const today = londonYmd(new Date(this.now()));
-    return this.store.capDays().liftedOn !== today && this.spendState().usd >= config.dailyBudgetUsd;
+    const cap = config.dailyBudgetUsd;
+    if (cap === undefined) return false;
+    return this.store.capDays().liftedOn !== today && this.spendState().usd >= cap;
   }
 
   /** Leaves a job queued because of the cap, then confirms the figure before telling Paul. */
@@ -272,7 +274,7 @@ export class JobRunner {
     const today = londonYmd(new Date(this.now()));
     if (this.store.capDays().notifiedOn !== today) {
       this.store.setCapDays({ notifiedOn: today });
-      const cap = `$${config.dailyBudgetUsd.toFixed(2)}`;
+      const cap = `$${(config.dailyBudgetUsd ?? 0).toFixed(2)}`;
       const tail = "Send /resume to lift it for the rest of today, or they start tomorrow.";
       // The provider's own figure, or that there is none. The SDK's estimate is never printed: when
       // OpenRouter cannot be read the message says so and says the cap is on an internal stand-in.
