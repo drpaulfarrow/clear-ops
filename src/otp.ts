@@ -261,7 +261,7 @@ export class OtpRelay {
   /** The ask itself, sent only once the request is registered, so a fast reply cannot miss it. */
   private askText(req: OtpRequest, ttlMs: number): string {
     const mins = Math.max(1, Math.round(ttlMs / 60_000));
-    return `${siteLabel(req.host)} asked for a code to sign in. Reply: code ${req.id} <the code>\nType the code where it says <the code>. It goes straight into the page, works for ${mins} minutes and is not kept.`;
+    return `${siteLabel(req.host)} asked for a code to sign in. Reply: code ${req.id} <the code>\nType the code where it says <the code>. It goes straight into the page, works for ${mins} minute${mins === 1 ? "" : "s"} and is not kept.`;
   }
 
   /**
