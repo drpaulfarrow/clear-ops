@@ -19,7 +19,7 @@ import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
-import { spendCaveat, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
+import { spendSourceLabel, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 
@@ -262,8 +262,7 @@ export class JobRunner {
     if (this.store.capDays().notifiedOn !== today) {
       this.store.setCapDays({ notifiedOn: today });
       const spend = this.spendState();
-      const caveat = spendCaveat(spend);
-      const spent = `$${spend.usd.toFixed(2)} spent today${caveat ? ` (our estimate: ${caveat})` : " (OpenRouter's own figure)"}`;
+      const spent = `$${spend.usd.toFixed(2)} spent today (${spendSourceLabel(spend)})`;
       void this.messenger
         .send(blocked.replyTo ?? blocked.requestedBy, `The daily spend cap of $${config.dailyBudgetUsd} is hit: ${spent}, so new jobs are waiting, starting with ${jobLabel(blocked)}. Send /resume to lift it for the rest of today, or they start tomorrow.`)
         .catch(() => undefined);
@@ -489,7 +488,10 @@ export class JobRunner {
     if (!next) return false;
     if (this.capReached()) {
       this.store.updateJob(next.id, { capBlocked: true });
-      this.noticeCap(next);
+      // Same path as a job blocked as it arrives: read the provider's own figure (cached, so at most
+      // a call a minute) and only then tell Paul, so a stale estimate cannot hold the queue back.
+      // If the real spend is under the cap, `confirmCap` releases the queue and the job starts.
+      await this.confirmCap(next);
       return false;
     }
     this.store.updateJob(next.id, { capBlocked: undefined });

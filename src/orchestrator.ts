@@ -17,7 +17,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { BROWSE_KINDS } from "./web-tools.js";
-import { spendCaveat } from "./spend.js";
+import { jobCostWord, spendSourceLabel } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
 import { explainCloneFailure, repoRegistry } from "./repos.js";
 import { FOLLOWUP_COMMANDS, FollowUps, parseWhen } from "./followups.js";
@@ -483,10 +483,9 @@ export class Orchestrator {
     const lines: string[] = [];
     if (day === today) {
       const spend = this.jobs.spendState();
-      const caveat = spendCaveat(spend);
       const lifted = this.store.capDays().liftedOn === today;
       const state = this.jobs.capReached() ? "cap is blocking new jobs" : lifted && spend.usd >= cap ? "cap lifted for today, not blocking" : "not blocking jobs";
-      lines.push(`${label} (${day}): ${usd(spend.usd)} spent today${caveat ? ` (our estimate: ${caveat})` : " (OpenRouter's own figure)"}, cap ${usd(cap)}, ${usd(Math.max(0, cap - spend.usd))} left, ${state}.`);
+      lines.push(`${label} (${day}): ${usd(spend.usd)} spent today (${spendSourceLabel(spend)}), cap ${usd(cap)}, ${usd(Math.max(0, cap - spend.usd))} left, ${state}.`);
       if (spend.source === "provider") lines.push(`The Agent SDK's estimate for today's jobs is ${usd(total)}: its price table, rounded up, so not the bill.`);
     } else {
       lines.push(`${label} (${day}): ${usd(total)} on jobs, daily cap ${usd(cap)}. OpenRouter's usage is read for today only, so a past day is the Agent SDK's estimate.`);
@@ -496,7 +495,7 @@ export class Orchestrator {
       for (const j of jobs) by.set(j.kind, (by.get(j.kind) ?? 0) + (j.costUsd ?? 0));
       lines.push("By kind (estimated): " + [...by].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k} ${usd(c)}`).join(", ") + ".");
       const top = [...jobs].sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0)).slice(0, 3);
-      lines.push("Top (estimated): " + top.map((j) => `${jobTitle(j)} (${j.id}) ${usd(j.costUsd ?? 0)}`).join(", ") + ".");
+      lines.push("Top: " + top.map((j) => `${jobTitle(j)} (${j.id}) ${usd(j.costUsd ?? 0)} ${jobCostWord(j)}`).join(", ") + ".");
     } else lines.push("No jobs with a recorded cost finished that day.");
     lines.push("Known gaps: the chief's own chat replies are not in the estimate (on OpenRouter they are in the provider's figure), and the executive assistant runs on Anthropic, so it is in neither.");
     return lines.join("\n");

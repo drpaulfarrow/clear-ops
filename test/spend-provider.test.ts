@@ -19,7 +19,7 @@ const { JobRunner } = await import("../src/jobs.js");
 const { Orchestrator } = await import("../src/orchestrator.js");
 const { Scheduler } = await import("../src/scheduler.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
-const { SpendMeter, spendCaveat, spendPhrase } = await import("../src/spend.js");
+const { SpendMeter, spendCaveat, spendPhrase, spendSourceLabel } = await import("../src/spend.js");
 const { londonYmd } = await import("../src/london.js");
 import type { AgentRunner } from "../src/agents.js";
 
@@ -45,7 +45,7 @@ function usageFetch(values: Reply[]) {
 }
 
 /** A fixed clock, so the London day and the refresh interval are both under the test's control. */
-function harness(options: { usage: Reply[]; at?: number; maxAgeMs?: number }) {
+function harness(options: { usage: Reply[]; at?: number; maxAgeMs?: number; slots?: number; hold?: boolean }) {
   const clock = { t: options.at ?? Date.parse("2026-11-13T10:00:00Z") };
   const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-spend-src-")));
   const messenger = new ConsoleMessenger();
@@ -54,9 +54,12 @@ function harness(options: { usage: Reply[]; at?: number; maxAgeMs?: number }) {
     sent.push(text);
   };
   const started: string[] = [];
+  /** With `hold`, each run waits until the test lets it finish, so a job can be held mid-run. */
+  const held: Array<() => void> = [];
   const runner: AgentRunner = async (o) => {
     started.push(o.prompt.split("\n")[0]);
-    return { text: "done" };
+    if (!options.hold) return { text: "done" };
+    return new Promise((resolve) => held.push(() => resolve({ text: "done" })));
   };
   const { fetchImpl, calls } = usageFetch(options.usage);
   const meter = new SpendMeter({
@@ -68,7 +71,7 @@ function harness(options: { usage: Reply[]; at?: number; maxAgeMs?: number }) {
     save: (b) => store.setUsageStart(b),
     warn: () => undefined,
   });
-  const jobs = new JobRunner(store, messenger, runner, undefined, { spend: meter, liveness: { now: () => clock.t } });
+  const jobs = new JobRunner(store, messenger, runner, undefined, { spend: meter, liveness: { now: () => clock.t }, slots: options.slots });
   const orch = new Orchestrator(store, messenger, jobs, new Scheduler(store, jobs), runner);
   /** A job that finished today, with the SDK's rounded-up estimate the cap used to believe. */
   const estimated = (cost: number) => {
@@ -76,7 +79,7 @@ function harness(options: { usage: Reply[]; at?: number; maxAgeMs?: number }) {
     store.updateJob(j.id, { status: "done", costUsd: cost, finishedAt: new Date(clock.t - HOUR).toISOString() });
     return j;
   };
-  return { store, jobs, orch, meter, sent, started, clock, calls, estimated };
+  return { store, jobs, orch, meter, sent, started, held, clock, calls, estimated };
 }
 
 const waitFor = async (pred: () => boolean, ms = 2000) => {
@@ -113,7 +116,22 @@ test("the cap counts OpenRouter's own usage for the day, not the SDK's rounded-u
   assert.match(out, /Today \(\d{4}-\d{2}-\d{2}\): \$1\.66 spent today \(OpenRouter's own figure\), cap \$10\.00, \$8\.34 left, not blocking jobs\./);
   assert.match(out, /The Agent SDK's estimate for today's jobs is \$20\.00: its price table, rounded up, so not the bill\./);
   assert.match(out, /By kind \(estimated\): research \$20\.00\./);
-  assert.match(out, /Top \(estimated\): Costly research/);
+  assert.match(out, /Top: Costly research \(\w+\) \$20\.00 estimated/);
+});
+
+test("a job whose turn comes is confirmed against the provider, so a stale estimate cannot hold the queue", async () => {
+  const h = harness({ usage: [100, 101.66], slots: 1, hold: true });
+  h.estimated(20); // the estimate alone is past the $10 cap
+  h.jobs.start("engineer", "E1", FOUNDER);
+  await waitFor(() => h.started.includes("E1"));
+  h.jobs.start("engineer", "E2", FOUNDER); // one slot, so this queues behind E1
+  assert.deepEqual(h.started, ["E1"], "E2 waits for the free slot");
+  h.clock.t += 6 * MINUTE; // the reading is now stale, so the cap falls back to the $20 estimate
+  assert.equal(h.jobs.spendState().source, "estimate");
+  assert.equal(h.jobs.capReached(), true);
+  h.held.shift()!(); // E1 finishes and hands its repository to the queue
+  await waitFor(() => h.started.includes("E2"));
+  assert.equal(h.sent.filter((t) => /daily spend cap/.test(t)).length, 0, "no false 'cap is hit' message on the queue path");
 });
 
 test("with the provider unreachable the estimate is used, said to be an estimate, and the cap still blocks", async () => {
@@ -210,6 +228,9 @@ test("Anthropic mode keeps the SDK's list-price cost and never calls a usage end
   await meter.refresh();
   const spend = meter.today(4.5, "2026-11-13");
   assert.equal(fetched, 0, "no provider is asked without a key");
-  assert.deepEqual({ usd: spend.usd, source: spend.source }, { usd: 4.5, source: "estimate" });
-  assert.match(spendCaveat(spend)!, /no usage endpoint to read/);
+  // On Anthropic the SDK's list-price cost is the bill, so it is not called an estimate.
+  assert.deepEqual({ usd: spend.usd, source: spend.source }, { usd: 4.5, source: "anthropic" });
+  assert.equal(spendCaveat(spend), undefined, "the bill is not caveated");
+  assert.equal(spendSourceLabel(spend), "Anthropic's own list price");
+  assert.equal(spendPhrase(spend), "$4.50 charged by Anthropic (list price)");
 });

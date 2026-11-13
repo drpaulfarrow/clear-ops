@@ -13,12 +13,17 @@
  * store so a restart does not lose it.
  *
  * The SDK estimate is kept and used only as a fallback, and every message says which figure it is.
- * An Anthropic-only deployment is unchanged: there is no usage endpoint to read, the SDK's
- * list-price cost is the figure, and it is labelled as coming from the price table.
+ * An Anthropic-only deployment is unchanged: there is no usage endpoint to read, and the SDK's
+ * list-price cost is the figure, labelled as Anthropic's own list price rather than as an estimate,
+ * because on Anthropic that is what is billed.
  *
  * The provider is asked at most once a minute (`refresh()` is cached), a reading older than
  * `SPEND_MAX_AGE_MS` is treated as stale and the estimate is used instead, and a failure, a rate
  * limit or a non-numeric reply all fall back rather than silently counting as zero.
+ *
+ * Known gap: a restart that spans midnight re-bases the day on the first reading after boot, so
+ * spend between midnight and that reading is not counted. It is a soft cap: a single run is still
+ * bounded by the per-run cap, and the estimate covers the day until the provider is read.
  */
 import { config } from "./config.js";
 import { OPENROUTER_BASE_URL } from "./llm.js";
@@ -31,8 +36,12 @@ export const SPEND_MAX_AGE_MS = 5 * 60_000;
 /** How long one usage call may take before it is abandoned. */
 export const SPEND_TIMEOUT_MS = 5_000;
 
-/** Where a spend figure came from: the provider's own account, or our price table. */
-export type SpendSource = "provider" | "estimate";
+/**
+ * Where a spend figure came from: OpenRouter's own account, Anthropic's own list prices (which is
+ * the bill when the workforce runs on Anthropic directly), or our rounded-up price table, which is
+ * an estimate and never the bill.
+ */
+export type SpendSource = "provider" | "anthropic" | "estimate";
 
 /** One reading of the provider's cumulative usage. */
 export interface SpendReading {
@@ -145,7 +154,9 @@ export class SpendMeter {
    */
   today(estimateUsd: number, ymd = londonYmd(new Date(this.now()))): RealSpend {
     if (!this.enabled) {
-      return { usd: estimateUsd, source: "estimate", note: "the Agent SDK's list price, with no usage endpoint to read" };
+      // Anthropic mode: the SDK prices every run from Anthropic's list prices, and that is the bill,
+      // so this is not labelled an estimate (there is simply no usage endpoint to read).
+      return { usd: estimateUsd, source: "anthropic" };
     }
     const reading = this.reading;
     const fresh = reading !== undefined && this.now() - reading.at <= this.maxAgeMs;
@@ -220,12 +231,26 @@ export class SpendMeter {
 
 /** A figure with its source, for chat: an estimate is never written as the bill. */
 export function spendPhrase(spend: RealSpend): string {
-  return spend.source === "provider" ? `$${spend.usd.toFixed(2)} charged by OpenRouter` : `$${spend.usd.toFixed(2)} estimated`;
+  if (spend.source === "provider") return `$${spend.usd.toFixed(2)} charged by OpenRouter`;
+  if (spend.source === "anthropic") return `$${spend.usd.toFixed(2)} charged by Anthropic (list price)`;
+  return `$${spend.usd.toFixed(2)} estimated`;
 }
 
-/** Why a figure is only an estimate, or undefined when it is the provider's own. */
+/** Why a figure is only an estimate, or undefined when it is a provider's own (OpenRouter or Anthropic). */
 export function spendCaveat(spend: RealSpend): string | undefined {
-  return spend.source === "provider" ? undefined : spend.note;
+  return spend.source === "estimate" ? spend.note : undefined;
+}
+
+/** Which figure this is, in one clause, so no message can pass an estimate off as the bill. */
+export function spendSourceLabel(spend: RealSpend): string {
+  if (spend.source === "provider") return "OpenRouter's own figure";
+  if (spend.source === "anthropic") return "Anthropic's own list price";
+  return `our estimate: ${spend.note ?? "the Agent SDK's price table"}`;
+}
+
+/** Which figure a job's `costUsd` is, in one word, for `/spend`'s per-job lines. */
+export function jobCostWord(job: { costSource?: "provider" | "estimate" }): string {
+  return job.costSource === "provider" ? "charged" : "estimated";
 }
 
 /** The meter the service uses: the store keeps the day's starting figure so a restart keeps it. */
