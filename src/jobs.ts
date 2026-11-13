@@ -93,6 +93,43 @@ export function loadNote(load = os.loadavg()[0], cores = os.cpus().length, perCo
   return `heavy load ${load.toFixed(1)} on ${cores} cores`;
 }
 
+/** What the machine has left to give: how much of it is spoken for, in bytes. */
+export interface Memory {
+  total: number;
+  /** Memory another process could have without the kernel swapping or killing something, where known. */
+  available: number;
+}
+
+/**
+ * The machine's memory as the kernel sees it: MemAvailable from /proc/meminfo where it exists, else
+ * whatever Node can say. This is the tighter limit than the cores when several jobs build and test at
+ * once (four typechecks and their test runs measured 3.6GB of a 4GB machine), so it is worth naming.
+ */
+export function readMemory(): Memory {
+  const total = os.totalmem();
+  try {
+    const info = fs.readFileSync("/proc/meminfo", "utf8");
+    const available = /^MemAvailable:\s+(\d+) kB/m.exec(info);
+    if (available) return { total, available: Number(available[1]) * 1024 };
+  } catch {
+    // Not Linux, or no /proc: fall back to what Node reports.
+  }
+  return { total, available: os.freemem() };
+}
+
+/**
+ * One line for the log when the machine is nearly out of memory, so four jobs at once is seen in the log
+ * rather than discovered as an out-of-memory restart. Like loadNote it only describes: nothing waits,
+ * slows or queues because of it.
+ */
+export function memoryNote(memory: Memory = readMemory(), nearlyFull = 0.12): string | undefined {
+  const { total, available } = memory;
+  if (!Number.isFinite(total) || !Number.isFinite(available) || total <= 0 || available < 0) return undefined;
+  if (available > nearlyFull * total) return undefined;
+  const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)}GB`;
+  return `memory nearly full, ${gb(available)} of ${gb(total)} free`;
+}
+
 /** How long a job waits before looking again for a working copy of its own (tests shorten it). */
 const COPY_WAIT_MS = 10_000;
 
@@ -471,10 +508,10 @@ export class JobRunner {
     let lane = own;
     if (used.has(lane)) for (lane = 0; used.has(lane); lane++);
     if (lane !== (this.store.getJob(id)?.lane ?? 0)) this.store.updateJob(id, { lane: lane || undefined });
-    // A busy machine is worth a log line: four cores, several test runs and typechecks at once. It is
-    // only ever a line. Nothing here waits, slows or holds back a job that has a slot.
-    const load = loadNote();
-    if (load) console.log(`${load}: starting ${jobRef(this.store.getJob(id), id)} anyway.`);
+    // A busy or nearly full machine is worth a log line: four cores and 4GB, several test runs and
+    // typechecks at once. It is only ever a line. Nothing here waits, slows or holds back a job with a slot.
+    const state = [loadNote(), memoryNote()].filter(Boolean).join(", ");
+    if (state) console.log(`${state}: starting ${jobRef(this.store.getJob(id), id)} anyway.`);
   }
 
   /**

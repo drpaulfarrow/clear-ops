@@ -20,7 +20,7 @@ process.env.REPO_DIR = PRODUCT;
 process.env.SELF_REPO_DIR = SELF;
 
 const { Store } = await import("../src/store.js");
-const { JobRunner, ensureLane, laneDir, laneNote, loadNote, serialiseLaneSetup } = await import("../src/jobs.js");
+const { JobRunner, ensureLane, laneDir, laneNote, loadNote, memoryNote, readMemory, serialiseLaneSetup } = await import("../src/jobs.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 const { config, engineerSlots, engineerSlotsLine, ENGINEER_SLOTS_MAX } = await import("../src/config.js");
 import type { AgentRunner, RunResult } from "../src/agents.js";
@@ -143,6 +143,22 @@ test("the machine's load is a line in the log, never a throttle", () => {
   assert.match(loadNote(4, 4)!, /heavy load 4\.0 on 4 cores/);
   assert.match(loadNote(9.2, 4)!, /heavy load 9\.2 on 4 cores/);
   assert.equal(loadNote(8, 0), undefined, "no cores known: no line");
+});
+
+test("the machine's memory is a line in the log when it is nearly full", () => {
+  const GB = 1024 ** 3;
+  assert.equal(memoryNote({ total: 4 * GB, available: 2 * GB }), undefined, "half the machine free: nothing to say");
+  assert.equal(memoryNote({ total: 4 * GB, available: 0.6 * GB }), undefined, "15% free is still headroom");
+  assert.match(
+    memoryNote({ total: 4 * GB, available: 0.33 * GB })!,
+    /^memory nearly full, 0\.3GB of 4\.0GB free$/,
+    "the case four typechecks and their test runs reach: 333MB of 4GB",
+  );
+  assert.equal(memoryNote({ total: 0, available: 0 }), undefined, "no machine known: no line");
+  assert.equal(memoryNote({ total: NaN, available: NaN }), undefined);
+  // The real machine reads its own memory, and never invents a figure.
+  const real = readMemory();
+  assert.ok(real.total > 0 && real.available >= 0 && real.available <= real.total);
 });
 
 test("working copies for one repository are made one at a time, and a failure does not block the next", async () => {
