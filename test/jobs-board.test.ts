@@ -100,6 +100,17 @@ test("the page is served only with the token, is never cached, and has no way to
   assert.match(html, /http-equiv="refresh"/, "refreshes itself");
   // Read only: a POST to the page is not a route at all, so nothing on it can act.
   assert.equal((await fetch(`${base}${BOARD_PATH}?t=${token}`, { method: "POST" })).status, 404);
+  assert.ok(!html.includes("SECRET"), "no brief or output text reaches the page");
+  // The same data as JSON, behind the same token, with the same refusal.
+  assert.equal((await fetch(`${base}${BOARD_PATH}?format=json`)).status, 404);
+  const jsonRes = await fetch(`${base}${BOARD_PATH}?t=${token}&format=json`);
+  assert.match(jsonRes.headers.get("content-type") ?? "", /application\/json/);
+  const data = (await jsonRes.json()) as { running: unknown[]; queued: unknown[]; finished: unknown[]; scheduled: unknown[] };
+  assert.deepEqual(Object.keys(data).sort(), ["finished", "generatedAt", "paused", "queued", "running", "scheduled"]);
+  assert.equal(data.running.length, 2);
+  assert.equal(data.queued.length, 1);
+  assert.equal(data.finished.length, 3);
+  assert.equal(data.scheduled.length, 1);
 });
 
 test("a running, a queued and a finished job each render, with their timings and queue", () => {
@@ -130,10 +141,12 @@ test("a running, a queued and a finished job each render, with their timings and
   assert.match(board.scheduled[0].cron, /0 7 \* \* \*/);
   // buildApp boots the scheduler, so the task is armed and has a next run ahead of it.
   assert.ok(board.scheduled[0].next && Date.parse(board.scheduled[0].next) > Date.now());
-  assert.match(renderBoard(board, "token"), /next /, "the next run is shown");
 
   const html = renderBoard(board, "token");
+  assert.match(html, /next /, "the next run is shown");
   assert.match(html, /Fix deploy/);
+  assert.match(html, /engineer, workforce/);
+  assert.match(html, /#1 in the queue/);
   assert.match(html, /Web UI restyle/);
   assert.match(html, /TollBit research/);
   assert.match(html, /waiting behind/);
