@@ -2,7 +2,7 @@ import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config } from "./config.js";
 import { SitePolicy, termsWarning } from "./site-policy.js";
-import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError } from "./vault.js";
+import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError, cardVault, VAULT_CARD_PATH } from "./vault.js";
 import { modelLine } from "./llm.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
@@ -32,6 +32,8 @@ import cron from "node-cron";
 import { nudgeStale } from "./followups.js";
 import { HoldWatcher } from "./meetings.js";
 import { VoiceBrain, VoiceTap, voiceEnabled } from "./voice.js";
+import type { PurchaseAction } from "./store.js";
+import { PURCHASE_PATH, PurchaseGate } from "./purchase.js";
 import { VoiceBridge } from "./voice-bridge.js";
 
 export interface AppDeps {
@@ -77,6 +79,21 @@ function vaultForm(token: string, domain?: string): string {
   const field = (label: string, name: string, type: string, extra = "") =>
     `<label style="display:block;margin:.8rem 0 .2rem">${label}</label><input name="${name}" type="${type}" ${extra} style="width:100%;padding:.5rem;font-size:1rem">`;
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Add a login</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">Add a login for ClearOps</h1><p>Stored encrypted. Agents use it to sign in to this site only; they never see the password.</p><form method="post" action="${VAULT_ADD_PATH}" autocomplete="off"><input type="hidden" name="t" value="${escapeHtml(token)}">${field("Site (domain)", "domain", "text", `required placeholder="crunchbase.com" value="${escapeHtml(domain ?? "")}"`)}${field("Username or email", "username", "text", "required")}${field("Password", "password", "password", 'required autocomplete="new-password"')}${field("Two-factor setup key (optional)", "totp", "text", 'placeholder="the text code shown next to the QR code"')}<p style="font-size:.85rem;color:#555">Storing the two-factor key lets agents sign in without you, but the vault then holds both factors for this site.</p>${field("Login page address (optional)", "loginUrl", "url", 'placeholder="https://example.com/login"')}<button style="margin-top:1rem;padding:.6rem 1rem;font-size:1rem">Save</button></form></body>`;
+}
+
+/** The add-a-card form. Nothing is echoed back; the token rides in a hidden field. */
+function cardForm(token: string): string {
+  const field = (label: string, name: string, extra = "") =>
+    `<label style="display:block;margin:.8rem 0 .2rem">${label}</label><input name="${name}" ${extra} style="width:100%;padding:.5rem;font-size:1rem">`;
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Add a card</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">Add a card for ClearOps</h1><p>Use a virtual card with a low limit. It is stored encrypted, never shown to an agent, and entered only on a checkout you approve, order by order. Adding a card replaces any earlier one.</p><form method="post" action="${VAULT_CARD_PATH}" autocomplete="off"><input type="hidden" name="t" value="${escapeHtml(token)}">${field("Card number", "number", 'required inputmode="numeric" autocomplete="off"')}${field("Expiry (MM/YY)", "expiry", 'required placeholder="08/28" autocomplete="off"')}${field("Security code", "cvc", 'required inputmode="numeric" autocomplete="off"')}${field("Name on card", "name", 'required autocomplete="off"')}${field("Billing postcode (optional)", "postcode", 'autocomplete="off"')}<button style="margin-top:1rem;padding:.6rem 1rem;font-size:1rem">Save</button></form></body>`;
+}
+
+/** One purchase for Paul to approve. Everything shown is escaped page content the service read. */
+function purchasePage(a: PurchaseAction, token: string, screenshot?: string): string {
+  const img = screenshot ? `<img alt="The checkout page" src="data:image/jpeg;base64,${screenshot}" style="width:100%;border:1px solid #ccc;border-radius:6px;margin:1rem 0">` : "";
+  const button = (decision: string, label: string, colour: string) =>
+    `<form method="post" action="${PURCHASE_PATH}/${escapeHtml(a.id)}" style="display:inline"><input type="hidden" name="t" value="${escapeHtml(token)}"><input type="hidden" name="decision" value="${decision}"><button style="padding:.8rem 1.4rem;font-size:1.1rem;margin-right:.6rem;background:${colour};color:#fff;border:0;border-radius:6px">${label}</button></form>`;
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve purchase ${escapeHtml(a.id)}</title><body style="font-family:system-ui;max-width:40rem;margin:2rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">${escapeHtml(a.total)} on ${escapeHtml(a.host)}</h1>${a.why ? `<p>${escapeHtml(a.why)}</p>` : ""}<p>Approving presses "<b>${escapeHtml(a.button)}</b>" on this page${a.needsCard ? `, with the vault card ending ${escapeHtml(a.cardLast4 ?? "")}` : ""}. Nothing else is bought, and if the shop or the total has changed, nothing is pressed.</p>${img}<details><summary>What the page lists</summary><pre style="white-space:pre-wrap;font-size:.85rem">${escapeHtml(a.items)}</pre></details><p style="margin-top:1.5rem">${button("approve", "Approve", "#1a7f37")}${button("decline", "Decline", "#b42318")}</p><p style="font-size:.85rem;color:#555">Purchase ${escapeHtml(a.id)}. This link works once and expires at ${escapeHtml(a.expiresAt.slice(11, 16))} UTC.</p></body>`;
 }
 
 /** Builds the Express app. Dependencies are injectable so tests can run it without the network. */
@@ -132,9 +149,12 @@ export function buildApp(deps: AppDeps) {
           job.permits?.includes("signup")
           ? { [SIGNUP_SERVER]: signupServer({ gate: signup, jobId: job.id, replyTo: job.replyTo }) }
           : undefined;
-  const jobs = new JobRunner(deps.store, tapped, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined });
+  // Purchases: a buying job asks Paul to approve the exact order; only his tap on the one-time page or his
+  // own "buy <id>" lets the service press the final button (src/purchase.ts).
+  const purchase = new PurchaseGate(deps.store, cardVault, deps.messenger);
+  const jobs = new JobRunner(deps.store, tapped, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase });
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup);
+  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase);
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
@@ -235,6 +255,49 @@ export function buildApp(deps: AppDeps) {
       const msg = err instanceof VaultError ? err.message : "That could not be saved. Check the site and the login page address, and ask ClearOps for a new link if this one has expired.";
       res.status(400).type("html").send(page("Not saved", escapeHtml(msg)));
     }
+  });
+
+  // The one-time add-a-card page: the card is stored encrypted and never shown to a model or in chat.
+  app.get(VAULT_CARD_PATH, (req, res) => {
+    noStore(res);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    if (!cardVault.valid(token)) return res.status(410).type("html").send(page("Link expired", "This link has expired or was already used. Ask ClearOps for a new one."));
+    res.type("html").send(cardForm(token));
+  });
+  app.post(VAULT_CARD_PATH, express.urlencoded({ extended: false, limit: "8kb" }), async (req, res) => {
+    noStore(res);
+    const b = (req.body ?? {}) as Record<string, string>;
+    try {
+      const r = cardVault.add(String(b.t ?? ""), { number: String(b.number ?? ""), expiry: String(b.expiry ?? ""), cvc: String(b.cvc ?? ""), name: String(b.name ?? ""), postcode: String(b.postcode ?? "") });
+      res.type("html").send(page("Saved", `The card ending ${escapeHtml(r.summary.last4)} is in the vault. It is used only for a purchase you approve, item by item. You can close this tab.`));
+      await deps.messenger.send(r.replyTo, `Vault: saved the card ending ${r.summary.last4} (expires ${r.summary.expiry}). It is entered only on a checkout you approve, never shown to an agent. Say remove the card to delete it.`).catch(() => undefined);
+    } catch (err) {
+      const msg = err instanceof VaultError ? err.message : "That could not be saved. Ask ClearOps for a new link and try again.";
+      res.status(400).type("html").send(page("Not saved", escapeHtml(msg)));
+    }
+  });
+
+  // The approval page for one purchase: the picture, the shop, the items and the total, Approve or Decline.
+  const purchaseHeaders = (res: express.Response) => {
+    noStore(res);
+    res.set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
+  };
+  app.get(`${PURCHASE_PATH}/:id`, (req, res) => {
+    purchaseHeaders(res);
+    const id = String(req.params.id ?? "");
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    const a = deps.store.getPurchase(id);
+    if (!a || !purchase.tokenValid(id, token)) return res.status(410).type("html").send(page("Link expired", "This approval link has expired or was already used. Nothing was bought from it."));
+    res.type("html").send(purchasePage(a, token, purchase.screenshot(id)));
+  });
+  app.post(`${PURCHASE_PATH}/:id`, express.urlencoded({ extended: false, limit: "4kb" }), (req, res) => {
+    purchaseHeaders(res);
+    const id = String(req.params.id ?? "");
+    const b = (req.body ?? {}) as Record<string, string>;
+    const verb = b.decision === "approve" ? "approve" : b.decision === "decline" ? "decline" : undefined;
+    const said = verb ? purchase.decideWithToken(id, String(b.t ?? ""), verb) : undefined;
+    if (!said) return res.status(410).type("html").send(page("Link expired", "This approval link has expired or was already used. Nothing was bought from it."));
+    res.type("html").send(page(verb === "approve" ? "Approved" : "Declined", escapeHtml(said)));
   });
 
   return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, voice };

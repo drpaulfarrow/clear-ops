@@ -17,7 +17,7 @@ export type EaPermit = "drafts" | "holds" | "send";
  */
 export type JobTarget = string;
 /** What a job may do beyond its kind's defaults, granted per job by the chief only when Paul asked in chat. */
-export type JobPermit = EaPermit | "create_repo" | "dns" | "signup";
+export type JobPermit = EaPermit | "create_repo" | "dns" | "signup" | "purchase";
 /** A repository the workforce created, kept so it can be worked on straight away and after a restart. */
 export interface CreatedRepo {
   slug: string;
@@ -270,6 +270,42 @@ export interface DnsAction {
  * replies "signup apply <id>" himself. The record is also the audit trail; it never holds the password,
  * which is generated at approval time and written straight into the vault.
  */
+/**
+ * A purchase waiting for Paul's approval (src/purchase.ts). Nothing is paid until he taps Approve on its
+ * one-time page or replies "buy <id>" himself. The record is the audit trail; it never holds a card number.
+ */
+export type PurchaseStatus = "pending" | "approved" | "declined" | "executing" | "executed" | "expired" | "changed" | "failed";
+export interface PurchaseAction {
+  id: string;
+  status: PurchaseStatus;
+  createdAt: string;
+  expiresAt: string;
+  jobId?: string;
+  replyTo: string;
+  /** The shop's host and the checkout page, as the service read them. */
+  host: string;
+  url: string;
+  title: string;
+  /** The order total exactly as the page showed it, e.g. "£23.98". */
+  total: string;
+  /** What is being bought, as the page lists it (trimmed), and the agent's one-line reason. */
+  items: string;
+  why?: string;
+  /** The final button's words, as the page shows them. */
+  button: string;
+  /** True when the page asks for card details and the vault card would be entered. */
+  needsCard: boolean;
+  cardLast4?: string;
+  /** Digest of what Paul saw: host, total and items. */
+  hash: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  executedAt?: string;
+  /** What the shop said afterwards, one short line. */
+  outcome?: string;
+  note?: string;
+}
+
 export type SignupStatus = "pending" | "executing" | "executed" | "needsPaul" | "cancelled" | "expired" | "changed" | "failed";
 export interface SignupAction {
   id: string;
@@ -326,6 +362,7 @@ interface State {
   outbound?: Record<string, OutboundAction>;
   dns?: Record<string, DnsAction>;
   signups?: Record<string, SignupAction>;
+  purchases?: Record<string, PurchaseAction>;
   /** Gmail drafts the assistant created: the only drafts it may prepare for sending. */
   createdDrafts?: Record<string, { at: string; jobId?: string }>;
   /** Repositories the workforce created, by alias. */
@@ -543,6 +580,25 @@ export class Store {
   }
   listSignups(): SignupAction[] {
     return Object.values(this.state.signups ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  // Purchase approvals and their audit trail
+  putPurchase(a: PurchaseAction): PurchaseAction {
+    (this.state.purchases ??= {})[a.id] = a;
+    this.save();
+    return a;
+  }
+  getPurchase(id: string): PurchaseAction | undefined {
+    return this.state.purchases?.[id];
+  }
+  updatePurchase(id: string, patch: Partial<PurchaseAction>): PurchaseAction {
+    const a = this.state.purchases?.[id];
+    if (!a) throw new Error(`No purchase ${id}`);
+    Object.assign(a, patch);
+    this.save();
+    return a;
+  }
+  listPurchases(): PurchaseAction[] {
+    return Object.values(this.state.purchases ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
   recordCreatedDraft(draftId: string, jobId?: string): void {
     (this.state.createdDrafts ??= {})[draftId] = { at: new Date().toISOString(), jobId };

@@ -71,6 +71,11 @@ Join any voice channel in the ClearOps server and the bot joins you and Cleo, th
 - What it cannot do: approve anything. A spoken request reaches the chief as "Voice request from Paul ...", so `send <id>`, `dns apply <id>`, `yes <id>` and the like can only ever be typed.
 - The bot needs Connect and Speak in the voice channel. `VOICE=off` switches it off; `VOICE_SILENCE_MS` (700) is how long a pause ends your turn.
 
+### Buying things
+Ask in chat ("order more coffee pods on Amazon", "buy that book") and a job fills the basket in its browser, signing in with your vault login, and goes to the final checkout page. It never presses the button that places the order. Instead you get the shop, the items and the total, with a link to a one-time approval page showing a picture of the checkout and Approve or Decline buttons. Reply `buy <id>` or `buy cancel <id>` in chat if you prefer. There is no spending limit, but nothing is bought without your approval of that exact order. If the shop or the total changed since you saw it, nothing is pressed.
+
+Card: for shops that ask for card details, add one card to the vault on a one-time page (ask ClearOps for the card link). Use a virtual card with a low limit. It is stored encrypted, never shown to an agent or in chat (only its last four digits), and entered by the service only on a checkout you approved. Amazon uses the card already saved in your Amazon account. "Remove the card" deletes it.
+
 ## Set up in five steps
 
 ### 1. A model key: Anthropic or OpenRouter

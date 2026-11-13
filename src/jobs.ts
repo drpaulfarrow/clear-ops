@@ -2,6 +2,7 @@ import { SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault } from "./vault.js";
 import { BROWSE_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
+import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { runRoute } from "./llm.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -13,7 +14,7 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
 import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
-import type { Job, JobKind, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
+import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
@@ -95,6 +96,12 @@ const minutes = (ms: number) => Math.round(ms / MINUTE);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Starts worker jobs in the background and reports back over WhatsApp when they finish. */
+/** A browse kind's permits: the sign-up permit as granted, plus the purchase permit if granted. */
+function withPurchase(kept: JobPermit[], granted: JobPermit[] | undefined): JobPermit[] | undefined {
+  const all = granted?.includes("purchase") ? [...kept, "purchase" as const] : kept;
+  return all.length ? all : undefined;
+}
+
 export class JobRunner {
   private running = new Set<string>();
   /** The workers this process is running, with their heartbeats. */
@@ -115,6 +122,8 @@ export class JobRunner {
   readonly failures: FailureNotifier;
   /** Told when a job finishes with a saved output (the outputs repository copy). Fire and forget: it can never fail or delay a job. */
   private readonly onOutput?: (job: Job) => void;
+  /** The purchase approval gate (src/purchase.ts), for jobs holding the purchase permit. */
+  private readonly purchase?: PurchaseGate;
 
   constructor(
     private readonly store: Store,
@@ -122,10 +131,11 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions } = {},
+    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate } = {},
   ) {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
     this.onOutput = opts.onOutput;
+    this.purchase = opts.purchase;
     const l = opts.liveness ?? {};
     this.stallMs = l.stallMs ?? config.jobStallMinutes * MINUTE;
     this.maxRuntimeMs = l.maxRuntimeMs ?? config.jobMaxRuntimeMinutes * MINUTE;
@@ -143,7 +153,8 @@ export class JobRunner {
     else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
     else if (kind === "engineer") extra.permits = extra.permits?.includes("create_repo") ? ["create_repo"] : undefined;
     // The sign-up permit goes to the kinds that carry the browser, and to them only.
-    else if (BROWSE_KINDS.includes(kind)) extra.permits = extra.permits?.includes("signup") ? ["signup"] : undefined;
+    // So does the purchase permit (the browser fills the basket; Paul approves each order).
+    else if (BROWSE_KINDS.includes(kind)) extra.permits = withPurchase(extra.permits?.includes("signup") ? ["signup"] : [], extra.permits);
     else delete extra.permits;
     if (!extra.permits) delete extra.permits;
     // Only research has a depth; unlabelled research (a scheduled run, say) takes it from the brief.
@@ -514,7 +525,7 @@ export class JobRunner {
       // The cv and advisor workers' own save tools, from their specs alone (toolsFor gives them nothing else).
       const cvTools = job.kind === "cv" || job.kind === "advisor" ? perJob.mcpServers : undefined;
       // The service's own search and read-only browser, for research-type kinds only (src/web-tools.ts).
-      web = webToolsFor(job.kind, { browse: { policy: new SitePolicy(this.store, safeVaultDomains), vault } });
+      web = webToolsFor(job.kind, { browse: { policy: new SitePolicy(this.store, safeVaultDomains), vault, ...(job.permits?.includes("purchase") ? { purchasing: true } : {}) } });
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
@@ -529,20 +540,24 @@ export class JobRunner {
       const dnsPermit = job.kind === "dns" ? `\n\nThis job may: ${job.permits?.includes("dns") ? "prepare DNS changes for Paul's approval (dns_prepare_change); nothing is applied until he replies \"dns apply <id>\" himself" : "read only (no dns_prepare_change): list domains, records and snapshots, and explain"}.` : "";
       const createRepo = job.kind === "engineer" && job.permits?.includes("create_repo") ? `\n\n${CREATE_REPO_NOTE}` : "";
       const signupPermit = job.permits?.includes("signup") ? `\n\n${SIGNUP_NOTE}` : "";
+      // A job allowed to buy (Paul asked in chat) gets the one tool that asks him to approve the exact order,
+      // bound to its own browser. Without a browser or the gate it gets nothing.
+      const buying = job.permits?.includes("purchase") && web.session && this.purchase ? purchaseServer({ gate: this.purchase, browser: web.session, jobId: id, replyTo: job.replyTo }) : undefined;
+      const purchasePermit = buying ? `\n\n${PURCHASE_NOTE}` : "";
       const focus = job.kind !== "engineer" && job.kind !== "maintain" && job.kind !== "create_agent" ? repoFocus(job.target, job.kind) : "";
       const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
       // Every run is capped; deep research gets more turns and budget than the default.
       const limits = runLimits(job.kind, job.depth);
       const result = await this.run({
-        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${depth}${web.note}${standing}${resume}${carryOn}`,
+        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
         ...runRoute(job, spec.model),
         cwd: spec.cwd,
-        allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...web.allowed],
+        allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...web.allowed],
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers } : undefined,
+        mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers, ...(buying ? { [PURCHASE_SERVER]: buying } : {}) } : undefined,
         additionalDirectories: dirs,
         maxTurns: limits.maxTurns,
         maxBudgetUsd: limits.maxBudgetUsd,

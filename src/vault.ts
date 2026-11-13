@@ -245,6 +245,141 @@ export class Vault {
   }
 }
 
+/* ---------- One payment card, for purchases Paul approves item by item ---------- */
+
+/**
+ * Paul's call (13 Nov 2026): one card in the vault, a virtual card with a low limit, so purchases he
+ * approves can be paid on sites that ask for card details. Added only on the one-time /vault/card page,
+ * stored encrypted beside the logins, and read only by the purchase gate (src/purchase.ts) at the moment
+ * Paul approves an exact order. No model, chat message, log or job output ever holds the number.
+ */
+export interface VaultCard {
+  number: string;
+  /** MM/YY */
+  expiry: string;
+  cvc: string;
+  name: string;
+  /** Billing postcode, when the card needs one. */
+  postcode?: string;
+  addedAt: string;
+}
+
+/** What may be shown about the card: never the number, the CVC or the full expiry. */
+export interface CardSummary {
+  last4: string;
+  expiry: string;
+  name: string;
+  addedAt: string;
+}
+
+export const VAULT_CARD_PATH = "/vault/card";
+
+/** The Luhn check every real card number passes. */
+export function luhn(number: string): boolean {
+  const d = number.replace(/\D/g, "");
+  if (d.length < 12 || d.length > 19) return false;
+  let sum = 0;
+  for (let i = 0; i < d.length; i++) {
+    let n = Number(d[d.length - 1 - i]);
+    if (i % 2 === 1) {
+      n *= 2;
+      if (n > 9) n -= 9;
+    }
+    sum += n;
+  }
+  return sum % 10 === 0;
+}
+
+/** A card as typed on the page, checked: Luhn, a future MM/YY expiry, a 3 or 4 digit CVC, a name. */
+export function checkCard(input: { number: string; expiry: string; cvc: string; name: string; postcode?: string }, now = new Date()): Omit<VaultCard, "addedAt"> {
+  const number = input.number.replace(/[\s-]/g, "");
+  if (!/^\d+$/.test(number) || !luhn(number)) throw new VaultError("That card number does not look right. Check it and try again.");
+  const m = input.expiry.trim().match(/^(\d{1,2})\s*\/\s*(\d{2}|\d{4})$/);
+  if (!m) throw new VaultError("Give the expiry as MM/YY.");
+  const month = Number(m[1]);
+  const year = Number(m[2].length === 2 ? `20${m[2]}` : m[2]);
+  if (month < 1 || month > 12) throw new VaultError("Give the expiry as MM/YY.");
+  if (new Date(Date.UTC(year, month, 1)) <= now) throw new VaultError("That card has expired.");
+  const cvc = input.cvc.trim();
+  if (!/^\d{3,4}$/.test(cvc)) throw new VaultError("The security code is the 3 or 4 digits on the card.");
+  const name = input.name.trim().replace(/\s+/g, " ");
+  if (!name) throw new VaultError("Give the name on the card.");
+  const postcode = input.postcode?.trim().toUpperCase().slice(0, 12) || undefined;
+  return { number, expiry: `${String(month).padStart(2, "0")}/${String(year).slice(2)}`, cvc, name: name.slice(0, 80), ...(postcode ? { postcode } : {}) };
+}
+
+export class CardVault {
+  private pending = new Map<string, { replyTo: string; expires: number }>();
+
+  constructor(
+    private readonly dir: string = vaultDir(),
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  private file(): string {
+    return path.join(this.dir, "card.enc");
+  }
+
+  /** A one-time link to the add-a-card page, valid 15 minutes, tied to the chat that asked. */
+  addLink(replyTo: string): string {
+    key();
+    for (const [k, p] of this.pending) if (p.expires < this.now()) this.pending.delete(k);
+    const token = randomBytes(24).toString("base64url");
+    this.pending.set(token, { replyTo, expires: this.now() + ADD_TTL_MS });
+    return `${config.publicUrl}${VAULT_CARD_PATH}?t=${token}`;
+  }
+
+  valid(token: string): boolean {
+    const p = this.pending.get(token);
+    return !!p && p.expires >= this.now();
+  }
+
+  /** Saves the card from the add page, replacing any earlier one. Uses up the token. */
+  add(token: string, input: { number: string; expiry: string; cvc: string; name: string; postcode?: string }): { replyTo: string; summary: CardSummary } {
+    const p = this.pending.get(token);
+    if (!p || p.expires < this.now()) throw new VaultError("This link has expired or was already used. Ask ClearOps for a new one.");
+    const card: VaultCard = { ...checkCard(input, new Date(this.now())), addedAt: new Date(this.now()).toISOString() };
+    this.pending.delete(token);
+    fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(this.dir, 0o700);
+    const tmp = `${this.file()}.tmp`;
+    fs.writeFileSync(tmp, encrypt(JSON.stringify(card), key()), { mode: 0o600 });
+    fs.renameSync(tmp, this.file());
+    return { replyTo: p.replyTo, summary: summariseCard(card) };
+  }
+
+  summary(): CardSummary | undefined {
+    const c = this.read();
+    return c ? summariseCard(c) : undefined;
+  }
+
+  /** The card itself, for the purchase gate's approved order only. Never handed to a model. */
+  forApprovedPurchase(): VaultCard | undefined {
+    return this.read();
+  }
+
+  remove(): boolean {
+    if (!fs.existsSync(this.file())) return false;
+    fs.rmSync(this.file());
+    return true;
+  }
+
+  private read(): VaultCard | undefined {
+    if (!vaultEnabled() || !fs.existsSync(this.file())) return undefined;
+    try {
+      return JSON.parse(decrypt(fs.readFileSync(this.file(), "utf8"), key())) as VaultCard;
+    } catch {
+      throw new VaultError("The card cannot be decrypted (did VAULT_KEY change?).");
+    }
+  }
+}
+
+function summariseCard(c: VaultCard): CardSummary {
+  return { last4: c.number.slice(-4), expiry: c.expiry, name: c.name, addedAt: c.addedAt };
+}
+
+export const cardVault = new CardVault();
+
 export const VAULT_ADD_PATH = "/vault/add";
 
 /** host is domain itself or a subdomain of it. */

@@ -19,6 +19,8 @@ export interface WebTools {
   /** One paragraph for the worker's prompt, empty when it gets nothing. */
   note: string;
   close: () => Promise<void>;
+  /** The job's browser, when it has one: the purchase gate completes an approved order in it. */
+  session?: BrowseSession;
 }
 
 export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: BrowseDeps } = {}): WebTools {
@@ -50,5 +52,6 @@ export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: B
     close: async () => {
       await session?.close();
     },
+    ...(session ? { session } : {}),
   };
 }

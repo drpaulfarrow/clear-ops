@@ -56,8 +56,19 @@ function setup(opts: { isPrivate?: boolean | number } = {}) {
     return j;
   };
   const remoteFiles = () => {
-    const c = tmp("pub-check-");
-    sh(c, "clone", "-q", bare, ".");
+    // A clone can race the publisher's own push into the bare repository (git moves objects into place
+    // while we copy them): take a fresh directory and try again rather than fail on the race.
+    let c = "";
+    for (let attempt = 0; ; attempt++) {
+      c = tmp("pub-check-");
+      try {
+        sh(c, "clone", "-q", bare, ".");
+        break;
+      } catch (err) {
+        if (attempt >= 5) throw err;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      }
+    }
     return { c, read: (f: string) => fs.readFileSync(path.join(c, f), "utf8"), has: (f: string) => fs.existsSync(path.join(c, f)) };
   };
   return { store, pub, job, problems, remoteFiles, dir };

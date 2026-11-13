@@ -101,7 +101,29 @@ export const DEFAULT_ACT_SITES = [
  * Words on a button, link or form that make an action consequential. A click or Enter that would
  * trigger one is refused on every site, act-freely and vault sites included.
  */
-export const CONSEQUENTIAL = /\b(pay|payment|buy|purchase|order now|place order|checkout|check out|book now|complete booking|reserve|subscribe|upgrade|donate|transfer|send|post|publish|tweet|share now|reply|comment|delete|remove account|close account|cancel (my )?(account|subscription|membership)|deactivate|unsubscribe|withdraw|apply now|submit application|sign contract|e-?sign|accept offer|confirm (order|payment|booking|purchase))\b/i;
+/**
+ * The click that actually places an order or pays. Never pressed by an agent: only the purchase gate
+ * (src/purchase.ts) presses it, after Paul approves that exact order.
+ */
+export const FINAL_ORDER = /\b(place (your )?order|place order|buy now|pay now|pay (£|\$|€)|complete (your )?(order|purchase|payment)|confirm (and pay|order|payment|purchase)|submit (your )?order|order and pay|start (my )?subscription)\b/i;
+
+/**
+ * Steps on the way to a checkout that a job allowed to buy may take (they move to the next page; nothing
+ * is paid). Anything that also matches FINAL_ORDER is still refused.
+ */
+export const CHECKOUT_STEP = /\b(proceed to checkout|go to checkout|checkout|check out|continue to (payment|checkout|review)|use this (payment method|card|address)|payment method|review (your )?order)\b/i;
+
+/**
+ * True when every consequential word in `words` is checkout vocabulary on a checkout step ("Proceed to
+ * checkout", "Continue to payment", "Use this payment method"), and none of it places an order.
+ */
+export function checkoutStepOnly(words: string): boolean {
+  if (FINAL_ORDER.test(words) || !CHECKOUT_STEP.test(words)) return false;
+  const all = [...words.matchAll(new RegExp(CONSEQUENTIAL.source, "gi"))].map((m) => m[0].toLowerCase());
+  return all.length > 0 && all.every((w) => w === "payment" || w === "checkout" || w === "check out");
+}
+
+export const CONSEQUENTIAL = /\b(pay|payment|buy|purchase|order now|place order|place (your )?order|submit (your )?order|complete (your )?(order|purchase)|order and pay|checkout|check out|book now|complete booking|reserve|subscribe|upgrade|donate|transfer|send|post|publish|tweet|share now|reply|comment|delete|remove account|close account|cancel (my )?(account|subscription|membership)|deactivate|unsubscribe|withdraw|apply now|submit application|sign contract|e-?sign|accept offer|confirm (order|payment|booking|purchase))\b/i;
 
 /** A store-like thing holding Paul's own additions and removals. */
 export interface SiteRuleStore {
