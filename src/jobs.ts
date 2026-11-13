@@ -669,7 +669,7 @@ export class JobRunner {
       // it is recorded as failed, and nothing follows it (no review, no fix round, no "Finished").
       const failed = runFailure(result);
       if (failed) {
-        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
+        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd, costSource: "estimate" });
         throw new RunFailedError(failed);
       }
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
@@ -681,6 +681,7 @@ export class JobRunner {
         summary: message,
         outputPath,
         costUsd: result.costUsd,
+        costSource: result.costUsd === undefined ? undefined : "estimate",
       });
       try {
         const done = this.store.getJob(id);

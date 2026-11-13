@@ -106,6 +106,12 @@ export interface Job {
    * this stays for the per-run cap, the fallback and the per-kind breakdown.
    */
   costUsd?: number;
+  /**
+   * Which figure `costUsd` is, so no display can present an estimate as the bill. Per job it is
+   * "estimate": the SDK prices each run from its own table, and the provider's usage figure is
+   * cumulative for the account, so it is not attributed to a single job (src/spend.ts).
+   */
+  costSource?: "provider" | "estimate";
   error?: string;
   /**
    * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,
