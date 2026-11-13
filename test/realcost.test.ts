@@ -1,0 +1,257 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// One engineer slot, one founder, and a small real cap, so the cap is counted in the provider's money
+// and the whole path (meter, stop, job record, message) can be driven offline.
+process.env.ENGINEER_SLOTS = "1";
+process.env.ALLOWED_TELEGRAM_IDS = "99887766";
+process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-realcost-"));
+process.env.ENGINEER_BUDGET_USD = "0.25";
+
+const { RealCostMeter, usdAmount } = await import("../src/realcost.js");
+const { Store } = await import("../src/store.js");
+const { JobRunner } = await import("../src/jobs.js");
+const { ConsoleMessenger } = await import("../src/whatsapp.js");
+const { budgetReason, failureText } = await import("../src/failures.js");
+const { config } = await import("../src/config.js");
+const { runLimits } = await import("../src/agents.js");
+import type { AgentRunner, RunOptions, RunResult } from "../src/agents.js";
+import type { JobCostWatch } from "../src/realcost.js";
+
+const FOUNDER = "tg:99887766";
+
+/** A generation endpoint that prices the ids it knows and answers anything else the way asked. */
+function fakeProvider(costs: Record<string, number | "404" | "400" | "429"> = { gen1: 0.1 }) {
+  const asked: string[] = [];
+  const fetch: typeof globalThis.fetch = async (input) => {
+    const url = String(input);
+    const id = decodeURIComponent(new URL(url).searchParams.get("id") ?? "");
+    asked.push(id);
+    const cost = costs[id];
+    if (cost === undefined || typeof cost === "string") {
+      return new Response("{}", { status: cost === undefined ? 404 : Number(cost) });
+    }
+    return new Response(JSON.stringify({ data: { id, total_cost: cost } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  return { fetch, asked };
+}
+
+const meterFor = (fetch: typeof globalThis.fetch, capUsd?: number, onExceeded: (cost: { usd: number }) => void = () => undefined) =>
+  new RealCostMeter({ apiKey: "test-key", fetch, capUsd, onExceeded, gapMs: 0, settleMs: 500, retryMs: 5, timeoutMs: 500, warn: () => undefined });
+
+test("a job's cost is the sum of the provider's own per-call figures, each id read once", async () => {
+  const { fetch, asked } = fakeProvider({ gen1: 0.0012, gen2: 0.0031 });
+  const meter = meterFor(fetch, 1, () => undefined);
+  meter.note("gen1");
+  meter.note("gen2");
+  meter.note("gen1"); // the same reply twice is one call
+  meter.note(undefined);
+  const cost = await meter.settle();
+  assert.deepEqual(asked, ["gen1", "gen2"]);
+  assert.equal(cost.source, "provider");
+  assert.equal(cost.usd, 0.01, "summed and rounded up to the cent, never down");
+  assert.equal(cost.calls, 2);
+  assert.equal(cost.read, 2);
+});
+
+test("the cap is counted in the provider's money: it fires past the figure and never at a penny", async () => {
+  const stopped: number[] = [];
+  const { fetch } = fakeProvider({ gen1: 0.3 });
+  const meter = meterFor(fetch, 0.25, (cost) => stopped.push(cost.usd));
+  meter.note("gen1");
+  await meter.settle();
+  assert.deepEqual(stopped, [0.3]);
+  assert.equal(meter.exceededBy()?.usd, 0.3);
+
+  // A job that has really spent pennies is never stopped, however long it runs.
+  const cheap = fakeProvider({ gen1: 0.0004 });
+  const quiet: number[] = [];
+  const under = meterFor(cheap.fetch, 0.25, (cost) => quiet.push(cost.usd));
+  for (let i = 0; i < 50; i++) under.note(`gen${i}`);
+  const total = await under.settle();
+  assert.equal(quiet.length, 0, "never stopped for budget while it has really spent pennies");
+  assert.equal(under.exceededBy(), undefined);
+  assert.ok(total.usd <= 0.25);
+});
+
+test("an id the provider will not price is left out and the total says it is a lower bound", async () => {
+  const { fetch } = fakeProvider({ gen1: 0.02, gen2: "404" });
+  const meter = meterFor(fetch);
+  meter.note("gen1");
+  meter.note("gen2");
+  const cost = await meter.settle();
+  assert.equal(cost.source, "provider");
+  assert.equal(cost.usd, 0.02);
+  assert.equal(cost.read, 1);
+  assert.match(cost.note ?? "", /lower bound/);
+});
+
+test("an endpoint that rejects this run's ids stops being asked and reports no figure", async () => {
+  const { fetch, asked } = fakeProvider({ gen1: "400", gen2: "400", gen3: "400" });
+  const meter = meterFor(fetch, 0.01, () => assert.fail("the cap must never fire on a figure that could not be read"));
+  meter.note("gen1");
+  meter.note("gen2");
+  meter.note("gen3");
+  const cost = await meter.settle();
+  assert.equal(cost.source, "unavailable");
+  assert.equal(cost.usd, 0);
+  assert.match(cost.note ?? "", /did not recognise/);
+  assert.deepEqual(asked, ["gen1"], "asked once, then left alone");
+  assert.equal(meter.exceededBy(), undefined);
+});
+
+test("a rate-limited price read is reported plainly and never becomes a figure", async () => {
+  const { fetch } = fakeProvider({ gen1: "429" });
+  const meter = meterFor(fetch);
+  meter.note("gen1");
+  const cost = await meter.settle();
+  assert.equal(cost.source, "unavailable");
+  assert.match(cost.note ?? "", /rate-limited/);
+});
+
+test("without a provider key nothing is read and the figure is simply not available", async () => {
+  const fetch = (() => assert.fail("no call may be made without a key")) as unknown as typeof globalThis.fetch;
+  const meter = new RealCostMeter({ apiKey: "", fetch, capUsd: 0.01, onExceeded: () => assert.fail("no cap without a figure") });
+  assert.equal(meter.enabled, false);
+  meter.note("gen1");
+  const cost = await meter.settle();
+  assert.equal(cost.source, "unavailable");
+  assert.equal(meter.exceededBy(), undefined);
+});
+
+test("usdAmount keeps a fraction of a cent visible", () => {
+  assert.equal(usdAmount(0.0042), "0.0042");
+  assert.equal(usdAmount(0.3), "0.30");
+  assert.equal(usdAmount(12), "12.00");
+  assert.equal(usdAmount(0), "0.00");
+});
+
+test("the stopped-for-budget sentence states the spend, the cap and the measure", () => {
+  assert.equal(
+    budgetReason({ spentUsd: 0.3, capUsd: 0.25, measure: "provider" }),
+    "it was stopped for budget with OpenRouter's own figures at $0.30 against the $0.25 cap for this kind",
+  );
+  assert.match(budgetReason({ spentUsd: 0.3, unreadable: 2, capUsd: 0.25, measure: "provider" }), /lower bound: 2 of its calls could not be priced/);
+  assert.equal(
+    budgetReason({ capUsd: 0.25, measure: "provider" }),
+    "it was stopped for budget at the $0.25 cap for this kind, and the real figure could not be read, so there is no amount to quote",
+  );
+  assert.equal(
+    budgetReason({ spentUsd: 4.2, capUsd: 1000, measure: "estimate" }),
+    "it was stopped by the SDK's own runaway guard of $1000, an internal estimate and not a bill, by which time OpenRouter had really charged $4.20",
+  );
+  assert.match(budgetReason({ capUsd: 1000, measure: "estimate" }), /could not be read/);
+});
+
+/** A runner that reports one call, then waits to be stopped the way the SDK does. */
+function stoppingRunner(ids = ["gen1"]): AgentRunner {
+  return async (o: RunOptions): Promise<RunResult> => {
+    for (const id of ids) o.costMeter?.note(id);
+    await new Promise<void>((resolve) => {
+      if (o.abortController?.signal.aborted) return resolve();
+      o.abortController?.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    // The SDK's iterator throws once its process is killed; the runner classifies it as below.
+    throw new Error("aborted");
+  };
+}
+
+function setup(run: AgentRunner, costWatch?: (capUsd: number | undefined, stop: () => void) => JobCostWatch) {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-realcost-run-")));
+  const messenger = new ConsoleMessenger();
+  const jobs = new JobRunner(store, messenger, run, undefined, { failureNotices: { batchMs: 20, cooldownMs: 50 }, ...(costWatch ? { costWatch } : {}) });
+  return { store, messenger, jobs };
+}
+
+const waitFor = async (pred: () => boolean, ms = 5000) => {
+  const t0 = Date.now();
+  while (!pred()) {
+    if (Date.now() - t0 > ms) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+
+test("a job the provider's figures pass the cap is recorded failed, with the true figure and no review", async () => {
+  const { fetch } = fakeProvider({ gen1: 0.3 });
+  const { store, messenger, jobs } = setup(stoppingRunner(), (capUsd, stop) => meterFor(fetch, capUsd, stop));
+  const job = jobs.start("engineer", "Cap me", FOUNDER, "self");
+  await waitFor(() => store.getJob(job.id)!.status === "failed");
+  const stored = store.getJob(job.id)!;
+  assert.equal(stored.failure, "budget");
+  assert.match(stored.error ?? "", /\$0.30/);
+  assert.equal(stored.status, "failed", "never recorded as done");
+  assert.equal(store.allJobs().filter((j) => j.kind === "maintain").length, 0, "nothing follows a job stopped for budget");
+  await jobs.failures.flushAll();
+  const notice = messenger.sent.find((s) => s.text.startsWith("Failed:"));
+  assert.ok(notice, "Paul is told");
+  assert.match(notice!.text, /stopped for budget/);
+  assert.match(notice!.text, /OpenRouter's own figures at \$0\.30 against the \$0\.25 cap/);
+  assert.doesNotMatch(notice!.text, /estimate says/);
+});
+
+test("a run stopped by the SDK's runaway guard names the guard as the measure, and the real figure with it", async () => {
+  const { fetch } = fakeProvider({ gen1: 0.08 });
+  const guard = config.sdkRunawayBudgetUsd;
+  assert.ok(guard > 0, "every run has a guard");
+  const run: AgentRunner = async (o) => {
+    o.costMeter?.note("gen1");
+    return { text: "", costUsd: 1000.5, error: { kind: "budget", detail: "The agent stopped early (error_max_budget_usd), which is the SDK's own runaway guard, not a job's cap." } };
+  };
+  const { store, messenger, jobs } = setup(run, (capUsd, stop) => meterFor(fetch, capUsd, stop));
+  const job = jobs.start("engineer", "Guard me", FOUNDER, "self");
+  await waitFor(() => store.getJob(job.id)!.status === "failed");
+  const stored = store.getJob(job.id)!;
+  assert.equal(stored.failure, "budget");
+  assert.equal(stored.costUsd, 1000.5, "the internal estimate is still recorded on the job, and never shown");
+  await jobs.failures.flushAll();
+  const notice = messenger.sent.find((s) => s.text.startsWith("Failed:"))!;
+  assert.match(notice.text, new RegExp(`runaway guard of \\$${guard}`));
+  assert.match(notice.text, /not a bill/);
+  assert.match(notice.text, /OpenRouter had really charged \$0\.08/);
+});
+
+test("when the real figure cannot be read the message says so rather than quoting the estimate", async () => {
+  const run: AgentRunner = async () => ({ text: "", costUsd: 1000.5, error: { kind: "budget", detail: "The agent stopped early (error_max_budget_usd), which is the SDK's own runaway guard, not a job's cap." } });
+  // The default meter: no OpenRouter key in the test environment, so there is no figure to read.
+  const { store, messenger, jobs } = setup(run);
+  const job = jobs.start("write", "No figure", FOUNDER, "product");
+  await waitFor(() => store.getJob(job.id)!.status === "failed");
+  await jobs.failures.flushAll();
+  const notice = messenger.sent.find((s) => s.text.startsWith("Failed:"))!;
+  assert.match(notice.text, /OpenRouter's figure for it could not be read/);
+  assert.doesNotMatch(notice.text, /1000\.5/, "the estimate is never quoted as the bill");
+  assert.doesNotMatch(notice.text, /\$1000\.50/);
+});
+
+test("a run under its cap finishes as usual, and the guard is what a job is given", async () => {
+  const { fetch } = fakeProvider({ gen1: 0.02 });
+  const run: AgentRunner = async (o) => {
+    o.costMeter?.note("gen1");
+    return { text: "Report.\n\n<message_to_paul>\nAll done, nothing needed from you.\n</message_to_paul>", costUsd: 3 };
+  };
+  const { store, jobs } = setup(run, (capUsd, stop) => meterFor(fetch, capUsd, stop));
+  const job = jobs.start("engineer", "Under the cap", FOUNDER, "self");
+  await waitFor(() => store.getJob(job.id)!.status === "done");
+  assert.equal(store.getJob(job.id)!.failure, undefined);
+});
+
+test("the SDK's guard is the only money figure the SDK is given, and the cap is separate", () => {
+  const limits = runLimits("engineer");
+  assert.equal(limits.maxBudgetUsd, config.sdkRunawayBudgetUsd);
+  assert.equal(limits.realBudgetUsd, config.engineerBudgetUsd);
+});
+
+test("the failure sentence reads as one plain message to Paul", () => {
+  const text = failureText([{ id: "8d67d5", title: "Job caps on real cost", brief: "x", kind: "engineer", target: "product" }], {
+    kind: "budget",
+    detail: "stopped",
+    budget: { spentUsd: 0.3, capUsd: 0.25, measure: "provider" },
+  });
+  assert.equal(
+    text,
+    "Failed: Job caps on real cost · engineer · 8d67d5. It did no work because it was stopped for budget with OpenRouter's own figures at $0.30 against the $0.25 cap for this kind. Send retry 8d67d5 to run it again, or show job 8d67d5 for the detail.",
+  );
+});

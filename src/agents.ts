@@ -15,6 +15,7 @@ import { EA_SERVER } from "./ea.js";
 import { repoRegistry } from "./repos.js";
 import { REPORT_RULE } from "./messages.js";
 import { classifyError, type RunFailure } from "./failures.js";
+import type { CostMeter } from "./realcost.js";
 
 export interface RunOptions {
   prompt: string;
@@ -35,7 +36,16 @@ export interface RunOptions {
   mcpServers?: Record<string, McpServerConfig>;
   agents?: Record<string, AgentDefinition>;
   maxTurns?: number;
+  /**
+   * The Agent SDK's own per-run guard, priced from the rounded-up table in src/llm.ts. It is a runaway
+   * guard only, never a job's cap: the job's cap counts the provider's money (src/realcost.ts).
+   */
   maxBudgetUsd?: number;
+  /**
+   * Where the run reports the generation id of each model call, so the service can read what the
+   * provider really charged for the job (src/realcost.ts). Absent: nothing is tracked.
+   */
+  costMeter?: CostMeter;
   /** Directories outside cwd the agent may read. Every agent gets both repositories and the uploads directory. */
   additionalDirectories?: string[];
   /** Called for each tool the agent calls (top level only), so the founder can see what it is doing. */
@@ -142,6 +152,15 @@ export const sdkRunner: AgentRunner = async (o) => {
         }
       }
       if (message.type === "assistant" && message.error && !message.parent_tool_use_id) sdkError = message.error;
+      // Each reply carries the provider's own id for that call: the runner sums what the provider
+      // charged for them, which is the only figure a job's cap is ever counted in (src/realcost.ts).
+      if (message.type === "assistant" && o.costMeter) {
+        try {
+          o.costMeter.note(message.message.id);
+        } catch {
+          // Tracking a job's real cost must never break the run.
+        }
+      }
       if (message.type === "assistant" && o.onToolUse && !message.parent_tool_use_id) {
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;
@@ -164,6 +183,13 @@ export const sdkRunner: AgentRunner = async (o) => {
           const detail = message.errors?.join("; ").trim() || "The agent stopped with an execution error.";
           text = `The agent stopped early (${message.subtype}).`;
           error = { kind: classifyError(detail, sdkError), detail };
+        } else if (message.subtype === "error_max_budget_usd") {
+          // The SDK's own guard fired: it stopped a run that had gone badly wrong. This is not work, so
+          // it is recorded as failed with the reason set (never `done`), and nothing follows it. The
+          // guard is priced from the estimate, which is not a bill, so the job runner adds the
+          // provider's own figure where it can be read (src/realcost.ts) before Paul is told anything.
+          text = `The agent stopped early (${message.subtype}).`;
+          error = { kind: "budget", detail: `The agent stopped early (${message.subtype}), which is the SDK's own runaway guard, not a job's cap.` };
         } else text = `The agent stopped early (${message.subtype}).`;
       }
     }
@@ -288,13 +314,25 @@ export function detectDepth(brief: string): ResearchDepth {
 /** What a deep research job is told on top of its brief. */
 export const DEEP_RESEARCH_NOTE = `Depth: deep. This is a deep research job with a larger turn and spend allowance than usual. Cover every part of the brief fully, check primary sources, and write the long, structured report described in your instructions, executive summary first.`;
 
-/** Turn and spend caps for a job run. Every run is capped; deep research gets more of both. */
-export function runLimits(kind: JobKind, depth?: ResearchDepth): { maxTurns: number; maxBudgetUsd: number | undefined } {
-  if (PR_KINDS.includes(kind)) return { maxTurns: 200, maxBudgetUsd: config.engineerBudgetUsd };
-  if (kind === "maintain") return { maxTurns: 80, maxBudgetUsd: config.engineerBudgetUsd };
-  if (kind === "design") return { maxTurns: 80, maxBudgetUsd: config.design.budgetUsd };
-  if (kind === "research") return depth === "deep" ? { maxTurns: 200, maxBudgetUsd: config.deepResearchBudgetUsd } : { maxTurns: 60, maxBudgetUsd: config.jobBudgetUsd };
-  return { maxTurns: 40, maxBudgetUsd: config.jobBudgetUsd };
+/**
+ * Turn and money limits for a job run. Every run is capped on turns, and on runtime by the watchdog.
+ * `maxBudgetUsd` is only the Agent SDK's own runaway guard, in its rounded-up estimate. `realBudgetUsd`
+ * is the job's actual cap, in the provider's money, or undefined when Paul has set none, and the
+ * service counts it (src/realcost.ts). Deep research gets more turns and a larger cap of both.
+ */
+export interface RunLimits {
+  maxTurns: number;
+  maxBudgetUsd: number;
+  realBudgetUsd?: number;
+}
+
+export function runLimits(kind: JobKind, depth?: ResearchDepth): RunLimits {
+  const guard = config.sdkRunawayBudgetUsd;
+  if (PR_KINDS.includes(kind)) return { maxTurns: 200, maxBudgetUsd: guard, realBudgetUsd: config.engineerBudgetUsd };
+  if (kind === "maintain") return { maxTurns: 80, maxBudgetUsd: guard, realBudgetUsd: config.engineerBudgetUsd };
+  if (kind === "design") return { maxTurns: 80, maxBudgetUsd: guard, realBudgetUsd: config.design.budgetUsd };
+  if (kind === "research") return depth === "deep" ? { maxTurns: 200, maxBudgetUsd: guard, realBudgetUsd: config.deepResearchBudgetUsd } : { maxTurns: 60, maxBudgetUsd: guard, realBudgetUsd: config.jobBudgetUsd };
+  return { maxTurns: 40, maxBudgetUsd: guard, realBudgetUsd: config.jobBudgetUsd };
 }
 
 /**
