@@ -35,6 +35,8 @@ import { HoldWatcher } from "./meetings.js";
 import { VoiceBrain, VoiceTap, voiceEnabled } from "./voice.js";
 import type { PurchaseAction } from "./store.js";
 import { PURCHASE_PATH, PurchaseGate } from "./purchase.js";
+import { OtpRelay } from "./otp.js";
+import { GmailCodeReader, type CodeMailbox } from "./mail-code.js";
 import { VoiceBridge } from "./voice-bridge.js";
 
 export interface AppDeps {
@@ -50,6 +52,8 @@ export interface AppDeps {
   googleFetch?: Fetch;
   /** Fetch for the GoDaddy client; tests inject a fake. */
   dnsFetch?: Fetch;
+  /** Where a one-time code is read from (Paul's mailbox). Tests inject a fake; the default reads his Gmail. */
+  mailbox?: CodeMailbox;
   /** The time source for follow-up commands. Tests pin it. */
   clock?: () => Date;
   /** The /status line about GitHub auth. Tests inject one; defaults to a live check. */
@@ -155,9 +159,13 @@ export function buildApp(deps: AppDeps) {
   // Purchases: a buying job asks Paul to approve the exact order; only his tap on the one-time page or his
   // own "buy <id>" lets the service press the final button (src/purchase.ts).
   const purchase = new PurchaseGate(deps.store, cardVault, deps.messenger);
-  const jobs = new JobRunner(deps.store, tapped, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase });
+  // One-time codes: when a sign-in asks for a code, the service reads it from Paul's own mailbox (the
+  // Google connection above) or asks him in chat, and types it into the page itself (src/otp.ts). No
+  // model, log, output or stored session ever holds a code, and Paul's own message goes once it is used.
+  const otp = new OtpRelay({ messenger: deps.messenger, ...(deps.mailbox ? { mailbox: deps.mailbox } : { mailbox: new GmailCodeReader(googleApi) }) });
+  const jobs = new JobRunner(deps.store, tapped, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp });
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase);
+  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);

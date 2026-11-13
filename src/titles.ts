@@ -147,8 +147,7 @@ export function derivedJobTitle(job: Job, getJob: (id: string) => Job | undefine
     const base = original ? jobTitle(original) : fromBrief ? deriveTitle(fromBrief, "engineer") : "pull request";
     return fixTitle(base, job.fixRound);
   }
-  // The scheduler ends each run's brief with "(This is the scheduled run <id>.)".
-  const scheduled = job.brief.match(/\(This is the scheduled run ([a-f0-9]{6})\.\)\s*$/);
+  const scheduled = SCHEDULED_RUN.exec(job.brief);
   const schedule = scheduled && schedules.find((s) => s.id === scheduled[1]);
   if (schedule) return scheduleTitle(schedule);
   const nudge = job.kind === "ea" && job.brief.match(/^Follow-up ([a-f0-9]{6}), thread /);
@@ -159,4 +158,15 @@ export function derivedJobTitle(job: Job, getJob: (id: string) => Job | undefine
 function samePrRef(a: string, b: string): boolean {
   const n = (s: string) => s.match(/(?:\/pull\/|#)(\d+)/)?.[1];
   return n(a) !== undefined && n(a) === n(b);
+}
+
+/** The scheduler ends each run's brief with "(This is the scheduled run <id>.)". */
+const SCHEDULED_RUN = /\(This is the scheduled run ([a-f0-9]{6})\.\)\s*$/;
+
+/**
+ * True for a run the system started from a schedule, rather than one Paul asked for in chat. Such a run
+ * never acts on his behalf beyond reading: it never asks for or takes a one-time code (src/otp.ts).
+ */
+export function isScheduledRun(brief: string): boolean {
+  return SCHEDULED_RUN.test(brief);
 }

@@ -36,6 +36,12 @@ export interface Messenger {
   sendEditable?(to: string, text: string): Promise<string | undefined>;
   edit?(to: string, handle: string, text: string): Promise<void>;
   remove?(to: string, handle: string): Promise<void>;
+  /**
+   * Remove an inbound message of Paul's own, where the channel allows a bot to. Used for the one message
+   * that carries a one-time code: the service takes the code out of it and then tidies it away, so it is
+   * not left sitting in the chat. Best effort: a channel that cannot delete it leaves it as it is.
+   */
+  deleteInbound?(to: string, messageId: string): Promise<void>;
   /** Channels that carry images (Telegram, Discord) send a PNG or JPEG file with a caption. */
   sendImage?(to: string, file: string, caption: string): Promise<void>;
   /** Show a typing indicator for a few seconds. Resolves true if the channel supports it. */
