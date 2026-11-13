@@ -606,6 +606,96 @@ test("the dns worker reads and prepares only: no Bash, Edit, Write or web, no ap
   assert.doesNotMatch(src("scheduler.ts"), /permits:\s*\[/, "scheduled runs get no permits");
 });
 
+test("an account is created for Paul only through the sign-up gate, and only his own 'signup apply <id>' submits it", async () => {
+  const all = () => fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
+  const { JOB_KINDS } = await import("../src/agents.js");
+  const { JobRunner } = await import("../src/jobs.js");
+  const { Store } = await import("../src/store.js");
+  const { BROWSE_KINDS } = await import("../src/web-tools.js");
+  const { parseSignupCommand } = await import("../src/signup-gate.js");
+  const { classify, pageStep, prepareCheck, requireEmail, requireUrl } = await import("../src/signup.js");
+
+  // The permit is declared, granted per job, and only the kinds that carry the browser can hold it.
+  assert.match(src("store.ts"), /export type JobPermit = [^;]*"signup"/, "the signup permit is declared");
+  assert.match(src("jobs.ts"), /BROWSE_KINDS\.includes\(kind\)[\s\S]{0,90}?\["signup"\]/, "the permit is confined to the browse kinds");
+  assert.match(src("jobs.ts"), /SIGNUP_NOTE/, "the preparing job carries the sign-up rules");
+  assert.match(src("jobs.ts"), /SIGNUP_TOOLS/, "the preparing job gets the prepare tool");
+  assert.doesNotMatch(src("scheduler.ts"), /permits:\s*\[/, "scheduled runs never get the signup permit");
+  // Behaviourally: the browse kinds keep it, every other kind loses it.
+  const jobs = new JobRunner(new Store(fs.mkdtempSync("/tmp/clear-ops-inv-signup-")), { send: async () => undefined } as never, (async () => ({ text: "x", sessionId: "s" })) as never);
+  for (const kind of BROWSE_KINDS) assert.deepEqual(jobs.start(kind, "register me on suno.com", "tg:1", "product", undefined, { permits: ["signup"] }).permits, ["signup"], kind);
+  for (const kind of JOB_KINDS.filter((k) => !BROWSE_KINDS.includes(k))) assert.notDeepEqual(jobs.start(kind, "register me", "tg:1", "product", undefined, { permits: ["signup"] }).permits, ["signup"], kind);
+
+  // A worker can only prepare: one tool, and no tool that submits, approves or cancels.
+  const tools = [...src("signup-gate.ts").matchAll(/tool\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(tools, ["signup_prepare"], "the preparing server has exactly one tool, and it only prepares");
+  assert.doesNotMatch(src("signup-gate.ts"), /agents\.js|sdkRunner/, "the gate runs no model of its own");
+
+  // Exactly one place approves, and only Paul's own whole message reaches it, after the allowlist check.
+  assert.equal([...src("signup-gate.ts").matchAll(/async approve\(/g)].length, 1, "one approving method");
+  const orch = src("orchestrator.ts");
+  assert.equal([...orch.matchAll(/signupGate\.approve\(/g)].length, 1, "one approval call site");
+  assert.ok(orch.indexOf("parseSignupCommand(trimmed)") > orch.indexOf("if (!isAllowed(sender))"), "signup approval is parsed only after the allowlist check");
+  assert.match(orch, /if \(signupCmd && this\.signup\) return this\.handleSignup/, "the approval command returns before any model runs");
+  for (const f of all()) if (!["signup-gate.ts", "orchestrator.ts"].includes(f)) assert.ok(!/signupGate\.approve|signup\.approve\(/.test(src(f)), `${f} must not approve a sign-up`);
+  // Only the gate submits: the form-filling path is reachable from signup.ts and the gate alone.
+  for (const f of all()) if (!["signup.ts", "signup-gate.ts", "browse.ts", "index.ts"].includes(f)) assert.ok(!/BrowserSignupSubmitter|SignupSession|fillForm\(|pageStep\(|outcomeStep\(/.test(src(f)), `${f} must never submit a sign-up`);
+  assert.equal([...src("signup-gate.ts").matchAll(/submitter\.submit\(/g)].length, 1, "one place submits a sign-up: the gate");
+  // The browser the gate opens may act only on the plan's own site.
+  assert.match(src("index.ts"), /hostMatches\(host, domain\)/, "the sign-up browser acts only on the plan's own domain");
+  // The site policy's never-list is the one applied, and the vault has to be on or nothing is prepared.
+  assert.match(src("signup.ts"), /neverReason\(domain\)/, "the never-list governs sign-ups too");
+  assert.match(src("signup-gate.ts"), /vaultEnabled\(\)/, "no vault, no sign-up: the password would have nowhere to go");
+
+  // The password is generated here, goes straight into the vault, and never reaches chat, a log or the record.
+  const gate = src("signup-gate.ts");
+  const logged = [...gate.matchAll(/logSignup\(\{([\s\S]*?)\}\);/g)].map((m) => m[1]);
+  assert.ok(logged.length >= 4, "prepared, cancelled, stopped, applied and failed are all logged");
+  for (const call of logged) assert.ok(!/\bpassword\b\s*[:,}]/.test(call), "the audit log never carries a password");
+  const patches = [...gate.matchAll(/(?:putSignup|updateSignup)\(\s*(?:id|a\.id)?,?\s*\{([\s\S]*?)\}\);/g)].map((m) => m[1]);
+  assert.ok(patches.length >= 4, "the record is written as the sign-up proceeds");
+  for (const p of patches) assert.ok(!/\bpassword\b\s*[:,}]/.test(p), "the sign-up record never carries a password");
+  const record = src("store.ts").split("export interface SignupAction")[1]?.split("\n}")[0] ?? "";
+  assert.ok(record.length > 200 && !/^\s*password\??\s*:/m.test(record), "the SignupAction record has no password field");
+  assert.equal([...gate.matchAll(/logins\.save\(/g)].length, 1, "the login goes into the vault exactly once");
+  for (const f of all()) if (!["signup-gate.ts", "vault.ts"].includes(f)) assert.ok(!/logins\.save\(|vault\.save\(/.test(src(f)), `${f} must not write into the vault`);
+
+  // The hard blocks, on the plan and on the page itself. None of these is overridable.
+  const check = { existing: [] as string[], mayAct: () => true, emails: ["paul@example.test"] };
+  const plan = { url: "https://crunchbase.com/signup", email: "paul@example.test", fields: [{ label: "Full name", value: "Paul Farrow" }] };
+  assert.deepEqual(prepareCheck(plan, check).domain, "crunchbase.com");
+  assert.throws(() => prepareCheck({ ...plan, url: "https://gmail.com/signup" }, check), /off limits/, "an email provider");
+  assert.throws(() => prepareCheck({ ...plan, url: "https://stripe.com/signup" }, check), /off limits/, "a money site");
+  assert.throws(() => prepareCheck(plan, { ...check, mayAct: () => false }), /not a site Paul has allowed/);
+  assert.throws(() => prepareCheck(plan, { ...check, existing: ["crunchbase.com"] }), /already in the vault/, "no second account");
+  assert.throws(() => prepareCheck({ ...plan, email: "someone@else.test" }, check), /not an address Paul named/);
+  assert.throws(() => prepareCheck({ ...plan, url: "https://crunchbase.com/checkout" }, check), /payment or plan-changing/);
+  for (const [label, why] of [["Card number", /money or billing/], ["Mobile number", /phone number/], ["Date of birth", /identity, date of birth or age/]] as const) {
+    assert.throws(() => prepareCheck({ ...plan, fields: [{ label, value: "x" }] }, check), why, label);
+  }
+  const field = (label: string, type = "text") => ({ index: 1, label, type, required: true });
+  const page = (fields: Array<{ index: number; label: string; type: string; required: boolean }>, submits = [{ index: 1, label: "Create account" }]) => ({ url: "https://crunchbase.com/signup", title: "Sign up", text: "Create your account", fields, submits });
+  assert.equal(pageStep(page([field("Card number")])), "payment");
+  assert.equal(pageStep(page([field("Phone number")])), "phone");
+  assert.equal(pageStep(page([field("Passport number")])), "identity");
+  assert.throws(() => classify(page([field("Email"), field("Card number")]), plan, "pw"), /never filled in/);
+  assert.throws(() => classify(page([field("Email", "email")], [{ index: 1, label: "Pay now" }]), plan, "pw"), /consequential/);
+  assert.throws(() => requireUrl("https://crunchbase.com/subscribe", "crunchbase.com"), /payment or plan-changing/);
+  // With no address named for sign-ups, nothing at all can be prepared.
+  assert.throws(() => requireEmail("paul@example.test", []), /has not named an address for sign-ups/);
+
+  // Defaults: approvals expire (6 hours), a daily cap (3), and only an address Paul named is ever used.
+  const cfg = src("config.ts");
+  assert.match(cfg, /ttlHours: positive\(process\.env\.SIGNUP_TTL_HOURS, 6\)/, "approvals expire after 6 hours by default");
+  assert.match(cfg, /dailyCap: positive\(process\.env\.SIGNUP_DAILY_CAP, 3\)/, "at most 3 approved sign-ups a day by default");
+  assert.match(cfg, /process\.env\.SIGNUP_EMAILS/, "the address must be one Paul named");
+
+  // And the command is a whole message naming the id, so no page, email or job output can produce it.
+  assert.deepEqual(parseSignupCommand("signup apply abc123"), { verb: "apply", id: "abc123" });
+  assert.deepEqual(parseSignupCommand(" signup cancel ABC123. "), { verb: "cancel", id: "abc123" });
+  for (const t of ["signup apply", "signup apply it", "please signup apply abc123", "signup apply abc123 and more", "send abc123"]) assert.equal(parseSignupCommand(t), undefined, t);
+});
+
 test("the advisor worker is read-only apart from one confined deck save tool, never sends or starts jobs, and never invents traction", async () => {
   const { workerSpec, JOB_KINDS, PR_KINDS } = await import("../src/agents.js");
   const { lockKey } = await import("../src/jobs.js");
