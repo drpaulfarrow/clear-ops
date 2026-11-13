@@ -288,14 +288,15 @@ See `.env.example`. The important ones:
 | `REPOS_DIR`, `REPO_OWNER` | Where those clones live (default `DATA_DIR/repos`) and the account new repositories are created under (default `drpaulfarrow`). |
 | `REPO_DIR`, `SELF_REPO_DIR` | Where the clones live. |
 | `CHIEF_MODEL`, `WORKER_MODEL`, `ENGINEER_MODEL` | Model aliases: `fable`, `opus`, `sonnet`, `haiku`. All three default to `haiku` in code and in `fly.toml`. The maintainer uses `ENGINEER_MODEL`. Set one of them to `sonnet` (or `opus`) to put that role back on a stronger model. |
-| `JOB_BUDGET_USD` | Spend cap per research, write or analyse job and per chat turn, from the Agent SDK's own cost for the run. That figure is internal and never shown: it is the per-run budget that stops a runaway run. Off unless you set it (your call, 13 November 2026); turn limits still stop a runaway run. |
-| `DEEP_RESEARCH_BUDGET_USD` | Spend cap per deep research job (off unless set); deep research also gets 200 turns instead of 60. |
-| `ENGINEER_BUDGET_USD` | Spend cap per engineering, agent-creator or maintainer job (off unless set). |
+| `JOB_BUDGET_USD` | A job's own spend cap, in the money OpenRouter actually charged for that job's calls: the service reads the provider's own figure for each call (`src/realcost.ts`) and stops the run only when the sum passes the cap. Off unless you set it (your call, 13 November 2026); turn limits and `JOB_MAX_RUNTIME_MINUTES` still stop a runaway run whatever you set. A job is never stopped while it has really spent pennies, and the Agent SDK's estimate is never used as the figure. |
+| `DEEP_RESEARCH_BUDGET_USD` | The same cap for a deep research job, in the provider's money (off unless set); deep research also gets 200 turns instead of 60. |
+| `ENGINEER_BUDGET_USD` | The same cap for an engineering, agent-creator or maintainer job, in the provider's money (off unless set). |
+| `SDK_RUNAWAY_BUDGET_USD` | The Agent SDK's own per-run guard, priced from the rounded-up table in `src/llm.ts` (on OpenRouter about fifty times the real charge). It is not a bill and never a job's cap: the only thing it does is stop a run that has gone badly wrong. Default 1000, set in `fly.toml`. |
 | `JOB_STALL_MINUTES` | A running job whose worker shows no activity for this long is stopped, its work kept and its queue moved on. Default 30. |
 | `DAILY_BUDGET_USD` | Cap on spend in one Europe/London day. Counted from OpenRouter's own usage figure (`src/spend.ts`, at most one call a minute); while that cannot be read it is judged on an internal stand-in figure, and `/spend` then says the figure could not be read instead of showing one. Off unless you set it (your call, 13 November 2026). If set and reached, new jobs wait (one message to you per day), and `/resume` lifts it for the rest of that day; they also start when the next day begins. |
 | `JOB_MAX_RUNTIME_MINUTES` | The longest any job may run before it is stopped the same way. Default 240. |
 | `DESIGN_SITE_URL` | The live site the design worker reviews. Default https://clear-exchange.fly.dev. |
-| `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `haiku`) and spend cap per design job (off unless set). |
+| `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `haiku`) and spend cap per design job, in the provider's money (off unless set). |
 | `CHROMIUM_PATH` | Headless browser for screenshots. The Docker image installs `chromium`. |
 | `DESIGN_USER` | The unprivileged account the browser and branch previews run as. Default `designer`, created in the Docker image. The browser will not run as root. |
 | `UPLOAD_MAX_MB` | Largest file accepted in chat, in MB. Default 20. |
