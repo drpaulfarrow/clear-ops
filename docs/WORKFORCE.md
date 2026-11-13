@@ -9,25 +9,31 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 | Research, "go deep on..." | researcher | A sourced brief (long and structured if you ask for depth) |
 | Posts, emails, specs in your voice | writer | A draft |
 | "Engineer: build X" | engineer | A pull request with tests; the maintainer reviews and merges it, and review fixes loop on their own (three rounds) |
+| Runs after every engineer job (you do not ask for it) | maintainer | Runs the tests and CI, reads the diff, then merges or requests changes. It never edits code |
 | Questions about earlier outputs or data | analyst | An answer |
 | Inbox, agenda, drafts, holds, meeting prep, outreach | executive assistant | Gmail drafts and calendar holds on your own calendar; it sends an email, invites people or cancels an event with attendees only after you approve that exact item in chat (`send <id>`). Weekday 07:30 brief and 18:00 wrap |
 | "I want an agent that..." | agent-creator | A schedule on an existing worker, or a new worker, as a pull request |
 | Brand, site critique, page specs | design director | Images and specs for an engineer; no production code |
 | "What should we do next?" | creative strategist | A ranked list of options. It only lists; nothing starts until you pick one |
+| "Build the investor deck", "pressure-test our pricing" | pitch and strategy advisor | Slide-ready Markdown decks, one-pagers and candid consulting notes, from the saved research. Never invents traction or numbers |
+| Prebid questions, module review, release news | Prebid expert | Sourced answers with dates and versions; read-only, never posts or files anything |
+| "Build my CV", "tailor it for this role" | CV writer | Markdown CVs, bios and a facts file kept in a private folder, from facts you supply; asks you questions rather than inventing |
+| GoDaddy records ("what does clearexchange.ai have?", "add a CNAME") | DNS agent | Reads your zones; prepares a change that shows the exact before and after. Nothing is written until you reply `dns apply <id>` |
 
 ## Rules of the road
 
-- Jobs only start when you ask for them. Suggestions from reviews, research or the strategist come back as options for you to choose.
+- Jobs only start when you ask for them. Besides the schedules you set (including the weekday 07:30 brief and 18:00 wrap once Google is connected), the only jobs that start by themselves are the maintainer's reviews, the fix rounds of pull requests you asked for, and the rounds of a design loop you started. Suggestions from reviews, research or the strategist come back as options for you to choose.
 - Send a voice note or an audio message instead of typing and the chief answers the transcript as if you had typed it; the audio itself is kept in your uploads. With no transcription key set, it says plainly that it cannot play it and asks you to type.
-- One engineering job per repository at a time; others queue, per repository. `/jobs` shows the queue.
+- Up to two engineering jobs per repository at once, each in its own working copy so they never fight over the same files (`ENGINEER_SLOTS`, at most 3); ask for a third while two are running and it queues, per repository. `/jobs` shows the queue.
 - Say which repository a job is about: the product (the default), `self` (the workforce) or `site` (drpaulfarrow.com, your personal site). Every worker can read all of them.
 - Ask for a new repository in chat ("create a repo called X", add "public" if you want it public). It is created under drpaulfarrow, private by default, with a README, and can be worked on straight away. Workers never delete repositories or change their settings, and never create one unless you asked.
-- Anything outside the engineer's normal remit waits for `YES <id>`, `send <id>` and `cancel <id>` (an email, invitation or cancellation the assistant prepared; you see its exact text first, it expires after 24 hours). Deploys of the product happen through GitHub Actions, not from the workforce.
+- Anything outside the engineer's normal remit waits for `YES <id>`, `send <id>`, `cancel <id>` or `buy <id>` (an email, invitation or cancellation the assistant prepared, or an order a job prepared; you see its exact text, or the shop, the items, the total and a picture, first). An email, invitation or cancellation expires after 24 hours (`OUTBOUND_TTL_HOURS`) and an order after 20 minutes (`PURCHASE_WAIT_MINUTES`). Deploys of the product happen through GitHub Actions, not from the workforce.
+- Buying works the same way: a job fills the basket and stops at the checkout page, pressing nothing, and nothing is bought until you approve that exact order with `buy <id>` or on the one-time approval page; there is no spending limit, and the README's "Buying things" section has the rest.
 - Daily spend is capped (`DAILY_BUDGET_USD`, default 20); `/spend` shows today's, `/resume` lifts a cap or a credit hold.
 
 ## Commands
 
-`/jobs` `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `done <id>`, `snooze <id> <when>`, `YES <id>`.
+`/jobs` `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared) and `buy cancel <id>`. Each approval command is for one item, you send it yourself, and it expires.
 
 ## Things only you do
 

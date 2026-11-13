@@ -70,9 +70,11 @@ The engineer and maintainer may work on this repository (job target "self"). Not
 - `src/messages.ts` how everything talks to Paul: `PAUL_STYLE`, the workers' two-part answer (`REPORT_RULE`: full report, then a short message between `<message_to_paul>` tags), `splitReport`, `plainMessage` for chat and `tidyReply` for the chief's replies.
 - `src/failures.ts` failed runs: telling an API or SDK error from real work, the plain reason and what Paul does, and `FailureNotifier`, which batches failure messages.
 - `src/titles.ts` job titles: validation, derivation from briefs, the titles of system-started jobs, display labels and the migration of untitled state.
+- `src/config.ts` every environment variable, its default and the allowlist check (`isAllowed`). `src/bootstrap.ts` clones or checks out each managed repository at job start. `src/publish-outputs.ts` mirrors finished outputs to the private outputs repository (see the section above).
 - `src/llm.ts` the model provider: Anthropic by default, OpenRouter when `OPENROUTER_API_KEY` is set; alias mapping, the SDK environment and the price rows.
 - `src/spend.ts` where a spend figure comes from: the provider's own usage (OpenRouter's `GET /api/v1/key`), the London-day baseline kept in the store, the refresh cache, and the estimate as a labelled fallback.
 - `src/search.ts` Brave and Exa search. `src/browse.ts` the browser. `src/site-policy.ts` where it may act. `src/vault.ts` Paul's logins. `src/web-tools.ts` which kinds get them.
+- `src/transcribe.ts` speech to text for voice notes, on any channel (OpenRouter by default, any OpenAI-compatible endpoint via `TRANSCRIBE_*`).
 - `src/voice.ts` the voice brain (Cleo), `VoiceTap`, speech through OpenRouter and the audio helpers. `src/voice-bridge.ts` the Discord voice bridge.
 - `src/london.ts` Europe/London date helpers.
 - `src/ea.ts` the executive assistant's tools (mail search and threads, drafts, agenda, free slots, holds), the untrusted-content fence, the recipient guard and the default brief schedules.
