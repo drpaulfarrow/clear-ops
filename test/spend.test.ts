@@ -7,6 +7,9 @@ import path from "node:path";
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-spend-"));
 process.env.DAILY_BUDGET_USD = "10";
+// No provider: this suite is about the estimate and the chat text, and an OpenRouter key in the
+// developer's shell would otherwise turn the meter on and make a live call.
+process.env.OPENROUTER_API_KEY = "";
 
 const { Store } = await import("../src/store.js");
 const { JobRunner } = await import("../src/jobs.js");
@@ -51,11 +54,13 @@ test("/spend shows today's total, cap, what is left, breakdown and top 3, withou
   await orch.handle(FOUNDER, "/spend", { replyTo: FOUNDER });
   const out = sent.join("\n");
   assert.equal(calls(), 0, "no model call");
-  assert.match(out, /\$10\.00 on jobs, cap \$10\.00, \$0\.00 left, cap is blocking new jobs/);
-  assert.match(out, /By kind: engineer \$6\.00, research \$4\.00/);
-  assert.match(out, new RegExp(`Top: Big build \\(${big.id}\\) \\$6\\.00, Research one`));
+  // With no OpenRouter key the workforce runs on Anthropic, where the SDK's list-price cost is the
+  // bill, so it is named as that rather than as an estimate.
+  assert.match(out, /\$10\.00 spent today \(Anthropic's own list price\), cap \$10\.00, \$0\.00 left, cap is blocking new jobs/);
+  assert.match(out, /By kind \(estimated\): engineer \$6\.00, research \$4\.00/);
+  assert.match(out, new RegExp(`Top: Big build \\(${big.id}\\) \\$6\\.00 estimated, Research one`));
   assert.ok(!out.includes("Research three"), "only the top three");
-  assert.match(out, /Known gap: .*chat/);
+  assert.match(out, /Known gaps: .*chat/);
   assert.ok(!out.includes("—"), "no em dashes");
 });
 
@@ -67,11 +72,26 @@ test("/spend yesterday and /spend YYYY-MM-DD use that London day; bad dates are 
   add("research", "Today research", 1, now);
   const day = londonYmd(ago);
   await orch.handle(FOUNDER, `/spend ${day}`, { replyTo: FOUNDER });
-  assert.match(sent.pop()!, new RegExp(`${day}\\): \\$3\\.25 on jobs, daily cap \\$10\\.00\\.\\nBy kind: research \\$3\\.25`));
+  const dayOut = sent.pop()!;
+  assert.match(dayOut, new RegExp(`${day}\\): \\$3\\.25 on jobs, daily cap \\$10\\.00\\.`));
+  assert.match(dayOut, /By kind \(estimated\): research \$3\.25/);
+  assert.match(dayOut, /OpenRouter's usage is read for today only/, "a past day says the figure is an estimate");
   await orch.handle(FOUNDER, "/spend yesterday", { replyTo: FOUNDER });
   assert.match(sent.pop()!, new RegExp(`Yesterday \\(${addDays(londonYmd(now), -1)}\\): \\$0\\.00`));
   await orch.handle(FOUNDER, "/spend 2026-02-31", { replyTo: FOUNDER });
   assert.match(sent.pop()!, /not a date/);
+});
+
+test("/spend names where each job's own figure came from, so an estimate is never shown as the bill", async () => {
+  const { orch, sent, add, store } = setup();
+  const now = new Date();
+  const charged = add("research", "Charged job", 3, now);
+  add("research", "Estimated job", 2, now);
+  store.updateJob(charged.id, { costSource: "provider" });
+  await orch.handle(FOUNDER, "/spend", { replyTo: FOUNDER });
+  const out = sent.join("\n");
+  assert.match(out, new RegExp(`Charged job \\(${charged.id}\\) \\$3\\.00 charged`));
+  assert.match(out, /Estimated job \(\w+\) \$2\.00 estimated/);
 });
 
 test("spentToday and /spend share one sum", () => {

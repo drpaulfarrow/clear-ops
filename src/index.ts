@@ -4,6 +4,7 @@ import { assertProductionConfig, bookingLink, config } from "./config.js";
 import { SitePolicy, termsWarning } from "./site-policy.js";
 import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError, cardVault, VAULT_CARD_PATH } from "./vault.js";
 import { modelLine } from "./llm.js";
+import { spendLine } from "./spend.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
 import { Orchestrator } from "./orchestrator.js";
@@ -310,6 +311,7 @@ const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].repla
 if (isMain) {
   assertProductionConfig();
   console.log(modelLine());
+  console.log(spendLine());
   const store = new Store(config.dataDir);
   repoRegistry.load(store);
   // With the GitHub App configured, keep its installation token fresh for git and gh during long jobs.
