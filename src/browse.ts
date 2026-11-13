@@ -539,8 +539,11 @@ export class BrowseSession {
           await otp.fill(code);
         }
         await otp.press("Enter");
-        await this.clearCodeFields(otpSel);
         await settle();
+        // A code page whose own button is the only way on (Enter does nothing there) gets that one button
+        // pressed, and never a consequential one; then the field is wiped so the code is not left in the page.
+        if (await otp.count()) await this.pressCodeButton(entry.domain);
+        await this.clearCodeFields(otpSel);
         continue;
       }
       const user = visible(userSel);
@@ -576,30 +579,58 @@ export class BrowseSession {
   private async codeForPage(domain: string, text: string): Promise<string | undefined> {
     const relay = this.deps.otp;
     if (!relay) return undefined;
-    const emailOffered = await this.preferEmailCode(text);
+    const emailOffered = await this.preferEmailCode(domain, text);
     const ttlMs = codeTtlMs(text);
     return relay.code({ domain, emailOffered, since: Date.now(), ...(ttlMs ? { ttlMs } : {}) });
   }
 
   /**
-   * Whether this step can send its code by email, clicking that option when the page offers one (a radio
-   * button or link saying "email"). Only the page's own delivery choice is ever clicked, and never
-   * anything consequential (pay, send, post, delete: src/site-policy.ts), so this reads a delivery
-   * preference rather than acting on the site's behalf.
+   * Whether this step can send its code by email, taking that option when the page offers one. Only the
+   * page's own delivery choice is ever taken, only while the login's own page is still the one in front
+   * of us, and never anything consequential (pay, send, post, delete: src/site-policy.ts), so this reads
+   * a delivery preference rather than acting on the site's behalf. A page saying a code went by email, or
+   * showing the masked address it went to ("p***@gmail.com"), counts; a stray address in a footer does
+   * not, so a phone-only code step is not left waiting on a mailbox that will never have it.
    */
-  private async preferEmailCode(text: string): Promise<boolean> {
+  private async preferEmailCode(domain: string, text: string): Promise<boolean> {
     const page = this.page;
     if (!page) return false;
-    const mentionsEmail = (t: string) => /e-?mail|inbox|mailbox/i.test(t);
-    const option = page.locator('button, a, label, input[type=radio]').filter({ hasText: /e-?mail/i }).first();
+    // Two readings, both on one line: a code said to have gone by email or to an address it shows, or a
+    // mail-ish word followed by "sent" or "code" ("check your email for the code").
+    const mentionsEmail = (t: string) =>
+      /(?:send|sent|deliver|\bto\b)[^.\n]{0,60}(?:e-?mail|gmail|inbox|mailbox|\S*@\S*\.\S+)/i.test(t) ||
+      /(?:e-?mail|gmail|inbox|mailbox|\S*@\S*\.\S+)[^.\n]{0,60}(?:sent|\bcode\b)/i.test(t);
+    const option = page.locator("button, a, label").filter({ hasText: /e-?mail|gmail|@/i }).first();
     if (await option.count().catch(() => 0)) {
       const words = `${await option.innerText().catch(() => "")} ${(await option.getAttribute("aria-label").catch(() => "")) ?? ""}`.trim();
-      if (!CONSEQUENTIAL.test(words)) {
+      const delivery = /code|send|deliver|option|another|instead|use|via|address|me\b/i.test(words);
+      if (words.length <= 80 && delivery && !CONSEQUENTIAL.test(words) && hostMatches(new URL(page.url()).hostname, domain)) {
         await option.click({ timeout: 3000 }).catch(() => undefined);
+        await page.waitForLoadState("domcontentloaded").catch(() => undefined);
         await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => undefined);
       }
     }
     return mentionsEmail(text) || mentionsEmail(await this.pageText());
+  }
+
+  /**
+   * Press the one button that moves a code page on, when Enter alone did nothing there. Only a button
+   * whose words are about verifying or continuing is pressed, never anything consequential, and only
+   * while the login's own page is still the one in front of us, so the code is never submitted anywhere
+   * but the site that asked for it.
+   */
+  private async pressCodeButton(domain: string): Promise<void> {
+    const page = this.page;
+    if (!page || !hostMatches(new URL(page.url()).hostname, domain)) return;
+    for (const button of (await page.locator('button, input[type="submit"]').all().catch(() => [])).slice(0, 12)) {
+      const words = `${await button.innerText().catch(() => "")} ${(await button.getAttribute("value").catch(() => "")) ?? ""}`.trim();
+      if (!words || words.length > 40) continue;
+      if (CONSEQUENTIAL.test(words) || !/verif|code|submit|continue|confirm|next|sign in|log in/i.test(words)) continue;
+      await button.click({ timeout: 3000 }).catch(() => undefined);
+      await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await page.waitForLoadState("networkidle", { timeout: 6000 }).catch(() => undefined);
+      return;
+    }
   }
 
   /** Wipe a field holding a one-time code, so it is not left in the page or in a later snapshot. */
