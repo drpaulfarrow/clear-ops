@@ -1153,3 +1153,28 @@ test("a document through the Instinct bridge is a private upload, validated befo
   const jsonAt = index.indexOf("app.use(express.json(");
   assert.ok(bridgeAt > -1 && jsonAt > -1 && bridgeAt < jsonAt, "the bearer token is checked before any document body is parsed");
 });
+
+test("usage figures are numbers only: never a prompt, a brief, an output or private content", () => {
+  const tel = src("telemetry.ts");
+  // The kinds that work over Paul's mail, calendar or uploads keep counts and drop tool names.
+  assert.match(tel, /export const PRIVATE_KINDS: JobKind\[\] = \["ea", "cv"\]/, "the private kinds must stay named in one place");
+  assert.match(tel, /const tools = i\.private \? undefined :/, "a private call record must never keep a tool name");
+  // Nothing in the telemetry module reaches for a job's brief, its saved output or a file path.
+  assert.doesNotMatch(tel, /\.brief\b|\.outputPath\b|readOutput\(/, "the figures must never read a brief or an output");
+  // The lines Paul can read never print the Agent SDK's internal estimate, under any label.
+  const shown = tel.slice(tel.indexOf("export function tokenLine"), tel.indexOf("export interface UsageJob"));
+  assert.doesNotMatch(shown, /estimateUsd/, "no displayed line may read the internal estimate");
+  assert.match(shown, /jobCostLine[\s\S]*costSource === "unavailable"/, "where there is no real figure the line must say so");
+
+  // The eval's own record carries the verdict and the numbers, never an answer.
+  const ev = src("eval.ts");
+  const record = ev.slice(ev.indexOf("export interface EvalTaskResult"), ev.indexOf("export interface EvalRun {"));
+  assert.doesNotMatch(record, /\btext\b|\banswer\b|\bprompt\b/, "an eval result must never hold an answer or a prompt");
+  assert.match(ev, /failed: string\[\]/, "a failed task is recorded as the names of the checks that failed");
+
+  // The runner that scores the set is the harness's own, at the cheapest configured tier, and it caps its spend.
+  const script = fs.readFileSync(new URL("../scripts/eval.ts", import.meta.url), "utf8");
+  assert.match(script, /sdkRunner/, "the eval must run through the real harness, not a stub");
+  assert.match(script, /budgetUsd/, "the eval must carry a spend cap");
+  assert.match(script, /config\.models\.chief/, "the eval must run at the configured (cheapest by default) tier");
+});

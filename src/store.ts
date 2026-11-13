@@ -5,6 +5,7 @@ import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 import type { FailureKind } from "./failures.js";
 import type { RetrievalRecord } from "./retrieval.js";
 import type { OpsToolShape } from "./ops-schema.js";
+import type { JobUsage } from "./telemetry.js";
 
 /** How many of the chief's own retrieval decisions are kept, newest last (src/retrieval.ts). */
 export const RETRIEVAL_TURNS_KEPT = 20;
@@ -169,6 +170,13 @@ export interface Job {
    * or upload content, only the decision and what the web returned.
    */
   retrieval?: RetrievalRecord;
+  /**
+   * What the job's model calls used: the per-call records, the tokens the provider reported for each,
+   * and the cost where a real figure exists (src/telemetry.ts). Numbers only: no prompt, brief, output
+   * or tool input text, and for the kinds that touch Paul's mail, calendar or uploads not even tool
+   * names. Kept with the job so it survives a restart and can be read back later.
+   */
+  usage?: JobUsage;
   error?: string;
   /**
    * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,
@@ -475,6 +483,12 @@ interface State {
   retrievalTurns?: RetrievalRecord[];
   /** The ops tool shape pinned per chief MCP namespace, for the fail-closed schema guard (src/ops-schema.ts). */
   opsSchemas?: Record<string, OpsToolShape[]>;
+  /**
+   * What the chief's own chat turns used on the current London day (src/telemetry.ts), so the report
+   * can include them. Numbers only, and only the current day is kept: the record is replaced when the
+   * day turns over, so this cannot grow without bound.
+   */
+  chatUsage?: { ymd: string; usage: JobUsage };
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -858,6 +872,19 @@ export class Store {
   }
   recentRetrievals(limit = RETRIEVAL_TURNS_KEPT): RetrievalRecord[] {
     return (this.state.retrievalTurns ?? []).slice(-limit).reverse();
+  }
+
+  /**
+   * What the chief's own chat turns used today (src/telemetry.ts): only the current London day is kept,
+   * so this replaces itself when the day turns over rather than growing.
+   */
+  chatUsage(): { ymd: string; usage: JobUsage } | undefined {
+    const held = this.state.chatUsage;
+    return held ? { ymd: held.ymd, usage: { ...held.usage, calls: [...held.usage.calls], totals: { ...held.usage.totals } } } : undefined;
+  }
+  setChatUsage(next: { ymd: string; usage: JobUsage }): void {
+    this.state.chatUsage = next;
+    this.save();
   }
 
   // Settings

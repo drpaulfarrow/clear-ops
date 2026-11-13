@@ -33,6 +33,7 @@ import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
+import { isPrivateKind, jobUsageFromRun, roleForKind, UsageRecorder, type JobUsage, type RunUsage } from "./telemetry.js";
 
 const exec = promisify(execFile);
 
@@ -69,6 +70,8 @@ interface LiveRun {
   lastActivity: number;
   /** When lastActivityAt was last written to the store; the heartbeat is persisted at most once a minute. */
   persistedAt: number;
+  /** When the job's usage was last written to the store; also at most once a minute (state.json is one file). */
+  usagePersistedAt: number;
   /** Waiting for the product's deploy before a design round looks: not working yet, so never stalled. */
   waiting: boolean;
   /** Waiting for a working copy of its own (another job is in the checkout): not working, so never stalled. */
@@ -972,7 +975,7 @@ export class JobRunner {
     const now = this.now();
     let settle = () => {};
     const settled = new Promise<void>((r) => (settle = r));
-    const live: LiveRun = { abort: new AbortController(), startedAt: now, lastActivity: now, persistedAt: now, waiting: !!job.awaitDeploy, waitingForCopy: false, finishing: false, settled, settle };
+    const live: LiveRun = { abort: new AbortController(), startedAt: now, lastActivity: now, persistedAt: now, usagePersistedAt: now, waiting: !!job.awaitDeploy, waitingForCopy: false, finishing: false, settled, settle };
     this.live.set(id, live);
     this.running.add(id);
     const at = new Date(now).toISOString();
@@ -982,6 +985,9 @@ export class JobRunner {
     let snapshot: string | undefined;
     let progress: JobProgress | undefined;
     let costMeter: JobCostWatch | undefined;
+    // What the job's model calls used (src/telemetry.ts). Kept in memory as the calls arrive and
+    // written to the store at most once a minute, so a restart keeps what the job had already used.
+    const usage = new UsageRecorder();
     try {
       // A design round after a merge looks only once the product's deploy of that merge is live.
       if (job.awaitDeploy) {
@@ -1145,6 +1151,11 @@ export class JobRunner {
         onSession: (sessionId: string) => {
           if (this.store.getJob(id)?.sessionId !== sessionId) this.store.updateJob(id, { sessionId });
         },
+        telemetry: { role: roleForKind(job.kind), private: isPrivateKind(job.kind) },
+        onCall: (call) => {
+          usage.add(call);
+          this.persistUsage(id, job, live, usage);
+        },
       };
       // Interrupted by a restart: carry on the same conversation, so the worker keeps everything it had
       // read and decided instead of starting again. If that cannot work (the session is gone or broken),
@@ -1184,7 +1195,7 @@ export class JobRunner {
       // it is recorded as failed, and nothing follows it (no review, no fix round, no "Finished").
       const failed = runFailure(result);
       if (failed) {
-        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
+        this.store.updateJob(id, { ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}), usage: this.usageFor(job, result.usage, usage) });
         throw new RunFailedError(failed);
       }
       // A job that clones and pushes gains one plain line at the end of its saved report saying which
@@ -1201,6 +1212,7 @@ export class JobRunner {
         summary: message,
         outputPath,
         costUsd: result.costUsd,
+        usage: this.usageFor(job, result.usage, usage),
       });
       try {
         const done = this.store.getJob(id);
@@ -1279,6 +1291,9 @@ export class JobRunner {
       if (job.kind === "design") await this.sendImages(job, report);
       if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
     } catch (err) {
+      // Whatever the job had used before it stopped or failed is kept, marked as partial: a job that
+      // was cancelled or crashed still spent what it spent, and the record should say so.
+      if (!usage.empty) this.store.updateJob(id, { usage: this.usageFor(job, undefined, usage) });
       if (live.stop) await this.recordStop(job, live);
       else await this.recordFailure(job, failureFromError(err));
     } finally {
@@ -1318,6 +1333,40 @@ export class JobRunner {
     if (now - live.persistedAt < MINUTE || !this.store.getJob(id)) return;
     live.persistedAt = now;
     this.store.updateJob(id, { lastActivityAt: new Date(now).toISOString() });
+  }
+
+  /**
+   * Writes what a running job has used so far, at most once a minute (state.json is one file rewritten
+   * whole, so this must not happen on every call). Marked partial: the job is still running.
+   */
+  private persistUsage(id: string, job: Job, live: LiveRun, usage: UsageRecorder): void {
+    const now = this.now();
+    if (now - live.usagePersistedAt < MINUTE || !this.store.getJob(id)) return;
+    live.usagePersistedAt = now;
+    try {
+      this.store.updateJob(id, { usage: this.usageFor(job, undefined, usage) });
+    } catch (err) {
+      console.warn(`usage not written for job ${id}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * A job's usage record: the run's own report of itself where there is one, otherwise what the
+   * recorder kept (a run that was stopped, or a runner that reports no usage). Numbers only.
+   */
+  private usageFor(job: Job, run: RunUsage | undefined, usage: UsageRecorder): JobUsage {
+    if (run) return jobUsageFromRun(run);
+    const kept = usage.summary();
+    return jobUsageFromRun(
+      {
+        role: roleForKind(job.kind),
+        provider: provider(),
+        calls: kept.calls,
+        ...(kept.callsOmitted ? { callsOmitted: kept.callsOmitted } : {}),
+        totals: kept.totals,
+      },
+      { partial: true },
+    );
   }
 
   /**
@@ -1518,7 +1567,7 @@ export class JobRunner {
     if (this.live.has(id)) await this.stop(id, reason);
     else {
       // Marked running, but no worker here: nothing to stop, so record it and free its place.
-      const orphan: LiveRun = { abort: new AbortController(), startedAt: 0, lastActivity: 0, persistedAt: 0, waiting: false, waitingForCopy: false, finishing: false, stop: reason, settled: Promise.resolve(), settle: () => {} };
+      const orphan: LiveRun = { abort: new AbortController(), startedAt: 0, lastActivity: 0, persistedAt: 0, usagePersistedAt: 0, waiting: false, waitingForCopy: false, finishing: false, stop: reason, settled: Promise.resolve(), settle: () => {} };
       await this.recordStop(job, orphan);
       if (key && this.holds(key, id)) await this.release(job);
       else if (key && !this.full(key)) await this.startNext(key, id);

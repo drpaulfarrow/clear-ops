@@ -1,4 +1,4 @@
-import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMessage, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
@@ -18,6 +18,7 @@ import { repoRegistry } from "./repos.js";
 import { REPORT_RULE } from "./messages.js";
 import { classifyError, type RunFailure } from "./failures.js";
 import type { CostMeter } from "./realcost.js";
+import { callFromAssistant, capCalls, modelRunUsages, runTotals, totalsOf, type ModelCall, type RunUsage, type TelemetryRole } from "./telemetry.js";
 
 export interface RunOptions {
   prompt: string;
@@ -71,6 +72,17 @@ export interface RunOptions {
   onTrace?: (e: RawTraceEvent) => void;
   /** Called once with the run's session id as soon as the SDK reports it, so an interrupted job can resume the same conversation. */
   onSession?: (sessionId: string) => void;
+  /**
+   * Called once for each model call the run makes, with that call's numbers only (src/telemetry.ts):
+   * provider, model id, tokens, latency and tool-call count, never a prompt, a tool input or an output.
+   * What the call is recorded as, and whether tool names may be kept, come from `telemetry`.
+   */
+  onCall?: (call: ModelCall) => void;
+  /**
+   * What the run's calls are recorded as: the job's role, and whether the job works over Paul's mail,
+   * calendar or uploads (in which case tool names are dropped). Absent means a plain worker.
+   */
+  telemetry?: { role: TelemetryRole; private?: boolean };
   /** Aborting it stops the run and its process: a stalled, timed-out or cancelled job. */
   abortController?: AbortController;
 }
@@ -79,6 +91,11 @@ export interface RunResult {
   text: string;
   sessionId?: string;
   costUsd?: number;
+  /**
+   * What the run used, from the SDK's own report of it (src/telemetry.ts): the calls with their
+   * tokens, and the run's per-model totals, duration and turns. Numbers only.
+   */
+  usage?: RunUsage;
   /**
    * Set when the run ended in an API or SDK error rather than real work (no credit, a rejected key,
    * rate limits or overload after the retries, an execution error). The job runner records it as failed.
@@ -170,6 +187,11 @@ export const sdkRunner: AgentRunner = async (o) => {
   if (!direct && openRouterKeyMissing(o.apiKey ?? config.openrouter.apiKey)) {
     return { text: "", error: { kind: "auth", detail: OPENROUTER_KEY_MISSING } };
   }
+  // One record per model call, numbers only (src/telemetry.ts). The gap between one message and the
+  // next is the closest thing to a per-call latency the SDK gives: an upper bound, tool work included.
+  const calls: ModelCall[] = [];
+  let previousAt: number | undefined;
+  let runUsage: RunUsage | undefined;
   try {
     for await (const message of query({
       prompt: o.images?.length ? withImages(o.prompt, o.images) : o.prompt,
@@ -239,9 +261,32 @@ export const sdkRunner: AgentRunner = async (o) => {
           }
         }
       }
+      if (message.type === "assistant" && o.onCall) {
+        const tools: string[] = [];
+        for (const block of message.message.content) if (block.type === "tool_use") tools.push(block.name);
+        const now = Date.now();
+        const call = callFromAssistant({
+          at: now,
+          role: o.telemetry?.role ?? "worker",
+          model: message.message.model || (direct ? o.model : resolveModel(o.model)),
+          provider: direct ? "anthropic" : provider(),
+          usage: message.message.usage,
+          tools,
+          ...(previousAt !== undefined ? { latencyMs: now - previousAt } : {}),
+          ...(o.telemetry?.private ? { private: true } : {}),
+        });
+        calls.push(call);
+        try {
+          o.onCall(call);
+        } catch {
+          // A record must never break the run.
+        }
+      }
+      previousAt = Date.now();
       if (message.type === "result") {
         sessionId = message.session_id;
         costUsd = message.total_cost_usd;
+        runUsage = runUsageOf(message, o, direct, calls, costUsd);
         if (message.subtype === "success") {
           text = message.result;
           // An API error (no credit, a bad key, overload after retries) arrives as a "success" whose
@@ -265,7 +310,7 @@ export const sdkRunner: AgentRunner = async (o) => {
     // A single-shot query() throws after yielding an error result; keep whatever we captured.
     if (!text && !error) throw err;
   }
-  return { text, sessionId, costUsd, ...(error ? { error } : {}) };
+  return { text, sessionId, costUsd, ...(runUsage ? { usage: runUsage } : {}), ...(error ? { error } : {}) };
 };
 
 /** Reports one SDK message to the trace: tool calls, tool results, remarks and the end of the run. */
@@ -290,6 +335,34 @@ export function traceMessage(message: unknown, emit: (e: RawTraceEvent) => void)
     const outcome = m.subtype === "success" ? (m.is_error ? `API error: ${m.result ?? ""}` : "finished") : `${m.subtype}${m.errors?.length ? `: ${m.errors.join("; ")}` : ""}`;
     emit({ type: "end", outcome, turns: m.num_turns, isError: failed });
   }
+}
+
+/**
+ * The run's usage record, from the SDK's own result message: the calls it reported, the run's own
+ * token totals (the field meant for token accounting) and the models it used. Numbers only, and no
+ * cost at all except where the run went to Anthropic directly, whose list price is what is billed.
+ */
+function runUsageOf(message: SDKResultMessage, o: RunOptions, direct: boolean, calls: ModelCall[], costUsd?: number): RunUsage {
+  const kept = capCalls(calls);
+  const totals = runTotals(message.usage, totalsOf(kept.calls));
+  totals.calls = kept.calls.length + (kept.callsOmitted ?? 0);
+  const models = message.modelUsage ? modelRunUsages(message.modelUsage) : undefined;
+  const usage: RunUsage = {
+    role: o.telemetry?.role ?? "worker",
+    provider: direct ? "anthropic" : provider(),
+    calls: kept.calls,
+    totals,
+    durationMs: message.duration_ms,
+  };
+  if (kept.callsOmitted) usage.callsOmitted = kept.callsOmitted;
+  if (models?.length) usage.models = models;
+  if (typeof message.num_turns === "number") usage.numTurns = message.num_turns;
+  // The SDK's own price for the run: internal only, never shown, and the number the eval runner and a
+  // later slice use to compare one version of the harness with another. Where the run went to Anthropic
+  // directly it is also the bill, and `jobUsageFromRun` labels it as such.
+  if (costUsd !== undefined) usage.estimateUsd = costUsd;
+  if (direct && costUsd !== undefined) usage.costUsd = costUsd;
+  return usage;
 }
 
 /**
