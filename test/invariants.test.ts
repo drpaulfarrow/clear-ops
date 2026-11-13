@@ -641,8 +641,12 @@ test("an account is created for Paul only through the sign-up gate, and only his
   // Only the gate submits: the form-filling path is reachable from signup.ts and the gate alone.
   for (const f of all()) if (!["signup.ts", "signup-gate.ts", "browse.ts", "index.ts"].includes(f)) assert.ok(!/BrowserSignupSubmitter|SignupSession|fillForm\(|pageStep\(|outcomeStep\(/.test(src(f)), `${f} must never submit a sign-up`);
   assert.equal([...src("signup-gate.ts").matchAll(/submitter\.submit\(/g)].length, 1, "one place submits a sign-up: the gate");
-  // The browser the gate opens may act only on the plan's own site.
+  // The browser the gate opens may act only on the plan's own site: the act list never widens it, and it
+  // carries only that site's saved cookies.
   assert.match(src("index.ts"), /hostMatches\(host, domain\)/, "the sign-up browser acts only on the plan's own domain");
+  assert.doesNotMatch(src("index.ts"), /mayAct: \(host\) => hostMatches\(host, domain\) \|\|/, "the act list does not widen the sign-up browser");
+  assert.match(src("index.ts"), /cookiesFor: domain/, "the sign-up browser carries only that domain's cookies");
+  assert.match(src("browse.ts"), /cookiesFor/, "the browser honours that limit");
   // The site policy's never-list is the one applied, and the vault has to be on or nothing is prepared.
   assert.match(src("signup.ts"), /neverReason\(domain\)/, "the never-list governs sign-ups too");
   assert.match(src("signup-gate.ts"), /vaultEnabled\(\)/, "no vault, no sign-up: the password would have nowhere to go");
@@ -650,7 +654,8 @@ test("an account is created for Paul only through the sign-up gate, and only his
   // The password is generated here, goes straight into the vault, and never reaches chat, a log or the record.
   const gate = src("signup-gate.ts");
   const logged = [...gate.matchAll(/logSignup\(\{([\s\S]*?)\}\);/g)].map((m) => m[1]);
-  assert.ok(logged.length >= 4, "prepared, cancelled, stopped, applied and failed are all logged");
+  assert.ok(logged.length >= 5, "prepared, refused, cancelled, stopped, applied and failed are all logged");
+  assert.ok(logged.some((c) => /event: "refused"/.test(c)), "a refused preparation leaves one line too");
   for (const call of logged) assert.ok(!/\bpassword\b\s*[:,}]/.test(call), "the audit log never carries a password");
   const patches = [...gate.matchAll(/(?:putSignup|updateSignup)\(\s*(?:id|a\.id)?,?\s*\{([\s\S]*?)\}\);/g)].map((m) => m[1]);
   assert.ok(patches.length >= 4, "the record is written as the sign-up proceeds");

@@ -21,7 +21,7 @@ const { Store } = await import("../src/store.js");
 const { Vault } = await import("../src/vault.js");
 const { SitePolicy } = await import("../src/site-policy.js");
 const { SignupGate, parseSignupCommand, signupServer } = await import("../src/signup-gate.js");
-const { BrowserSignupSubmitter, classify, generatedPassword, outcomeStep, pageStep, prepareCheck, requireUrl } = await import("../src/signup.js");
+const { BrowserSignupSubmitter, canonicalPlan, classify, confirmOutcome, digest, generatedPassword, outcomeStep, pageStep, prepareCheck, requireUrl, resolveUsername } = await import("../src/signup.js");
 const { Orchestrator } = await import("../src/orchestrator.js");
 const { JobRunner } = await import("../src/jobs.js");
 const { Scheduler } = await import("../src/scheduler.js");
@@ -187,6 +187,153 @@ test("a verification email is reported, and nothing is sent back to it", async (
   assert.match(out, /Replying to it, forwarding it or sending anything is never done/);
   assert.equal(s.store.getSignup(a.id)?.status, "executed");
   assert.deepEqual(s.logins.domains(), [ALLOWED]);
+});
+
+test("a submit that did not work is never reported as an account, and stores nothing", async () => {
+  const pageFields = [
+    { index: 1, label: "Email address", type: "email", name: "email", required: true },
+    { index: 2, label: "Password", type: "password", name: "password", required: true },
+  ];
+  const session = (text: string, endUrl = `https://${ALLOWED}/welcome`) => ({
+    formData: async () => ({ url: `https://${ALLOWED}/signup`, title: "Sign up", text: "Create your account", fields: pageFields, submits: [{ index: 1, label: "Sign up" }] }),
+    fillForm: async () => ({ url: endUrl, title: "Done", text }),
+    close: async () => undefined,
+  });
+  const answer = async (text: string) => new BrowserSignupSubmitter(() => session(text) as never).submit(plan(), "generated-password");
+
+  // Every one of these was reported as "Account created" before, and put a wrong password in the vault.
+  for (const said of [
+    "Please agree to the Terms of Service before continuing. Create your account",
+    "Password must be at least 12 characters and contain a number",
+    "That email address is already registered. Sign in instead",
+    "Something went wrong. Please try again later",
+    "Thanks for visiting. Come back later.",
+  ]) {
+    const out = await answer(said);
+    assert.equal(out.ok, false, said);
+    assert.equal(out.step, "unclear", said);
+  }
+  // A page that says nothing at all is not a created account either.
+  assert.equal((await answer("")).ok, false);
+  // What a page says when it did work still counts, and a verification email is a real outcome.
+  assert.equal((await answer("Welcome, Paul")).ok, true);
+  assert.equal((await answer("Your account has been created")).ok, true);
+  const verify = await answer("Check your inbox to confirm your email");
+  assert.equal(verify.ok, true);
+  assert.equal(verify.step, "email-verification");
+  // A complaint beats a success word: "welcome back" is what a refused sign-up is sent to.
+  assert.equal((await answer("Welcome back. That email address is already registered")).ok, false);
+  // And the words themselves.
+  assert.equal(confirmOutcome({ text: "Success" }, undefined), undefined);
+  assert.equal(confirmOutcome({ text: "Please try again" }, undefined), "unclear");
+  assert.equal(confirmOutcome({ text: "Welcome! No credit card required" }, undefined), undefined, "a success page is not read as a refusal");
+  assert.equal(confirmOutcome({ text: "anything" }, "payment"), "payment", "payment still stops it");
+});
+
+test("an unconfirmed submit stores no login, so nothing in the vault pretends the account exists", async () => {
+  const s = setup({ answer: { ok: false, step: "unclear", message: "Something went wrong. Please try again later" } });
+  const a = await s.gate.prepare(plan(), origin);
+  const out = await s.gate.approve(a.id, PAUL);
+  assert.match(out, /could not confirm that an account was created/);
+  assert.doesNotMatch(out, /Account created/);
+  assert.deepEqual(s.logins.domains(), [], "nothing was stored");
+  assert.equal(s.store.getSignup(a.id)?.status, "needsPaul");
+  assert.equal(s.store.getSignup(a.id)?.stored, undefined);
+  assert.match(log(), /"event":"stopped"/);
+  // Nothing in the vault, so the same site can be prepared again rather than blocked as a duplicate.
+  const again = await s.gate.prepare(plan(), origin);
+  assert.equal(s.store.getSignup(again.id)?.status, "pending");
+});
+
+test("a required consent box is shown to Paul and ticked only when the plan names it", async () => {
+  const terms = "I agree to the Terms of Service and Privacy Policy";
+  const fields = [
+    { index: 1, label: "Email address", type: "email", name: "email", required: true },
+    { index: 2, label: "Password", type: "password", name: "password", required: true },
+    { index: 3, label: terms, type: "checkbox", name: "terms", required: true },
+  ];
+  const page = { url: `https://${ALLOWED}/signup`, title: "Sign up", text: "Create your account", fields, submits: [{ index: 1, label: "Create account" }] };
+  const bare = { url: `https://${ALLOWED}/signup`, email: "paul@example.test" };
+  // A required consent box the plan does not name is refused: nothing is ticked that Paul did not see.
+  assert.throws(() => classify(page, bare, "pw"), /asks Paul to tick "I agree to the Terms of Service and Privacy Policy"/);
+  // Named with a plain yes, it is ticked, and it is one of the fields he was shown.
+  const withTerms = classify(page, { ...bare, fields: [{ label: terms, value: "yes" }] }, "pw");
+  assert.deepEqual(withTerms.fills, [
+    { index: 1, value: "paul@example.test" },
+    { index: 2, value: "pw" },
+    { index: 3, value: "yes" },
+  ]);
+  // Any other value is refused rather than guessed at.
+  assert.throws(() => classify(page, { ...bare, fields: [{ label: terms, value: "no" }] }, "pw"), /only ever ticked when the plan says yes/);
+  // And through the gate: the consent box appears in what Paul is shown before he approves.
+  const s = setup();
+  const a = await s.gate.prepare(plan({ fields: [{ label: terms, value: "yes" }] }), origin);
+  assert.match(s.sent[0].text, new RegExp(`${terms}: yes`));
+  assert.deepEqual(s.store.getSignup(a.id)?.fields, [{ label: terms, value: "yes" }]);
+});
+
+test("the daily cap is checked again when Paul approves, not only when a plan is prepared", async () => {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-signup-cap2-")));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-signup-cap2v-"));
+  const submitter = fakeSubmitter();
+  const gate = new SignupGate(store, submitter, new Vault(dir), new SitePolicy(store, () => []), undefined, { dailyCap: 1 });
+  const first = await gate.prepare(plan(), origin);
+  const second = await gate.prepare(plan({ url: `https://${EXTRA}/join` }), origin);
+  assert.match(await gate.approve(first.id, PAUL), /Account created/);
+  const refused = await gate.approve(second.id, PAUL);
+  assert.match(refused, /daily cap/);
+  assert.equal(submitter.calls.length, 1, "the second account was never submitted");
+  assert.equal(store.getSignup(second.id)?.status, "pending", "it still waits, and can be approved tomorrow");
+});
+
+test("the username Paul is shown, the page's username field and the vault all carry one value", async () => {
+  const s = setup();
+  // The natural reading of the tool: the worker names the username among the fields, not as its own argument.
+  const a = await s.gate.prepare(plan({ fields: [{ label: "Username", value: "paulf" }] }), origin);
+  assert.equal(a.username, "paulf", "resolved once, from the plan's own field");
+  assert.match(s.sent[0].text, /Username: paulf/);
+  await s.gate.approve(a.id, PAUL);
+  assert.equal(s.submitter.calls[0].plan.username, "paulf", "the page's username field gets that value");
+  assert.equal(s.logins.entryFor(ALLOWED)?.username, "paulf", "and the vault stores that same value");
+  // The reviewer's own repro: classify must not fall back to the address's local part once prepare has resolved it.
+  const fields = [
+    { index: 1, label: "Email address", type: "email", name: "email", required: true },
+    { index: 2, label: "Username", type: "text", name: "username", required: true },
+    { index: 3, label: "Password", type: "password", name: "password", required: true },
+  ];
+  const page = { url: `https://${ALLOWED}/signup`, title: "Sign up", text: "Create your account", fields, submits: [{ index: 1, label: "Create account" }] };
+  const filled = classify(page, { url: `https://${ALLOWED}/signup`, email: "paul@example.test", username: a.username }, "pw");
+  assert.deepEqual(filled.fills[1], { index: 2, value: "paulf" });
+  // Resolution order: the worker's own argument, then a field it labelled as a username, then the local part.
+  assert.equal(resolveUsername({ url: "x", email: "paul@example.test", username: "arg" }, "paul@example.test"), "arg");
+  assert.equal(resolveUsername({ url: "x", email: "paul@example.test", fields: [{ label: "Choose a username", value: "chosen" }] }, "paul@example.test"), "chosen");
+  assert.equal(resolveUsername({ url: "x", email: "paul@example.test" }, "paul@example.test"), "paul");
+  // The hash covers the resolved username, and the plan rebuilds to the same digest at approval time.
+  const b = await s.gate.prepare(plan({ url: `https://${EXTRA}/join` }), origin);
+  const rebuilt = canonicalPlan({ url: b.url, email: b.email, username: b.username, fields: b.fields, termsUrl: b.termsUrl, why: b.why });
+  assert.equal(b.hash, digest({ domain: b.domain, plan: rebuilt }), "the hash covers the plan as it is rebuilt when he approves");
+  assert.match(await s.gate.approve(b.id, PAUL), /^Account created/);
+});
+
+test("a refused preparation still leaves one audit line, and it never carries a secret", async () => {
+  const s = setup();
+  await assert.rejects(s.gate.prepare(plan({ url: "https://stripe.com/signup" }), origin));
+  await assert.rejects(s.gate.prepare(plan({ fields: [{ label: "Notes", value: "ghp_abcdefghijklmnopqrstuvwxyz0123456789" }] }), origin));
+  const written = log();
+  assert.match(written, /"event":"refused"/);
+  assert.match(written, /stripe\.com is off limits/);
+  assert.ok(!written.includes("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), "the secret is not in the log");
+  assert.equal(s.sent.length, 0, "and Paul is shown nothing");
+});
+
+test("one job never cancels another job's waiting sign-up", async () => {
+  const s = setup();
+  const mine = await s.gate.prepare(plan(), { jobId: "j1", replyTo: PAUL });
+  const theirs = await s.gate.prepare(plan({ url: `https://${EXTRA}/join` }), { jobId: "j2", replyTo: PAUL }, mine.id);
+  assert.equal(s.store.getSignup(mine.id)?.status, "pending", "another job's plan is left alone");
+  const edit = await s.gate.prepare(plan({ url: `https://${EXTRA}/join2` }), { jobId: "j2", replyTo: PAUL }, theirs.id);
+  assert.equal(s.store.getSignup(theirs.id)?.status, "cancelled", "the same job's own edit replaces it");
+  assert.equal(s.store.getSignup(edit.id)?.status, "pending");
 });
 
 test("the daily cap stops more sign-ups being approved that day", async () => {

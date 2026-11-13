@@ -120,12 +120,14 @@ export function buildApp(deps: AppDeps) {
   const dns = new DnsGate(deps.store, dnsClient, deps.messenger);
   // The approval gate for creating an account for Paul on a site he named: the job only PREPARES a plan,
   // and his own "signup apply <id>" is what fills the form in and submits it. The submission is the
-  // service's own browser, opened for that one site only, with the same containment and egress proxy as
-  // the workers' browser and a policy that lets it act on that site alone.
+  // service's own browser, opened for that one site alone: it may act only on the plan's own domain (the
+  // act list does not widen it, so an untrusted sign-up page cannot reach anywhere else with Paul's
+  // cookies), it carries only that domain's saved cookies, and it has the same containment and egress
+  // proxy as the workers' browser.
   const sitePolicy = new SitePolicy(deps.store, safeVaultDomains);
   const signup = new SignupGate(
     deps.store,
-    new BrowserSignupSubmitter((domain) => new BrowseSession({ policy: { mayAct: (host) => hostMatches(host, domain) || sitePolicy.mayAct(host) }, vault })),
+    new BrowserSignupSubmitter((domain) => new BrowseSession({ policy: { mayAct: (host) => hostMatches(host, domain) }, cookiesFor: domain, vault })),
     vault,
     sitePolicy,
     deps.messenger,
