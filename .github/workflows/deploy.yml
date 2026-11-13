@@ -25,6 +25,7 @@ jobs:
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       FLY_APP: ${{ vars.FLY_APP || 'clear-ops' }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
     steps:
       - id: check
         run: echo "ready=${{ secrets.FLY_API_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
@@ -82,6 +83,60 @@ jobs:
             GITHUB_APP_ID="$GITHUB_APP_ID" \
             GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
             GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID"
+      - name: Stage the voice settings (only once Modal is set up)
+        if: steps.check.outputs.ready == 'true' && env.MODAL_TOKEN_SECRET != ''
+        env:
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          # The Modal gateway's address: workspace "drpaulfarrow", app "clearops-voice". A repository variable overrides it.
+          VOICE_GATEWAY_URL: ${{ vars.VOICE_GATEWAY_URL || 'https://drpaulfarrow--clearops-voice.modal.run' }}
+        run: |
+          # The key the Fly service and the Modal gateway share, derived so Paul has no extra secret to add.
+          VOICE_KEY=$(printf 'clear-ops-voice-v1:%s' "$MODAL_TOKEN_SECRET" | sha256sum | cut -d' ' -f1)
+          echo "::add-mask::$VOICE_KEY"
+          flyctl secrets set --app "$FLY_APP" --stage VOICE_KEY="$VOICE_KEY" VOICE_GATEWAY_URL="$VOICE_GATEWAY_URL"
       - name: Deploy
         if: steps.check.outputs.ready == 'true'
         run: flyctl deploy --app "$FLY_APP" --remote-only --strategy rolling
+  # The voice GPU on Modal (voice/). Runs beside the Fly deploy, never blocks it: the first image build
+  # compiles the speech servers and can take the best part of an hour; later deploys reuse the image.
+  voice:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency: voice-deploy
+    timeout-minutes: 120
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      FLY_APP: ${{ vars.FLY_APP || 'clear-ops' }}
+      VOICE_GATEWAY_URL: ${{ vars.VOICE_GATEWAY_URL || 'https://drpaulfarrow--clearops-voice.modal.run' }}
+    steps:
+      - id: check
+        run: echo "ready=${{ secrets.MODAL_TOKEN_ID != '' && secrets.MODAL_TOKEN_SECRET != '' }}" >> "$GITHUB_OUTPUT"
+      - if: steps.check.outputs.ready != 'true'
+        run: echo "No MODAL_TOKEN_ID and MODAL_TOKEN_SECRET secrets yet; skipping the voice deploy."
+      - if: steps.check.outputs.ready == 'true'
+        uses: actions/checkout@v4
+      - if: steps.check.outputs.ready == 'true'
+        uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Test the gateway
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          pip install modal==1.6.4 fastapi==0.162.5 websockets==17.4 sphn==0.2.1 numpy==2.5.3 httpx==0.28.1 uvicorn pytest
+          python -m pytest -q voice/test_gateway.py
+      - name: Write the Modal secret
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          VOICE_KEY=$(printf 'clear-ops-voice-v1:%s' "$MODAL_TOKEN_SECRET" | sha256sum | cut -d' ' -f1)
+          echo "::add-mask::$VOICE_KEY"
+          modal secret create clearops-voice VOICE_KEY="$VOICE_KEY" CLEAROPS_LLM_URL="https://$FLY_APP.fly.dev/voice" --force > /dev/null
+      - name: Deploy the voice app
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          modal deploy voice/voice.py 2>&1 | tee /tmp/modal.log
+          url=$(grep -oE 'https://[a-z0-9-]+--clearops-voice\.modal\.run' /tmp/modal.log | head -1 || true)
+          echo "Gateway: ${url:-not printed}"
+          if [ -n "$url" ] && [ "$url" != "$VOICE_GATEWAY_URL" ]; then
+            echo "::warning::The gateway is at $url but Fly is told $VOICE_GATEWAY_URL. Set the repository variable VOICE_GATEWAY_URL to $url and re-run the deploy."
+          fi

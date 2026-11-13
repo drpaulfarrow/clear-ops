@@ -111,6 +111,24 @@ export const config = {
     /** ISO-639-1, e.g. "en"; empty lets the provider detect it. */
     language: process.env.TRANSCRIBE_LANGUAGE ?? "",
   },
+  /**
+   * Live voice in a Discord voice channel (src/voice.ts). On when VOICE_KEY and VOICE_GATEWAY_URL are
+   * set (the deploy workflow sets both once the Modal app is deployed) and VOICE is not "off".
+   * VOICE_KEY is shared with the Modal gateway and is what Unmute sends when it calls the voice brain.
+   */
+  voice: {
+    enabled: (process.env.VOICE ?? "on").toLowerCase() !== "off",
+    key: process.env.VOICE_KEY ?? "",
+    gatewayUrl: (process.env.VOICE_GATEWAY_URL ?? "").replace(/\/+$/, ""),
+    /** The model the voice brain talks with, an alias or an OpenRouter id. Fast matters more than clever: ClearOps does the work. */
+    model: process.env.VOICE_MODEL || "haiku",
+    /** Kyutai TTS voice, a path in kyutai/tts-voices. Cleo is a woman's voice (the one Unmute ships as "Gertrude"). */
+    voiceName: process.env.VOICE_NAME || "unmute-prod-website/freesound/440565_why-is-there-educationwav.mp3",
+    /** Leave the channel after this many minutes with nobody speaking, so the GPU can stop. */
+    idleMinutes: positive(process.env.VOICE_IDLE_MINUTES, 10),
+    /** How long the voice brain waits for ClearOps to answer before saying it will post in chat. */
+    answerWaitSeconds: positive(process.env.VOICE_ANSWER_WAIT_SECONDS, 25),
+  },
   /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */
   browse: {
     enabled: (process.env.BROWSE ?? "on").toLowerCase() !== "off",
