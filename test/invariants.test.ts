@@ -639,3 +639,21 @@ test("the advisor worker is read-only apart from one confined deck save tool, ne
   assert.equal(fs.statSync(deckDir()).mode & 0o777, 0o700);
   assert.throws(() => saveDeckFile("big.md", "x".repeat(200_001)));
 });
+
+test("live voice listens only to the allowlisted speaker and can never approve anything", () => {
+  const bridge = src("voice-bridge.ts");
+  const allowAt = bridge.indexOf("!this.opts.isAllowed(dcUser(userId))");
+  const joinAt = bridge.indexOf("await this.join(after, userId)");
+  assert.ok(allowAt > -1 && joinAt > allowAt, "the voice bridge must check the allowlist before joining");
+  const subs = bridge.match(/receiver\.subscribe\(([^,]+),/g) ?? [];
+  assert.deepEqual(subs, ["receiver.subscribe(userId,"], "only the allowlisted speaker's audio is subscribed to");
+  const voice = src("voice.ts");
+  assert.match(voice, /voiceRequestText\(request\)/, "spoken requests reach the chief only through voiceRequestText");
+  assert.match(voice, /export const VOICE_PREFIX = "Voice request from Paul/, "every spoken request starts with the voice prefix, so no approval command can match");
+  assert.match(voice, /timingSafeEqual/, "the voice brain's key is checked in constant time");
+  const index = src("index.ts");
+  assert.match(index, /if \(config\.voice\.key\) voice\.mount\(app\)/, "the voice brain is mounted only with a key");
+  const gateway = fs.readFileSync(new URL("../voice/gateway.py", import.meta.url), "utf8");
+  assert.match(gateway, /"allow_recording": False/, "the voice GPU never records");
+  assert.match(gateway, /hmac\.compare_digest/, "the gateway checks the key in constant time");
+});

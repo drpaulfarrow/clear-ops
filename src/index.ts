@@ -28,6 +28,8 @@ import { EA_SERVER, EaTools, eaServer, ensureEaSchedules, upgradeEaSchedules } f
 import cron from "node-cron";
 import { nudgeStale } from "./followups.js";
 import { HoldWatcher } from "./meetings.js";
+import { VoiceBrain, VoiceTap, voiceEnabled } from "./voice.js";
+import { VoiceBridge } from "./voice-bridge.js";
 
 export interface AppDeps {
   messenger: Messenger;
@@ -76,6 +78,9 @@ function vaultForm(token: string, domain?: string): string {
 
 /** Builds the Express app. Dependencies are injectable so tests can run it without the network. */
 export function buildApp(deps: AppDeps) {
+  // Live voice: the chief's and the jobs' messages pass a tap, so replies to the voice channel can be spoken (src/voice.ts).
+  const tap = new VoiceTap();
+  const tapped = tap.wrap(deps.messenger);
   const google =
     deps.google ??
     new GoogleAuth({ ...config.google, redirectUri: `${config.publicUrl}${GOOGLE_CALLBACK_PATH}`, dataDir: config.dataDir, fetch: deps.googleFetch });
@@ -108,9 +113,9 @@ export function buildApp(deps: AppDeps) {
         job.kind === "engineer" && job.permits?.includes("create_repo")
         ? { [REPO_SERVER]: repoServer({ store: deps.store, jobId: job.id, createDeps: { fetch: deps.repoFetch, clone: deps.repoClone } }) }
         : undefined;
-  const jobs = new JobRunner(deps.store, deps.messenger, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined });
+  const jobs = new JobRunner(deps.store, tapped, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined });
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, deps.messenger, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns);
+  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns);
   scheduler.boot();
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
@@ -138,6 +143,11 @@ export function buildApp(deps: AppDeps) {
   app.use(express.json({ verify: (req, _res, buf) => ((req as express.Request & { rawBody?: Buffer }).rawBody = buf) }));
 
   app.get("/health", (_req, res) => res.json({ ok: true, jobs: deps.store.listJobs(3).length }));
+
+  // The voice brain Unmute calls (OpenAI-compatible, VOICE_KEY only). Mounted whenever a key exists, so the
+  // GPU's health check passes; it answers only while a voice session is open.
+  const voice = new VoiceBrain({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address }), tap });
+  if (config.voice.key) voice.mount(app);
 
   // Meta webhook verification handshake
   app.get("/webhook", (req, res) => {
@@ -210,7 +220,7 @@ export function buildApp(deps: AppDeps) {
     }
   });
 
-  return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers };
+  return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, voice };
 }
 
 // Entry point when run directly
@@ -241,7 +251,7 @@ if (isMain) {
     if (to) void messenger.send(to, text).catch(() => undefined);
   };
   const outputs = new OutputsPublisher(store, { onProblem: notifyPaul });
-  const { app, orchestrator, jobs, startEaTimers } = buildApp({ messenger, runner: sdkRunner, store, outputs });
+  const { app, orchestrator, jobs, startEaTimers, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs });
   startEaTimers();
   app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
 
@@ -249,6 +259,11 @@ if (isMain) {
     void new TelegramPoller((from, text, ctx) => orchestrator.handle(from, text, ctx), messenger, isAllowed).start();
   }
   if (discord) await discord.start();
+  // Live voice: join Paul in a Discord voice channel and talk through the voice GPU on Modal.
+  if (discord && voiceEnabled()) {
+    new VoiceBridge(discord.client, voice, { isAllowed, notify: (to, text) => messenger.send(to, text) }).start();
+    console.log("voice: on");
+  }
 
   // A repository that could not be cloned: tell Paul once, in plain English, exactly what to change.
   const problem = repoProblemsMessage(repoProblems);

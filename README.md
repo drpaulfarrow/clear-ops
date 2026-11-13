@@ -63,6 +63,14 @@ Send a voice note or an audio message instead of typing (a Telegram voice note, 
 - With no key at all, or when the provider refuses or cannot be reached, nothing else changes: the chief says plainly that it cannot play the voice note and asks you to type it. A failed transcription never fails the turn. `TRANSCRIBE=off` switches transcription off even when a key is set.
 - The key is a service secret: read from the environment, never logged, never written to the store or a repository, and stripped from every worker's environment, like the search and GoDaddy keys.
 
+### Talking to Cleo (live voice in Discord)
+Join any voice channel in the ClearOps server and the bot joins you. Cleo, the voice of ClearOps, says hello once the voice model is awake (a minute or two the first time; seconds while it is warm) and you just talk. Small talk and quick questions she answers herself; anything that needs the workforce (start or check a job, ask about your mail or calendar, remember something) she hands to the chief exactly as if you had typed it in the voice channel's chat, waits up to `VOICE_ANSWER_WAIT_SECONDS` (25) for its reply and says the gist. Longer answers and job reports land in that chat, and she passes them on at your next pause. Leave the channel and she leaves too; after `VOICE_IDLE_MINUTES` (10) with nobody speaking she leaves on her own.
+
+- How it works: the bot (src/voice-bridge.ts) streams your audio, and only yours, to a gateway on Modal (voice/), where Kyutai's open-source Unmute does speech-to-text, turn taking and a natural voice on one L4 GPU that runs only while you are in the channel and switches off five minutes after. Unmute asks the voice brain on Fly (src/voice.ts, a fast OpenRouter model) what to say. Nothing is recorded.
+- What it cannot do: approve anything. A spoken request reaches the chief as "Voice request from Paul ...", so `send <id>`, `dns apply <id>`, `yes <id>` and the like can only ever be typed.
+- Setup: the `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` Actions secrets. The deploy workflow then deploys the Modal app, writes its secret, and gives Fly `VOICE_KEY` (derived from the Modal token secret) and `VOICE_GATEWAY_URL`. The bot needs Connect and Speak in the voice channel. Modal bills the GPU by the second (an L4 is about 80 cents an hour), so add a card under Modal's Usage & billing.
+- Settings: `VOICE=off`, `VOICE_MODEL` (default the haiku alias, DeepSeek Flash), `VOICE_NAME` (a path in kyutai/tts-voices), `VOICE_IDLE_MINUTES`, `VOICE_ANSWER_WAIT_SECONDS`.
+
 ## Set up in five steps
 
 ### 1. A model key: Anthropic or OpenRouter

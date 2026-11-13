@@ -188,7 +188,7 @@ export class DiscordListener {
     private readonly isAllowed: (from: string) => boolean,
   ) {
     this.client = new Client({
-      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
+      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
       partials: [Partials.Channel], // needed to receive DMs
     });
   }
