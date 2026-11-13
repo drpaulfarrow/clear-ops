@@ -92,6 +92,11 @@ export interface Job {
    * it was on and the stash holding its uncommitted work, so a retry carries on and nothing is lost.
    */
   savedWork?: SavedWork;
+  /**
+   * Which working copy an engineering job uses while it runs beside another on the same repository:
+   * absent or 0 is the checkout itself, 1 and 2 are git worktrees beside it (src/jobs.ts laneDir).
+   */
+  lane?: number;
   finishedAt?: string;
   summary?: string;
   outputPath?: string;
