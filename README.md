@@ -294,6 +294,7 @@ See `.env.example`. The important ones:
 | `JOB_STALL_MINUTES` | A running job whose worker shows no activity for this long is stopped, its work kept and its queue moved on. Default 30. |
 | `DAILY_BUDGET_USD` | Cap on spend in one Europe/London day. Counted from OpenRouter's own usage figure (`src/spend.ts`, at most one call a minute); while that cannot be read it is judged on an internal stand-in figure, and `/spend` then says the figure could not be read instead of showing one. Off unless you set it (your call, 13 November 2026). If set and reached, new jobs wait (one message to you per day), and `/resume` lifts it for the rest of that day; they also start when the next day begins. |
 | `JOB_MAX_RUNTIME_MINUTES` | The longest any job may run before it is stopped the same way. Default 240. |
+| `ENGINEER_SLOTS` | Engineering jobs (engineer or agent-creator) that may run at once on one repository, each in its own working copy: the checkout, then a git worktree beside it per job. 2 by default, 4 on the live machine, at most 8; anything above the maximum is refused and the extra jobs queue in order. See the safety list above for what a busy machine does. |
 | `DESIGN_SITE_URL` | The live site the design worker reviews. Default https://clear-exchange.fly.dev. |
 | `DESIGN_MODEL`, `DESIGN_BUDGET_USD` | The design worker's model (default `haiku`) and spend cap per design job (off unless set). |
 | `CHROMIUM_PATH` | Headless browser for screenshots. The Docker image installs `chromium`. |
