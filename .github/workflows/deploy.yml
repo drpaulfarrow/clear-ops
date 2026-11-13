@@ -88,7 +88,7 @@ jobs:
         env:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           # The Modal gateway's address: workspace "drpaulfarrow", app "clearops-voice". A repository variable overrides it.
-          VOICE_GATEWAY_URL: ${{ vars.VOICE_GATEWAY_URL || 'https://drpaulfarrow--clearops-voice.modal.run' }}
+          VOICE_GATEWAY_URL: ${{ vars.VOICE_GATEWAY_URL || 'https://drpaulfarrow--clearops-voice.us-east.modal.run' }}
         run: |
           # The key the Fly service and the Modal gateway share, derived so Paul has no extra secret to add.
           VOICE_KEY=$(printf 'clear-ops-voice-v1:%s' "$MODAL_TOKEN_SECRET" | sha256sum | cut -d' ' -f1)
@@ -109,7 +109,7 @@ jobs:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       FLY_APP: ${{ vars.FLY_APP || 'clear-ops' }}
-      VOICE_GATEWAY_URL: ${{ vars.VOICE_GATEWAY_URL || 'https://drpaulfarrow--clearops-voice.modal.run' }}
+      VOICE_GATEWAY_URL: ${{ vars.VOICE_GATEWAY_URL || 'https://drpaulfarrow--clearops-voice.us-east.modal.run' }}
     steps:
       - id: check
         run: echo "ready=${{ secrets.MODAL_TOKEN_ID != '' && secrets.MODAL_TOKEN_SECRET != '' }}" >> "$GITHUB_OUTPUT"
@@ -136,7 +136,7 @@ jobs:
         run: |
           set -o pipefail
           modal deploy voice/voice.py 2>&1 | tee /tmp/modal.log
-          url=$(grep -oE 'https://[a-z0-9-]+--clearops-voice\.modal\.run' /tmp/modal.log | head -1 || true)
+          url=$(grep -oE 'https://[a-z0-9-]+--clearops-voice(\.[a-z0-9-]+)?\.modal\.run' /tmp/modal.log | head -1 || true)
           echo "Gateway: ${url:-not printed}"
           if [ -n "$url" ] && [ "$url" != "$VOICE_GATEWAY_URL" ]; then
             echo "::warning::The gateway is at $url but Fly is told $VOICE_GATEWAY_URL. Set the repository variable VOICE_GATEWAY_URL to $url and re-run the deploy."
