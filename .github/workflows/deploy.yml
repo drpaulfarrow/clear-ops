@@ -108,6 +108,10 @@ jobs:
             SIGNUP_SITES="${{ vars.SIGNUP_SITES }}" \
             SIGNUP_TTL_HOURS="${{ vars.SIGNUP_TTL_HOURS }}" \
             SIGNUP_DAILY_CAP="${{ vars.SIGNUP_DAILY_CAP }}" \
+            OTP_WAIT_MINUTES="${{ vars.OTP_WAIT_MINUTES }}" \
+            OTP_MAIL_WAIT_SECONDS="${{ vars.OTP_MAIL_WAIT_SECONDS }}" \
+            OTP_MAX_PER_JOB="${{ vars.OTP_MAX_PER_JOB }}" \
+            OTP_MIN_GAP_SECONDS="${{ vars.OTP_MIN_GAP_SECONDS }}" \
             GITHUB_APP_ID="$GITHUB_APP_ID" \
             GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
             GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID"
