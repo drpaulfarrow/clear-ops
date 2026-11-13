@@ -157,9 +157,9 @@ test("a real browser reads, follows links and searches, but a form POST never le
     assert.match(await session.type(box, "prebid", true), /Second page prebid/, "a GET search works");
     const again = await session.open(`http://127.0.0.1:${port}/`);
     const item = Number(again.match(/\[(\d+)\] field\(text\): Item/)![1]);
-    await session.type(item, "laptop", true);
-    assert.deepEqual(posts, [], "the POST was refused before it left the browser");
-    assert.ok(session.refused.some((r) => r.startsWith("POST")));
+    // A form whose button says Buy is a consequential action: refused before anything is typed or sent.
+    await assert.rejects(session.type(item, "laptop", true), /consequential action/);
+    assert.deepEqual(posts, [], "nothing was posted");
     // The cloud metadata address is private: the egress proxy refuses it, so the page is only the refusal.
     const meta = await session.open("http://169.254.169.254/latest/meta-data/").catch((e: Error) => e.message);
     assert.match(meta, /403|Refused|ERR_/);

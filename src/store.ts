@@ -295,6 +295,8 @@ interface State {
   /** Repositories the workforce created, by alias. */
   repos?: Record<string, CreatedRepo>;
   queueHold?: QueueHold;
+  /** Paul's changes to the browser's act-freely list (src/site-policy.ts). */
+  siteRules?: { added: string[]; removed: string[] };
   /** London dates (YYYY-MM-DD): the day /resume lifted the daily spend cap, and the day Paul was last told it was hit. */
   capLiftedOn?: string;
   capNotifiedOn?: string;
@@ -593,6 +595,14 @@ export class Store {
   }
   addCreatedRepo(alias: string, repo: CreatedRepo): void {
     this.state.repos = { ...(this.state.repos ?? {}), [alias]: repo };
+    this.save();
+  }
+  siteRules(): { added: string[]; removed: string[] } {
+    const r = this.state.siteRules ?? { added: [], removed: [] };
+    return { added: [...r.added], removed: [...r.removed] };
+  }
+  setSiteRules(r: { added: string[]; removed: string[] }): void {
+    this.state.siteRules = { added: [...r.added], removed: [...r.removed] };
     this.save();
   }
   settings(): Settings {
