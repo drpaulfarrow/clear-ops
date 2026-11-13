@@ -27,7 +27,9 @@ import type { AgentRunner, RunResult } from "../src/agents.js";
 
 const FOUNDER = "tg:99887766";
 
-const waitFor = async (pred: () => boolean, ms = 8000) => {
+// These jobs do real git work (a worktree per job), so the waits are generous: a loaded machine can
+// take tens of seconds to add seven worktrees, and a tight allowance would fail the suite, not the code.
+const waitFor = async (pred: () => boolean, ms = 30_000) => {
   const t0 = Date.now();
   while (!pred()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");
@@ -246,7 +248,7 @@ test("a job that cannot be given a copy of its own waits for the checkout rather
     await waitFor(() => started.some((s) => s.key === "W1"));
     assert.equal(started.find((s) => s.key === "W1")!.cwd, SELF, "the first job works in the checkout");
     // The second job waits: its own copy cannot be made and the checkout is the other job's working copy.
-    await waitFor(() => /waiting for a working copy of its own/.test(jobs.liveness(b.id)?.summary ?? ""), 12_000);
+    await waitFor(() => /waiting for a working copy of its own/.test(jobs.liveness(b.id)?.summary ?? ""));
     assert.equal(started.some((s) => s.key === "W2"), false, "it never starts in the first job's working copy");
     assert.equal(store.getJob(b.id)!.lane, 1, "it is still waiting for a copy of its own");
     // The first job finishes: its copy is free, and the job that was waiting takes it as its own.
