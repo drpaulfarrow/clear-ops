@@ -25,14 +25,17 @@ Nothing else is recorded: never a prompt, a brief, an answer, a tool input or a 
 chief's own chat turns are recorded the same way, under the `chief` role, for the current London day
 only, so answering Paul costs something measurable too.
 
-**Where the money figure comes from.** One figure about money is ever shown and it is the provider's
-(`src/spend.ts`): on OpenRouter, `GET /api/v1/key`, which is cumulative for the whole API key. So on
-OpenRouter there is no honest per-call or per-job amount, and the report says exactly that rather than
-working one out from a price table. On Anthropic directly the SDK prices each run at Anthropic's own
-list price, which *is* the bill there, so a per-job amount is real and is labelled as Anthropic's own
-list price. The Agent SDK's own price is kept as an internal `estimateUsd` on every run: it backs the
-per-run cap and it is what a later slice compares against, and it is never shown to Paul, under any
-label, anywhere.
+**Where the money figure comes from.** Every figure shown is named for whose it is, and where none
+could be read the line says so and shows nothing. Three labels: `provider` (what OpenRouter itself
+charged for this job's calls, read per call by the job's cap meter, `src/realcost.ts`; a lower bound
+until the provider has priced every call, and the note says so), `anthropic` (Anthropic's own list
+price, which *is* the bill when the workforce runs on Anthropic directly), and `unavailable` (nothing
+could be read: no cap was counting, or the provider had published nothing, so there is no figure and
+the record says exactly that rather than working one out from a price table). The Agent SDK's own
+price is kept as an internal `estimateUsd` on every run: it backs the per-run runaway guard and it is
+what a later slice compares against, and it is never shown to Paul, under any label, anywhere. A
+day's one total figure is still the provider's own from `src/spend.ts`, and where no per-job figure
+exists the per-kind split is by tokens, not money.
 
 ## 2. What Paul can read
 
@@ -56,18 +59,27 @@ job-status question, drafting tasks, retrieval questions whose answers must be c
 right answer is "not found", and questions about how the workforce itself behaves.
 
 ```bash
-npm run eval                          # the baseline set, label "manual"
+npm run eval                          # recorded mode: no key, no call, nothing spent, label "recorded"
+npm run eval -- --live                # the real chief: real spend, the baseline a slice is judged on
 npm run eval -- --label caching-1     # name this run, so a later slice compares like with like
-EVAL_BUDGET_USD=1 npm run eval        # stop once the internal estimate passes a dollar
+EVAL_BUDGET_USD=1 npm run eval -- --live   # stop once the internal estimate passes a dollar
 EVAL_TASKS=eval/tasks.v2.json npm run eval
 ```
 
-It talks to the chief exactly as Paul's chat does, so it measures the harness as it really is: the same
-system prompt, the same tools, the same cheapest configured tier (the chief defaults to `haiku`) and
-the same per-run budget cap (`JOB_BUDGET_USD`). The only addition is one line asking each task to be
-answered in the reply rather than delegated to a worker, so there is an answer to judge at all. It
-needs a model key and it spends real money, so it is a hand-run tool, never a test: it takes a few
-minutes and about a dollar at the default tier for the whole set.
+Recorded mode is the default, and it is safe by design: every task is answered from the fixture file of
+recorded answers (`eval/recorded.v1.json`), so the run needs no model key, makes no network call and
+spends nothing. It proves the set, the judge and the accounting, and reports the pass rate and cost of
+the recorded answers; those numbers describe the recording, not the live chief, and its output says
+so. Only `--live` measures the harness itself.
+
+Live mode talks to the chief exactly as Paul's chat does, so it measures the harness as it really is:
+the same system prompt, the same tools, the same cheapest configured tier (the chief defaults to
+`haiku`), reading what each task used from the usage the service records (the tokens and the Agent
+SDK's internal estimate, which is all there is per task on OpenRouter and is used only to compare one
+run with the next). The only addition is one line asking each task to be answered in the reply rather
+than delegated to a worker, so there is an answer to judge at all. It needs a model key and it spends
+real money, so it is a hand-run tool, never a test: it takes a few minutes and about a dollar at the
+default tier for the whole set.
 
 Judging is deterministic and free: a task lists strings or patterns a correct answer must contain,
 whether it must cite a link, whether the right answer is that the thing was not found, and how long it

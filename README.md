@@ -41,6 +41,7 @@ show job 93137e
 /board   /reports   /jobs   /password   /status   /pending   /reset   /help   /uploads
 /resume   retry 3552e7
 /spend   /spend yesterday
+/usage   /usage job 16d5d3
 What DNS records does clearexchange.ai have?
 Add a CNAME publisher pointing to clear-exchange.fly.dev.   dns apply 3fa9c1   dns cancel 3fa9c1
 code 3fa9c1 123456
@@ -121,6 +122,13 @@ Send `/reports` and you get a link to another read-only page you can bookmark. I
 It has its own long-lived token, minted by the service and kept in the store, so `/board` and its link are untouched; sending `/reports` again gives the same link, and the token is never logged. `docs/reports-pages/` shows what both pages look like. Nothing on either page changes anything: one GET route each, no form, no model call. The pages carry no script, no cookie, no tracking and no request to anywhere, and a report's own text is escaped before it is shown, so a raw HTML tag or a script inside an output is shown as words and never runs. Exactly the same things are kept out of it as out of the private outputs repository: an assistant (ea) or CV output, an output with no job record, and anything derived from a file you uploaded are not there at all.
 
 This page sits behind your password too, so its token on its own is not enough either: the same sign-in, the same session, and `Sign out` on both views.
+
+### What a job used, and the eval set
+Send `/usage` and you get today's numbers: model calls, prompt and cached tokens, completion tokens, tool calls and the cache hit rate, the split by kind of job, the biggest jobs by tokens, the top jobs by cost where a real amount exists, and the chief's own chat turns for the day. `/usage yesterday`, `/usage YYYY-MM-DD` and `/usage job <id>` work too, and you can just ask ("what did that job cost?"). Money is the provider's own figure, as everywhere else, with the words that say whose it is; where no figure can be read it says so and shows nothing in its place. The Agent SDK's own price for a run is an internal estimate: it backs the per-run cap and it is what the next change to models, prompts or tools is measured against, and it never appears in anything you read.
+
+Every model call a job makes is recorded with the job (role, model, provider, tokens, latency, tool calls), so a job's totals can be read back later and survive a restart. Never a prompt, a brief, an output or anything from your mail, calendar or uploads: those kinds record counts only, never even tool names.
+
+The workforce also has a small fixed set of about thirty tasks it can be scored on (`eval/tasks.v1.json`), each with what a correct answer must contain. `npm run eval` plays back recorded answers, so it needs no model key and spends nothing; `npm run eval -- --live` asks the same tasks through the same chief you talk to and spends real money. It records the pass rate, the tokens and the internal cost estimate to `<DATA_DIR>/eval/`, so a later change can be compared with the one before it. How to run it, where the numbers land and what a good result looks like: [docs/EVALS.md](docs/EVALS.md).
 
 ## Set up in five steps
 
