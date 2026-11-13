@@ -45,6 +45,8 @@ export interface RunOptions {
    * job runner can tell a working job from a stalled one. Must be cheap; it is called often.
    */
   onActivity?: () => void;
+  /** Called once with the run's session id as soon as the SDK reports it, so an interrupted job can resume the same conversation. */
+  onSession?: (sessionId: string) => void;
   /** Aborting it stops the run and its process: a stalled, timed-out or cancelled job. */
   abortController?: AbortController;
 }
@@ -126,6 +128,17 @@ export const sdkRunner: AgentRunner = async (o) => {
           o.onActivity();
         } catch {
           // A heartbeat must never break the run.
+        }
+      }
+      if (o.onSession && !sessionId) {
+        const sid = (message as { session_id?: unknown }).session_id;
+        if (typeof sid === "string" && sid) {
+          sessionId = sid;
+          try {
+            o.onSession(sid);
+          } catch {
+            // Remembering the session is a nicety; it must never break the run.
+          }
         }
       }
       if (message.type === "assistant" && message.error && !message.parent_tool_use_id) sdkError = message.error;
@@ -276,7 +289,7 @@ export function detectDepth(brief: string): ResearchDepth {
 export const DEEP_RESEARCH_NOTE = `Depth: deep. This is a deep research job with a larger turn and spend allowance than usual. Cover every part of the brief fully, check primary sources, and write the long, structured report described in your instructions, executive summary first.`;
 
 /** Turn and spend caps for a job run. Every run is capped; deep research gets more of both. */
-export function runLimits(kind: JobKind, depth?: ResearchDepth): { maxTurns: number; maxBudgetUsd: number } {
+export function runLimits(kind: JobKind, depth?: ResearchDepth): { maxTurns: number; maxBudgetUsd: number | undefined } {
   if (PR_KINDS.includes(kind)) return { maxTurns: 200, maxBudgetUsd: config.engineerBudgetUsd };
   if (kind === "maintain") return { maxTurns: 80, maxBudgetUsd: config.engineerBudgetUsd };
   if (kind === "design") return { maxTurns: 80, maxBudgetUsd: config.design.budgetUsd };

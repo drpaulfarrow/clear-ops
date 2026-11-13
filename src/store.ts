@@ -48,6 +48,8 @@ export interface Job {
   status: JobStatus;
   /** Set when a restart interrupted the job and it was re-queued. */
   resumed?: number;
+  /** The worker's Agent SDK session, so a job interrupted by a restart carries on the same conversation. */
+  sessionId?: string;
   /**
    * Set while the job waits for the per-target engineering lock: the id of the job holding it.
    * A queued job with this set has never started; one without it is about to start.

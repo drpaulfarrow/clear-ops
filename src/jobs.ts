@@ -12,7 +12,8 @@ import { promisify } from "node:util";
 import { bookingLink, config } from "./config.js";
 import { londonYmd } from "./london.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentRunner } from "./agents.js";
+import type { AgentRunner, RunResult } from "./agents.js";
+import { describeWorkerTool, JobProgress, type JobProgressOptions } from "./status.js";
 import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
@@ -140,6 +141,12 @@ export class JobRunner {
    * provider's figure is ever shown; `spendDisplay` is the one way it reaches a message.
    */
   private readonly spend: SpendMeter;
+  /** The running commentary in each job's thread (src/status.ts JobProgress). */
+  private readonly progressOpts: JobProgressOptions;
+  /** How many workers are running right now (not waiting for a deploy): what the deploy waits on. */
+  activeCount(): number {
+    return [...this.live.values()].filter((l) => !l.waiting && !l.stop).length;
+  }
 
   constructor(
     private readonly store: Store,
@@ -147,8 +154,9 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; otp?: OtpRelay; slots?: number; spend?: SpendMeter } = {},
+    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; otp?: OtpRelay; slots?: number; spend?: SpendMeter; progress?: JobProgressOptions } = {},
   ) {
+    this.progressOpts = opts.progress ?? {};
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
     this.onOutput = opts.onOutput;
     this.purchase = opts.purchase;
@@ -241,7 +249,9 @@ export class JobRunner {
   /** True when today's spend is at or past the daily cap and /resume has not lifted it for today. */
   capReached(): boolean {
     const today = londonYmd(new Date(this.now()));
-    return this.store.capDays().liftedOn !== today && this.spendState().usd >= config.dailyBudgetUsd;
+    const cap = config.dailyBudgetUsd;
+    if (cap === undefined) return false;
+    return this.store.capDays().liftedOn !== today && this.spendState().usd >= cap;
   }
 
   /** Leaves a job queued because of the cap, then confirms the figure before telling Paul. */
@@ -271,7 +281,7 @@ export class JobRunner {
     const today = londonYmd(new Date(this.now()));
     if (this.store.capDays().notifiedOn !== today) {
       this.store.setCapDays({ notifiedOn: today });
-      const cap = `$${config.dailyBudgetUsd.toFixed(2)}`;
+      const cap = `$${(config.dailyBudgetUsd ?? 0).toFixed(2)}`;
       const tail = "Send /resume to lift it for the rest of today, or they start tomorrow.";
       // The provider's own figure, or that there is none. The SDK's estimate is never printed: when
       // OpenRouter cannot be read the message says so and says the cap is on an internal stand-in.
@@ -323,7 +333,7 @@ export class JobRunner {
     const job = this.store.getJob(id);
     if (!job) throw new Error(`No job ${id}.`);
     if (job.status !== "failed") throw new Error(`${jobRef(job, id)} is ${job.status}, not failed, so there is nothing to retry.`);
-    const reset = this.store.updateJob(id, { status: "queued", error: undefined, failure: undefined, finishedAt: undefined, waitingFor: undefined, queuePos: undefined, resumed: undefined });
+    const reset = this.store.updateJob(id, { status: "queued", error: undefined, failure: undefined, finishedAt: undefined, waitingFor: undefined, queuePos: undefined, resumed: undefined, sessionId: undefined });
     return this.dispatch(reset, true);
   }
 
@@ -346,7 +356,7 @@ export class JobRunner {
         skipped.push(id);
         return;
       }
-      const reset = { status: "queued" as const, error: undefined, failure: undefined, finishedAt: undefined, resumed: undefined };
+      const reset = { status: "queued" as const, error: undefined, failure: undefined, finishedAt: undefined, resumed: undefined, sessionId: undefined };
       if (lockKey(job)) {
         // Line up first; startNext below hands each repository to the first in line.
         retried.push(this.store.updateJob(id, { ...reset, waitingFor: hold?.jobId ?? id, queuePos: front + i }));
@@ -614,6 +624,7 @@ export class JobRunner {
     const at = new Date(now).toISOString();
     this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at });
     let web: WebTools | undefined;
+    let progress: JobProgress | undefined;
     try {
       // A design round after a merge looks only once the product's deploy of that merge is live.
       if (job.awaitDeploy) {
@@ -668,7 +679,9 @@ export class JobRunner {
       const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
       // Every run is capped; deep research gets more turns and budget than the default.
       const limits = runLimits(job.kind, job.depth);
-      const result = await this.run({
+      progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
+      const shown = progress;
+      const opts = {
         prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
         ...runRoute(job, spec.model),
@@ -683,7 +696,26 @@ export class JobRunner {
         maxBudgetUsd: limits.maxBudgetUsd,
         abortController: live.abort,
         onActivity: () => this.touch(id, live),
-      });
+        onToolUse: (name: string, input: Record<string, unknown>) => shown.note(describeWorkerTool(name, input)),
+        onSession: (sessionId: string) => {
+          if (this.store.getJob(id)?.sessionId !== sessionId) this.store.updateJob(id, { sessionId });
+        },
+      };
+      // Interrupted by a restart: carry on the same conversation, so the worker keeps everything it had
+      // read and decided instead of starting again. If that cannot work (the session is gone or broken),
+      // fall back to a fresh run with the usual note to check the working folder.
+      let result: RunResult | undefined;
+      if (job.resumed && job.sessionId && !job.savedWork) {
+        result = await this.run({ ...opts, prompt: continueNote(job.resumed + 1), resume: job.sessionId }).catch((err) => ({ text: "", error: failureFromError(err) }));
+        const broken = runFailure(result);
+        if (broken && !live.stop && !HOLD_KINDS.includes(broken.kind)) {
+          console.warn(`job ${id}: resuming its session failed (${broken.detail.slice(0, 200)}); starting a fresh run`);
+          this.store.updateJob(id, { sessionId: undefined });
+          result = undefined;
+        }
+      }
+      result ??= await this.run(opts);
+      await progress.finish();
       // Stopped (stalled, too long, cancelled) while it ran: whatever came back is not the job's result.
       if (live.stop) throw new Error("stopped");
       live.finishing = true;
@@ -769,6 +801,7 @@ export class JobRunner {
       if (live.stop) await this.recordStop(job, live);
       else await this.recordFailure(job, failureFromError(err));
     } finally {
+      await progress?.finish().catch(() => undefined);
       // The job's browser, if it opened one, goes with it, and so does any wait for a one-time code: a
       // reply that arrives afterwards settles nothing.
       await web?.close().catch(() => undefined);
@@ -1241,6 +1274,11 @@ export function duration(ms: number): string {
   const m = total % 60;
   if (!h) return plural(m, "minute");
   return m ? `${plural(h, "hour")} ${plural(m, "minute")}` : plural(h, "hour");
+}
+
+/** What an interrupted job is told when it carries on its own conversation after a restart. Exported for tests. */
+export function continueNote(attempt: number): string {
+  return `The service restarted while you were working, which stopped you mid-task (this is attempt ${attempt}). Everything above is your own earlier work on this job. Your working folder is as you left it, but any command or tool call that was running when the restart happened did not finish. Check git status and the state of anything you were in the middle of, then carry on from where you were and finish the job, ending with your report as instructed. Do not start again from scratch.`;
 }
 
 /** What a retried job is told about the work its stopped attempt left behind. Exported for tests. */

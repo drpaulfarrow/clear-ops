@@ -17,8 +17,33 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-  deploy:
+  # A deploy restarts the service and interrupts every running job, so it waits until no worker is
+  # running (up to 45 minutes; after that it goes ahead and the jobs resume their own conversations).
+  # A newer merge cancels an older run that is still waiting, so merges close together go out as one deploy.
+  wait-for-quiet:
     needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    concurrency:
+      group: deploy-wait
+      cancel-in-progress: true
+    env:
+      FLY_APP: ${{ vars.FLY_APP || 'clear-ops' }}
+    steps:
+      - name: Wait until no job is running
+        run: |
+          url="https://${FLY_APP}.fly.dev/busy"
+          for i in $(seq 1 90); do
+            n=$(curl -fsS --max-time 10 "$url" 2>/dev/null | sed -n 's/.*"running":\([0-9]*\).*/\1/p')
+            if [ -z "$n" ]; then echo "No answer from $url; deploying now."; exit 0; fi
+            if [ "$n" = "0" ]; then echo "No jobs running; deploying."; exit 0; fi
+            echo "$n job(s) running; checking again in 30 seconds ($i/90)."
+            sleep 30
+          done
+          echo "Still busy after 45 minutes; deploying anyway. Interrupted jobs resume where they were."
+  deploy:
+    needs: wait-for-quiet
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     concurrency: deploy
