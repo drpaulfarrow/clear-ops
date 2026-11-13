@@ -17,7 +17,7 @@ export type EaPermit = "drafts" | "holds" | "send";
  */
 export type JobTarget = string;
 /** What a job may do beyond its kind's defaults, granted per job by the chief only when Paul asked in chat. */
-export type JobPermit = EaPermit | "create_repo" | "dns";
+export type JobPermit = EaPermit | "create_repo" | "dns" | "signup" | "purchase";
 /** A repository the workforce created, kept so it can be worked on straight away and after a restart. */
 export interface CreatedRepo {
   slug: string;
@@ -92,6 +92,11 @@ export interface Job {
    * it was on and the stash holding its uncommitted work, so a retry carries on and nothing is lost.
    */
   savedWork?: SavedWork;
+  /**
+   * Which working copy an engineering job uses while it runs beside another on the same repository:
+   * absent or 0 is the checkout itself, 1 and 2 are git worktrees beside it (src/jobs.ts laneDir).
+   */
+  lane?: number;
   finishedAt?: string;
   summary?: string;
   outputPath?: string;
@@ -265,6 +270,77 @@ export interface DnsAction {
   note?: string;
 }
 
+/**
+ * A sign-up prepared for Paul's approval (src/signup-gate.ts). Nothing is filled in or sent until Paul
+ * replies "signup apply <id>" himself. The record is also the audit trail; it never holds the password,
+ * which is generated at approval time and written straight into the vault.
+ */
+/**
+ * A purchase waiting for Paul's approval (src/purchase.ts). Nothing is paid until he taps Approve on its
+ * one-time page or replies "buy <id>" himself. The record is the audit trail; it never holds a card number.
+ */
+export type PurchaseStatus = "pending" | "approved" | "declined" | "executing" | "executed" | "expired" | "changed" | "failed";
+export interface PurchaseAction {
+  id: string;
+  status: PurchaseStatus;
+  createdAt: string;
+  expiresAt: string;
+  jobId?: string;
+  replyTo: string;
+  /** The shop's host and the checkout page, as the service read them. */
+  host: string;
+  url: string;
+  title: string;
+  /** The order total exactly as the page showed it, e.g. "£23.98". */
+  total: string;
+  /** What is being bought, as the page lists it (trimmed), and the agent's one-line reason. */
+  items: string;
+  why?: string;
+  /** The final button's words, as the page shows them. */
+  button: string;
+  /** True when the page asks for card details and the vault card would be entered. */
+  needsCard: boolean;
+  cardLast4?: string;
+  /** Digest of what Paul saw: host, total and items. */
+  hash: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  executedAt?: string;
+  /** What the shop said afterwards, one short line. */
+  outcome?: string;
+  note?: string;
+}
+
+export type SignupStatus = "pending" | "executing" | "executed" | "needsPaul" | "cancelled" | "expired" | "changed" | "failed";
+export interface SignupAction {
+  id: string;
+  status: SignupStatus;
+  createdAt: string;
+  expiresAt: string;
+  jobId?: string;
+  replyTo: string;
+  domain: string;
+  url: string;
+  email: string;
+  username?: string;
+  /** The other details the service would fill in, label and value. */
+  fields: Array<{ label: string; value: string }>;
+  termsUrl?: string;
+  why?: string;
+  /** Digest of the domain and the plan Paul saw. */
+  hash: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  executedAt?: string;
+  /** What the site said, one short line. Never the password. */
+  outcome?: string;
+  /** "payment", "phone", "identity" or "email-verification" when the site asked for something only Paul can do. */
+  step?: string;
+  /** True when a login was stored in the vault. */
+  stored?: boolean;
+  note?: string;
+}
+
 /** Runtime settings Paul sets from chat. */
 export interface Settings {
   /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */
@@ -290,11 +366,15 @@ interface State {
   settings: Settings;
   outbound?: Record<string, OutboundAction>;
   dns?: Record<string, DnsAction>;
+  signups?: Record<string, SignupAction>;
+  purchases?: Record<string, PurchaseAction>;
   /** Gmail drafts the assistant created: the only drafts it may prepare for sending. */
   createdDrafts?: Record<string, { at: string; jobId?: string }>;
   /** Repositories the workforce created, by alias. */
   repos?: Record<string, CreatedRepo>;
   queueHold?: QueueHold;
+  /** Paul's changes to the browser's act-freely list (src/site-policy.ts). */
+  siteRules?: { added: string[]; removed: string[] };
   /** London dates (YYYY-MM-DD): the day /resume lifted the daily spend cap, and the day Paul was last told it was hit. */
   capLiftedOn?: string;
   capNotifiedOn?: string;
@@ -487,6 +567,44 @@ export class Store {
   listDns(): DnsAction[] {
     return Object.values(this.state.dns ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
+  // Sign-up approvals and their audit trail
+  putSignup(a: SignupAction): SignupAction {
+    (this.state.signups ??= {})[a.id] = a;
+    this.save();
+    return a;
+  }
+  getSignup(id: string): SignupAction | undefined {
+    return this.state.signups?.[id];
+  }
+  updateSignup(id: string, patch: Partial<SignupAction>): SignupAction {
+    const a = this.state.signups?.[id];
+    if (!a) throw new Error(`No sign-up ${id}`);
+    Object.assign(a, patch);
+    this.save();
+    return a;
+  }
+  listSignups(): SignupAction[] {
+    return Object.values(this.state.signups ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  // Purchase approvals and their audit trail
+  putPurchase(a: PurchaseAction): PurchaseAction {
+    (this.state.purchases ??= {})[a.id] = a;
+    this.save();
+    return a;
+  }
+  getPurchase(id: string): PurchaseAction | undefined {
+    return this.state.purchases?.[id];
+  }
+  updatePurchase(id: string, patch: Partial<PurchaseAction>): PurchaseAction {
+    const a = this.state.purchases?.[id];
+    if (!a) throw new Error(`No purchase ${id}`);
+    Object.assign(a, patch);
+    this.save();
+    return a;
+  }
+  listPurchases(): PurchaseAction[] {
+    return Object.values(this.state.purchases ?? {}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
   recordCreatedDraft(draftId: string, jobId?: string): void {
     (this.state.createdDrafts ??= {})[draftId] = { at: new Date().toISOString(), jobId };
     this.save();
@@ -593,6 +711,14 @@ export class Store {
   }
   addCreatedRepo(alias: string, repo: CreatedRepo): void {
     this.state.repos = { ...(this.state.repos ?? {}), [alias]: repo };
+    this.save();
+  }
+  siteRules(): { added: string[]; removed: string[] } {
+    const r = this.state.siteRules ?? { added: [], removed: [] };
+    return { added: [...r.added], removed: [...r.removed] };
+  }
+  setSiteRules(r: { added: string[]; removed: string[] }): void {
+    this.state.siteRules = { added: [...r.added], removed: [...r.removed] };
     this.save();
   }
   settings(): Settings {

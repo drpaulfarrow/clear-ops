@@ -72,10 +72,87 @@ export const config = {
     appSecret: process.env.WHATSAPP_APP_SECRET ?? "",
     apiVersion: process.env.WHATSAPP_API_VERSION ?? "v21.0",
   },
+  /**
+   * OpenRouter instead of Anthropic: set OPENROUTER_API_KEY and every agent goes through OpenRouter
+   * (src/llm.ts). The aliases the roles use map to OPENROUTER_HAIKU_MODEL, _SONNET_, _OPUS_ and
+   * _FABLE_ (defaults in src/llm.ts); OPENROUTER_PRICES (JSON) prices models the defaults do not cover.
+   */
+  openrouter: {
+    apiKey: process.env.OPENROUTER_API_KEY ?? "",
+    models: {
+      haiku: process.env.OPENROUTER_HAIKU_MODEL ?? "",
+      sonnet: process.env.OPENROUTER_SONNET_MODEL ?? "",
+      opus: process.env.OPENROUTER_OPUS_MODEL ?? "",
+      fable: process.env.OPENROUTER_FABLE_MODEL ?? "",
+    },
+    prices: process.env.OPENROUTER_PRICES ?? "",
+  },
+  /** Web search the service runs itself (src/search.ts); a tool appears only when its key is set. */
+  search: {
+    braveKey: process.env.BRAVE_API_KEY ?? "",
+    exaKey: process.env.EXA_API_KEY ?? "",
+  },
+  /**
+   * Voice notes: audio Paul sends in chat, transcribed by the service before the chief sees it
+   * (src/transcribe.ts). One plain HTTPS call to an OpenAI-compatible /audio/transcriptions
+   * endpoint, OpenRouter by default: its key is already set for the models, so transcription needs
+   * no second account. TRANSCRIBE_API_KEY (and TRANSCRIBE_BASE_URL) point it at another provider
+   * instead. The key is read from the environment only, never logged, stored or sent to a worker.
+   */
+  transcribe: {
+    enabled: (process.env.TRANSCRIBE ?? "on").toLowerCase() !== "off",
+    apiKey: process.env.TRANSCRIBE_API_KEY ?? "",
+    baseUrl: (process.env.TRANSCRIBE_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, ""),
+    model: process.env.TRANSCRIBE_MODEL || "openai/whisper-large-v3",
+    /** Largest audio file sent for transcription, in megabytes, and the longest clip in seconds. */
+    maxMb: positive(process.env.TRANSCRIBE_MAX_MB, 12),
+    maxSeconds: positive(process.env.TRANSCRIBE_MAX_SECONDS, 300),
+    timeoutMs: positive(process.env.TRANSCRIBE_TIMEOUT_MS, 60_000),
+    /** ISO-639-1, e.g. "en"; empty lets the provider detect it. */
+    language: process.env.TRANSCRIBE_LANGUAGE ?? "",
+  },
+  /**
+   * Live voice with Cleo in a Discord voice channel (src/voice.ts, src/voice-bridge.ts). Everything goes
+   * through OpenRouter: speech to text (the transcription settings above), the voice brain, and text to
+   * speech. Nothing to warm up. On when OPENROUTER_API_KEY is set and VOICE is not "off".
+   */
+  voice: {
+    enabled: (process.env.VOICE ?? "on").toLowerCase() !== "off",
+    /** The model Cleo talks with, an alias or an OpenRouter id. Fast matters more than clever: ClearOps does the work. */
+    model: process.env.VOICE_MODEL || "haiku",
+    /** OpenRouter text-to-speech model and voice. Default: Mistral Voxtral, "Jane", British English. */
+    ttsModel: process.env.VOICE_TTS_MODEL || "mistralai/voxtral-mini-tts-3-0",
+    ttsVoice: process.env.VOICE_TTS_VOICE || "gb_jane_neutral",
+    /** How long Paul must be quiet before his turn is over. */
+    silenceMs: positive(process.env.VOICE_SILENCE_MS, 700),
+    /** Leave the channel after this many minutes with nobody speaking. */
+    idleMinutes: positive(process.env.VOICE_IDLE_MINUTES, 10),
+    /** How long Cleo waits for ClearOps to answer before saying it is on it. */
+    answerWaitSeconds: positive(process.env.VOICE_ANSWER_WAIT_SECONDS, 12),
+  },
+  /**
+   * Purchases (src/purchase.ts): every one approved by Paul, no spending limit (his call, 13 Nov 2026).
+   * How long a prepared purchase waits for his decision; the job waits with it, so this stays well under
+   * JOB_STALL_MINUTES.
+   */
+  purchase: {
+    waitMinutes: Math.min(positive(process.env.PURCHASE_WAIT_MINUTES, 20), 25),
+  },
+  /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */
+  browse: {
+    enabled: (process.env.BROWSE ?? "on").toLowerCase() !== "off",
+    maxActions: Number(process.env.BROWSE_MAX_ACTIONS ?? 60),
+  },
   models: {
     chief: process.env.CHIEF_MODEL ?? "haiku",
     worker: process.env.WORKER_MODEL ?? "haiku",
     engineer: process.env.ENGINEER_MODEL ?? "haiku",
+    /**
+     * The executive assistant reads Paul's mail and calendar. Paul's call (13 Nov 2026): it runs on
+     * Claude Sonnet on Anthropic's API directly, even when OPENROUTER_API_KEY sends everything else to
+     * open models (src/llm.ts `runRoute`). Follow-up nudge drafts are the exception and use WORKER_MODEL.
+     */
+    ea: process.env.EA_MODEL || "sonnet",
   },
   /** The design worker: what it looks at, its browser, model and spend cap per job. */
   design: {
@@ -136,6 +213,26 @@ export const config = {
       .filter(Boolean),
     ttlHours: positive(process.env.DNS_TTL_HOURS, 2),
   },
+  /**
+   * Signing Paul up for a site he named in chat (src/signup.ts, src/signup-gate.ts). `emails` are the
+   * addresses he named for sign-ups: with none, no sign-up can be prepared at all, which is the safe
+   * default. `sites` is an extra allowlist of domains where a sign-up may be prepared, on top of the
+   * sites agents may already act on; the never-list in src/site-policy.ts still blocks money sites,
+   * email providers, Microsoft, password managers, government identity services and this service's own
+   * infrastructure, whatever is set here. Nothing is ever submitted without Paul's own "signup apply <id>".
+   */
+  signup: {
+    emails: (process.env.SIGNUP_EMAILS ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    sites: (process.env.SIGNUP_SITES ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    ttlHours: positive(process.env.SIGNUP_TTL_HOURS, 6),
+    dailyCap: positive(process.env.SIGNUP_DAILY_CAP, 3),
+  },
   jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
   engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
   /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */
@@ -143,6 +240,11 @@ export const config = {
   /** Minutes a running job may show no activity from its worker before it is stopped as stalled. */
   /** The most the workforce spends on jobs finished in one London day; past it, new jobs wait. */
   dailyBudgetUsd: positive(process.env.DAILY_BUDGET_USD, 20),
+  /**
+   * Engineering jobs (engineer, create_agent) that may run at once on one repository, each in its own
+   * working copy (the checkout, then git worktrees beside it). Paul's call (13 Nov 2026): two. At most 3.
+   */
+  engineerSlots: Math.min(Math.floor(positive(process.env.ENGINEER_SLOTS, 2)), 3),
   jobStallMinutes: positive(process.env.JOB_STALL_MINUTES, 30),
   /** The longest any job may run, in minutes, before it is stopped. */
   jobMaxRuntimeMinutes: positive(process.env.JOB_MAX_RUNTIME_MINUTES, 240),
@@ -165,7 +267,8 @@ export function isAllowed(from: string): boolean {
 
 /** Validate what production needs. Tests and the simulator skip this. */
 export function assertProductionConfig(): void {
-  req("ANTHROPIC_API_KEY");
+  // One model provider: OpenRouter when its key is set (it wins), otherwise Anthropic.
+  if (!process.env.OPENROUTER_API_KEY && !process.env.ANTHROPIC_API_KEY) throw new Error("Missing required environment variable OPENROUTER_API_KEY or ANTHROPIC_API_KEY");
   // A channel whose token is missing is dropped with a warning rather than stopping the service,
   // so adding Discord to the list before its token exists cannot take Telegram down.
   const usable: Channel[] = [];

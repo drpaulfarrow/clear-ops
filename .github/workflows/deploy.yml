@@ -46,9 +46,23 @@ jobs:
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          # JSON, so through the environment rather than pasted into the script.
+          OPENROUTER_PRICES: ${{ vars.OPENROUTER_PRICES }}
         run: |
           flyctl secrets set --app "$FLY_APP" --stage \
             ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
+            OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}" \
+            OPENROUTER_HAIKU_MODEL="${{ vars.OPENROUTER_HAIKU_MODEL }}" \
+            OPENROUTER_SONNET_MODEL="${{ vars.OPENROUTER_SONNET_MODEL }}" \
+            OPENROUTER_OPUS_MODEL="${{ vars.OPENROUTER_OPUS_MODEL }}" \
+            OPENROUTER_PRICES="$OPENROUTER_PRICES" \
+            EA_MODEL="${{ vars.EA_MODEL }}" \
+            BRAVE_API_KEY="${{ secrets.BRAVE_API_KEY }}" \
+            EXA_API_KEY="${{ secrets.EXA_API_KEY }}" \
+            TRANSCRIBE_API_KEY="${{ secrets.TRANSCRIBE_API_KEY }}" \
+            TRANSCRIBE_MODEL="${{ vars.TRANSCRIBE_MODEL }}" \
+            TRANSCRIBE_BASE_URL="${{ vars.TRANSCRIBE_BASE_URL }}" \
+            VAULT_KEY="${{ secrets.VAULT_KEY }}" \
             GH_TOKEN="${{ secrets.GH_TOKEN }}" \
             TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" \
             ALLOWED_TELEGRAM_IDS="${{ secrets.ALLOWED_TELEGRAM_IDS }}" \
@@ -65,6 +79,9 @@ jobs:
             GODADDY_API_KEY="${{ secrets.GODADDY_API_KEY }}" \
             GODADDY_API_SECRET="${{ secrets.GODADDY_API_SECRET }}" \
             GODADDY_DOMAINS="${{ vars.GODADDY_DOMAINS }}" \
+            SIGNUP_EMAILS="${{ secrets.SIGNUP_EMAILS }}" \
+            SIGNUP_SITES="${{ vars.SIGNUP_SITES }}" \
+            SIGNUP_DAILY_CAP="${{ vars.SIGNUP_DAILY_CAP }}" \
             GITHUB_APP_ID="$GITHUB_APP_ID" \
             GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
             GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID"

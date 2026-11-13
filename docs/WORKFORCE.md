@@ -23,7 +23,8 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 ## Rules of the road
 
 - Jobs only start when you ask for them. Besides the schedules you set (including the weekday 07:30 brief and 18:00 wrap once Google is connected), the only jobs that start by themselves are the maintainer's reviews, the fix rounds of pull requests you asked for, and the rounds of a design loop you started. Suggestions from reviews, research or the strategist come back as options for you to choose.
-- One engineering job per repository at a time; others queue, per repository. `/jobs` shows the queue.
+- Send a voice note or an audio message instead of typing and the chief answers the transcript as if you had typed it; the audio itself is kept in your uploads. With no transcription key set, it says plainly that it cannot play it and asks you to type.
+- Up to two engineering jobs per repository at once, each in its own working copy so they never fight over the same files (`ENGINEER_SLOTS`, at most 3); ask for a third while two are running and it queues, per repository. `/jobs` shows the queue.
 - Say which repository a job is about: the product (the default), `self` (the workforce) or `site` (drpaulfarrow.com, your personal site). Every worker can read all of them.
 - Ask for a new repository in chat ("create a repo called X", add "public" if you want it public). It is created under drpaulfarrow, private by default, with a README, and can be worked on straight away. Workers never delete repositories or change their settings, and never create one unless you asked.
 - Anything outside the engineer's normal remit waits for `YES <id>`, `send <id>` and `cancel <id>` (an email, invitation or cancellation the assistant prepared; you see its exact text first, it expires after 24 hours). Deploys of the product happen through GitHub Actions, not from the workforce.
@@ -31,7 +32,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 ## Commands
 
-`/jobs` `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>` and `dns cancel <id>`. Each approval command is for one item, you send it yourself, and it expires.
+`/jobs` `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>` and `signup cancel <id>`. Each approval command is for one item, you send it yourself, and it expires.
 
 ## Things only you do
 

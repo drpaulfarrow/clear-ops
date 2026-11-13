@@ -1,3 +1,9 @@
+import { SitePolicy } from "./site-policy.js";
+import { safeVaultDomains, vault } from "./vault.js";
+import { BROWSE_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
+import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
+import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
+import { runRoute } from "./llm.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,7 +14,7 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner } from "./agents.js";
 import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
-import type { Job, JobKind, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
+import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
@@ -90,6 +96,12 @@ const minutes = (ms: number) => Math.round(ms / MINUTE);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Starts worker jobs in the background and reports back over WhatsApp when they finish. */
+/** A browse kind's permits: the sign-up permit as granted, plus the purchase permit if granted. */
+function withPurchase(kept: JobPermit[], granted: JobPermit[] | undefined): JobPermit[] | undefined {
+  const all = granted?.includes("purchase") ? [...kept, "purchase" as const] : kept;
+  return all.length ? all : undefined;
+}
+
 export class JobRunner {
   private running = new Set<string>();
   /** The workers this process is running, with their heartbeats. */
@@ -103,13 +115,18 @@ export class JobRunner {
   private readonly now: () => number;
   private readonly saveWork: (job: Job, why: StopReason["kind"]) => Promise<SavedWork | undefined>;
   /** Which job holds each repository's engineering lock in this process. */
-  private holders = new Map<JobTarget, string>();
+  /** The jobs holding each repository's slots (at most `slots` each), by repository. */
+  private holders = new Map<JobTarget, string[]>();
+  /** Engineering jobs that may run at once per repository, each in its own working copy. */
+  private readonly slots: number;
 
   private readonly waitForDeploy: DeployWait;
   /** Batches failure messages so an outage that fails many jobs sends Paul one message, not a flood. */
   readonly failures: FailureNotifier;
   /** Told when a job finishes with a saved output (the outputs repository copy). Fire and forget: it can never fail or delay a job. */
   private readonly onOutput?: (job: Job) => void;
+  /** The purchase approval gate (src/purchase.ts), for jobs holding the purchase permit. */
+  private readonly purchase?: PurchaseGate;
 
   constructor(
     private readonly store: Store,
@@ -117,10 +134,12 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions } = {},
+    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; slots?: number } = {},
   ) {
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
     this.onOutput = opts.onOutput;
+    this.purchase = opts.purchase;
+    this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
     const l = opts.liveness ?? {};
     this.stallMs = l.stallMs ?? config.jobStallMinutes * MINUTE;
     this.maxRuntimeMs = l.maxRuntimeMs ?? config.jobMaxRuntimeMinutes * MINUTE;
@@ -137,6 +156,9 @@ export class JobRunner {
     if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds" || p === "send") : extra.permits;
     else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
     else if (kind === "engineer") extra.permits = extra.permits?.includes("create_repo") ? ["create_repo"] : undefined;
+    // The sign-up permit goes to the kinds that carry the browser, and to them only.
+    // So does the purchase permit (the browser fills the basket; Paul approves each order).
+    else if (BROWSE_KINDS.includes(kind)) extra.permits = withPurchase(extra.permits?.includes("signup") ? ["signup"] : [], extra.permits);
     else delete extra.permits;
     if (!extra.permits) delete extra.permits;
     // Only research has a depth; unlabelled research (a scheduled run, say) takes it from the brief.
@@ -159,7 +181,7 @@ export class JobRunner {
       if (holder) return this.store.updateJob(job.id, { waitingFor: holder, queuePos: this.nextQueuePos() });
       const hold = this.store.queueHold();
       if (hold && !ignoreHold) return this.store.updateJob(job.id, { waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
-      this.holders.set(key, job.id);
+      this.take(key, job.id);
     }
     // Fire and forget. The webhook has already been acknowledged.
     void this.execute(job.id);
@@ -332,9 +354,46 @@ export class JobRunner {
    * until resumeInterrupted() has dealt with it, so a request that arrives during boot queues.
    */
   holder(key: JobTarget): string | undefined {
-    const held = this.holders.get(key);
-    if (held) return held;
-    return this.store.allJobs().find((j) => j.status === "running" && lockKey(j) === key && !this.running.has(j.id))?.id;
+    const occupants = this.occupants(key);
+    return occupants.length >= this.slots ? occupants[0] : undefined;
+  }
+
+  /**
+   * The jobs using a repository's slots: those this process gave a slot, then any a previous process
+   * left marked running (until resumeInterrupted() has dealt with them), so a request during boot queues.
+   */
+  private occupants(key: JobTarget, except?: string): string[] {
+    const held = (this.holders.get(key) ?? []).filter((id) => id !== except);
+    const stale = this.store
+      .allJobs()
+      .filter((j) => j.status === "running" && lockKey(j) === key && !this.running.has(j.id) && !held.includes(j.id) && j.id !== except)
+      .map((j) => j.id);
+    return [...held, ...stale];
+  }
+
+  private full(key: JobTarget): boolean {
+    return (this.holders.get(key) ?? []).length >= this.slots;
+  }
+
+  private holds(key: JobTarget, id: string): boolean {
+    return (this.holders.get(key) ?? []).includes(id);
+  }
+
+  /** Gives a job a slot and a working copy: its own earlier lane if free (a resumed job), else the lowest free one. */
+  private take(key: JobTarget, id: string): void {
+    const held = (this.holders.get(key) ?? []).filter((h) => h !== id);
+    this.holders.set(key, [...held, id]);
+    const used = new Set(held.map((h) => this.store.getJob(h)?.lane ?? 0));
+    const own = this.store.getJob(id)?.lane ?? 0;
+    let lane = own;
+    if (used.has(lane)) for (lane = 0; used.has(lane); lane++);
+    if (lane !== (this.store.getJob(id)?.lane ?? 0)) this.store.updateJob(id, { lane: lane || undefined });
+  }
+
+  private free(key: JobTarget, id: string): void {
+    const left = (this.holders.get(key) ?? []).filter((h) => h !== id);
+    if (left.length) this.holders.set(key, left);
+    else this.holders.delete(key);
   }
 
   /** Every repository that has a lock: all managed repositories, plus any a stored job names. */
@@ -370,18 +429,26 @@ export class JobRunner {
 
   /** Hands a free repository lock to the first job in its queue and starts it. */
   private async startNext(key: JobTarget, finished?: string): Promise<void> {
-    if (this.holders.has(key)) return;
+    // Fill every free slot, one queued job at a time.
+    while (!this.full(key)) {
+      const before = this.waiting(key).length;
+      if (!before || !(await this.startOne(key, finished))) return;
+    }
+  }
+
+  /** Starts the first job in a repository's queue in a free slot. False when nothing could start. */
+  private async startOne(key: JobTarget, finished?: string): Promise<boolean> {
     // Held after a credit or key failure: the queue waits for /resume instead of failing job after job.
-    if (this.store.queueHold()) return;
+    if (this.store.queueHold()) return false;
     const [next, ...rest] = this.waiting(key);
-    if (!next) return;
+    if (!next) return false;
     if (this.capReached()) {
       this.store.updateJob(next.id, { capBlocked: true });
       this.noticeCap(next);
-      return;
+      return false;
     }
     this.store.updateJob(next.id, { capBlocked: undefined });
-    this.holders.set(key, next.id);
+    this.take(key, next.id);
     this.store.updateJob(next.id, { waitingFor: undefined, queuePos: undefined });
     for (const j of rest) this.store.updateJob(j.id, { waitingFor: next.id });
     void this.execute(next.id);
@@ -390,6 +457,7 @@ export class JobRunner {
     await this.messenger
       .send(next.replyTo ?? next.requestedBy, `Starting: ${jobLabel(next)} (was queued)${after}.`)
       .catch(() => undefined);
+    return true;
   }
 
   /**
@@ -408,13 +476,10 @@ export class JobRunner {
     for (const job of jobs) await this.reclaim(job, "restart");
     // A repository nobody reclaimed (its job gave up, or none was running) starts its queue.
     for (const key of this.lockKeys()) {
-      const holder = this.holders.get(key);
-      if (!holder) {
-        await this.startNext(key);
-        continue;
-      }
-      // Requests that queued during boot behind a job that has since given up now wait for the real holder.
-      for (const j of this.waiting(key)) if (j.waitingFor !== holder) this.store.updateJob(j.id, { waitingFor: holder });
+      await this.startNext(key);
+      // Requests that queued during boot behind a job that has since given up now wait for a real holder.
+      const holder = this.holders.get(key)?.[0];
+      if (holder) for (const j of this.waiting(key)) if (j.waitingFor !== holder && !this.isHeld(j)) this.store.updateJob(j.id, { waitingFor: holder });
     }
     this.booted = true;
     return jobs.length;
@@ -445,13 +510,13 @@ export class JobRunner {
       return;
     }
     const key = lockKey(job);
-    const current = key && this.holders.get(key);
-    const holder = current && current !== job.id ? current : undefined;
+    const others = key ? (this.holders.get(key) ?? []).filter((h) => h !== job.id) : [];
+    const holder = key && others.length >= this.slots ? others[0] : undefined;
     const hold = this.store.queueHold();
     if (key && !holder && hold) {
       // The queues are held after a credit or key failure: wait for /resume rather than fail again.
       this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
-      if (this.holders.get(key) === job.id) this.holders.delete(key);
+      this.free(key, job.id);
       await say(orphan ? `${lead}, so I put it back in the queue, which is paused until you send /resume because ${failureReason(hold)}.` : `${lead} The engineering queue is paused because ${failureReason(hold)}, so it waits; send /resume once that is fixed.`);
       return;
     }
@@ -462,7 +527,7 @@ export class JobRunner {
       await say(orphan ? `${lead}, so I put it back in the queue behind ${ref}.` : `${lead} Queued behind ${ref}; it resumes when that finishes.`);
       return;
     }
-    if (key) this.holders.set(key, job.id);
+    if (key) this.take(key, job.id);
     this.store.updateJob(job.id, { status: "queued", resumed });
     await say(orphan ? `${lead}, so I restarted it to carry on from where it left off (attempt ${resumed + 1}).` : `${lead} Resuming it (attempt ${resumed + 1}).`);
     void this.execute(job.id);
@@ -483,6 +548,7 @@ export class JobRunner {
     this.running.add(id);
     const at = new Date(now).toISOString();
     this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at });
+    let web: WebTools | undefined;
     try {
       // A design round after a merge looks only once the product's deploy of that merge is live.
       if (job.awaitDeploy) {
@@ -494,7 +560,10 @@ export class JobRunner {
         this.store.updateJob(id, { startedAt: t, lastActivityAt: t });
       }
       if (live.stop) throw new Error("stopped");
-      const spec = workerSpec(job.kind, job.target);
+      const base = workerSpec(job.kind, job.target);
+      // An engineering job running beside another on the same repository works in its own copy of it.
+      const lane = lockKey(job) && job.lane && base.cwd ? await ensureLane(base.cwd, job.lane) : undefined;
+      const spec = lane && base.cwd ? { ...base, cwd: lane, prompt: `${base.prompt}\n\n${laneNote(base.cwd, lane)}` } : base;
       const perJob = spec.perJob?.(id) ?? {};
       // Engineers building a design spec may read the designer's assets.
       const dirs = perJob.additionalDirectories ?? (job.designLoop ? [...readableDirs(), designRoot()] : undefined);
@@ -505,6 +574,8 @@ export class JobRunner {
       const ownTools = job.kind === "design" ? perJob.mcpServers : undefined;
       // The cv and advisor workers' own save tools, from their specs alone (toolsFor gives them nothing else).
       const cvTools = job.kind === "cv" || job.kind === "advisor" ? perJob.mcpServers : undefined;
+      // The service's own search and read-only browser, for research-type kinds only (src/web-tools.ts).
+      web = webToolsFor(job.kind, { browse: { policy: new SitePolicy(this.store, safeVaultDomains), vault, ...(job.permits?.includes("purchase") ? { purchasing: true } : {}) } });
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
@@ -518,20 +589,25 @@ export class JobRunner {
           : "";
       const dnsPermit = job.kind === "dns" ? `\n\nThis job may: ${job.permits?.includes("dns") ? "prepare DNS changes for Paul's approval (dns_prepare_change); nothing is applied until he replies \"dns apply <id>\" himself" : "read only (no dns_prepare_change): list domains, records and snapshots, and explain"}.` : "";
       const createRepo = job.kind === "engineer" && job.permits?.includes("create_repo") ? `\n\n${CREATE_REPO_NOTE}` : "";
+      const signupPermit = job.permits?.includes("signup") ? `\n\n${SIGNUP_NOTE}` : "";
+      // A job allowed to buy (Paul asked in chat) gets the one tool that asks him to approve the exact order,
+      // bound to its own browser. Without a browser or the gate it gets nothing.
+      const buying = job.permits?.includes("purchase") && web.session && this.purchase ? purchaseServer({ gate: this.purchase, browser: web.session, jobId: id, replyTo: job.replyTo }) : undefined;
+      const purchasePermit = buying ? `\n\n${PURCHASE_NOTE}` : "";
       const focus = job.kind !== "engineer" && job.kind !== "maintain" && job.kind !== "create_agent" ? repoFocus(job.target, job.kind) : "";
       const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
       // Every run is capped; deep research gets more turns and budget than the default.
       const limits = runLimits(job.kind, job.depth);
       const result = await this.run({
-        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${depth}${standing}${resume}${carryOn}`,
+        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
-        model: spec.model,
+        ...runRoute(job, spec.model),
         cwd: spec.cwd,
-        allowedTools: createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools,
+        allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...web.allowed],
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        mcpServers: ownTools || extraTools || cvTools ? { ...extraTools, ...ownTools, ...cvTools } : undefined,
+        mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers, ...(buying ? { [PURCHASE_SERVER]: buying } : {}) } : undefined,
         additionalDirectories: dirs,
         maxTurns: limits.maxTurns,
         maxBudgetUsd: limits.maxBudgetUsd,
@@ -623,6 +699,8 @@ export class JobRunner {
       if (live.stop) await this.recordStop(job, live);
       else await this.recordFailure(job, failureFromError(err));
     } finally {
+      // The job's browser, if it opened one, goes with it.
+      await web?.close().catch(() => undefined);
       // A worker that would not let go after a stop was already finished without it; nothing more here.
       const mine = this.live.get(id) === live;
       if (mine) {
@@ -638,8 +716,8 @@ export class JobRunner {
   /** Frees the repository a job holds and starts whoever is next in line. */
   private async release(job: Job): Promise<void> {
     const key = lockKey(job);
-    if (key && this.holders.get(key) === job.id) {
-      this.holders.delete(key);
+    if (key && this.holds(key, job.id)) {
+      this.free(key, job.id);
       await this.startNext(key, job.id);
     }
   }
@@ -746,12 +824,11 @@ export class JobRunner {
       }
       await this.releaseCapped();
       for (const key of this.lockKeys()) {
-        const held = this.holders.get(key);
-        // A lock held by a job nothing is running frees itself.
-        if (held && !this.running.has(held)) this.holders.delete(key);
-        const holder = this.holders.get(key);
-        if (!holder) await this.startNext(key);
-        else for (const j of this.waiting(key)) if (j.waitingFor !== holder && !this.isHeld(j)) this.store.updateJob(j.id, { waitingFor: holder });
+        // A slot held by a job nothing is running frees itself.
+        for (const held of this.holders.get(key) ?? []) if (!this.running.has(held)) this.free(key, held);
+        await this.startNext(key);
+        const holder = this.holders.get(key)?.[0];
+        if (holder) for (const j of this.waiting(key)) if (j.waitingFor !== holder && !this.isHeld(j)) this.store.updateJob(j.id, { waitingFor: holder });
       }
     } finally {
       this.checking = false;
@@ -829,7 +906,7 @@ export class JobRunner {
     if (job.status === "queued" && !this.running.has(id)) {
       this.store.updateJob(id, { status: "failed", finishedAt: new Date().toISOString(), error: reason.detail, failure: "cancelled", summary: "Cancelled before it started.", waitingFor: undefined, queuePos: undefined });
       this.pauseLoop(job.designLoop);
-      if (key && this.holders.get(key) === id) await this.release(job);
+      if (key && this.holds(key, id)) await this.release(job);
       return `Cancelled ${label} before it started; it has left the queue.`;
     }
     if (this.live.has(id)) await this.stop(id, reason);
@@ -837,8 +914,8 @@ export class JobRunner {
       // Marked running, but no worker here: nothing to stop, so record it and free its place.
       const orphan: LiveRun = { abort: new AbortController(), startedAt: 0, lastActivity: 0, persistedAt: 0, waiting: false, finishing: false, stop: reason, settled: Promise.resolve(), settle: () => {} };
       await this.recordStop(job, orphan);
-      if (key && this.holders.get(key) === id) await this.release(job);
-      else if (key && !this.holders.get(key)) await this.startNext(key, id);
+      if (key && this.holds(key, id)) await this.release(job);
+      else if (key && !this.full(key)) await this.startNext(key, id);
     }
     const after = this.store.getJob(id) ?? job;
     if (after.status !== "failed") return `${label} had already finished, so there was nothing to cancel.`;
@@ -1119,8 +1196,9 @@ export async function stashWork(dir: string, message: string): Promise<SavedWork
 
 /** The real saveWork: stash in the checkout the job's worker runs in. */
 async function defaultSaveWork(job: Job, why: StopReason["kind"]): Promise<SavedWork | undefined> {
-  const dir = workerSpec(job.kind, job.target).cwd;
-  if (!dir) return undefined;
+  const main = workerSpec(job.kind, job.target).cwd;
+  if (!main) return undefined;
+  const dir = lockKey(job) && job.lane ? laneDir(main, job.lane) : main;
   return stashWork(dir, `clear-ops ${job.id}: ${jobTitle(job)} (stopped: ${why})`);
 }
 
@@ -1143,3 +1221,42 @@ export const actionExecutors: Record<string, ActionExecutor> = {
 };
 
 export const ACTION_KINDS = Object.keys(actionExecutors);
+
+/* ---------- Working copies for engineering jobs that run side by side ---------- */
+
+/** The working copy for lane n of a repository: a git worktree beside its checkout. */
+export function laneDir(checkout: string, lane: number): string {
+  return `${checkout.replace(/\/+$/, "")}.lane${lane}`;
+}
+
+/**
+ * Makes sure lane n's working copy exists and, when it is clean, sits on the latest default branch, so a
+ * second engineer starts from what is deployed, exactly as the checkout does (src/bootstrap.ts). Work an
+ * earlier job left there (a resumed job) is kept. Falls back to the checkout itself if git cannot make one.
+ */
+export async function ensureLane(checkout: string, lane: number): Promise<string> {
+  const dir = laneDir(checkout, lane);
+  const git = (cwd: string, ...args: string[]) => exec("git", ["-C", cwd, ...args], { timeout: 120_000 }).then((r) => r.stdout.trim());
+  try {
+    await git(checkout, "fetch", "--quiet", "origin").catch(() => undefined);
+    const head = await git(checkout, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").catch(() => "origin/main");
+    const target = head.startsWith("origin/") ? head : "origin/main";
+    if (!fs.existsSync(path.join(dir, ".git"))) {
+      await git(checkout, "worktree", "prune").catch(() => undefined);
+      await git(checkout, "worktree", "add", "--detach", dir, target);
+      return dir;
+    }
+    const dirty = await git(dir, "status", "--porcelain");
+    if (!dirty) await git(dir, "checkout", "--quiet", "--detach", target).catch(() => undefined);
+    return dir;
+  } catch (err) {
+    console.warn(`lane ${lane} for ${checkout}: ${err instanceof Error ? err.message : err}; using the checkout itself`);
+    return checkout;
+  }
+}
+
+/** What an engineer in a second working copy is told. */
+export function laneNote(checkout: string, lane: string): string {
+  if (lane === checkout) return "";
+  return `Working copy: another engineering job may be running on this repository at the same time, in ${checkout}. You have your own copy of the repository at ${lane}: it is your current directory, so do all your work, branches and commits here and never touch ${checkout}. It starts detached on the latest default branch: create your own branch from it as usual. If git refuses a branch because it is checked out in the other copy, use git checkout --ignore-other-worktrees <branch>.`;
+}

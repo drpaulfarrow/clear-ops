@@ -45,6 +45,33 @@ export async function prepareRepo(slug: string, dir: string, tokenArg?: string, 
   } catch (err) {
     log(`Could not configure git in ${dir}: ${redact(err instanceof Error ? err.message : String(err), token)}`);
   }
+  await refreshCheckout(dir, (m) => log(redact(m, token)));
+}
+
+/**
+ * Brings an existing checkout up to date with its default branch on start, so agents that read it (the
+ * chief answering questions about the workforce, research, review) see the code that is actually
+ * deployed rather than the clone from the first boot. Only fast-forwards, and only when the checkout is
+ * on the default branch with no local changes: an engineer's branch or uncommitted work is never touched.
+ */
+export async function refreshCheckout(dir: string, log: (m: string) => void = console.log): Promise<"updated" | "current" | "skipped"> {
+  try {
+    await exec("git", ["fetch", "--quiet", "origin"], { cwd: dir });
+    const head = (await exec("git", ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { cwd: dir }).catch(() => ({ stdout: "origin/main" }))).stdout.trim();
+    const def = head.replace(/^origin\//, "");
+    const branch = (await exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir })).stdout.trim();
+    const dirty = (await exec("git", ["status", "--porcelain"], { cwd: dir })).stdout.trim();
+    if (branch !== def || dirty) return "skipped";
+    const before = (await exec("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+    await exec("git", ["merge", "--ff-only", "--quiet", `origin/${def}`], { cwd: dir });
+    const after = (await exec("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+    if (before === after) return "current";
+    log(`Updated ${dir} to the latest ${def}.`);
+    return "updated";
+  } catch (err) {
+    log(`Could not update ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+    return "skipped";
+  }
 }
 
 /**

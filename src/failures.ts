@@ -3,6 +3,7 @@ import type { Job } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { shortText } from "./messages.js";
 import { jobLabel, jobRef } from "./titles.js";
+import { creditUrl, keyName, providerName } from "./llm.js";
 
 /**
  * Why a worker run produced no real work. "credit" and "auth" are account-wide: every further run
@@ -44,7 +45,7 @@ const SDK_ERROR_KINDS: Record<string, FailureKind> = {
   overloaded: "overloaded",
 };
 
-/** HTTP statuses from the Anthropic API mapped to our kinds. */
+/** HTTP statuses from the model API (Anthropic or OpenRouter) mapped to our kinds. */
 function statusKind(status?: number | null): FailureKind | undefined {
   if (status === 402) return "credit";
   if (status === 401 || status === 403) return "auth";
@@ -98,24 +99,24 @@ export function failureFromError(err: unknown): RunFailure {
   if (err instanceof RunFailedError) return err.failure;
   const detail = err instanceof Error ? err.message : String(err);
   const kind = classifyError(detail);
-  return { kind: kind === "api" && !/\bapi\b|anthropic/i.test(detail) ? "error" : kind, detail };
+  return { kind: kind === "api" && !/\bapi\b|anthropic|openrouter/i.test(detail) ? "error" : kind, detail };
 }
 
 /** Why it failed, in plain words, to follow "because". */
 export function failureReason(f: Pick<RunFailure, "kind" | "detail">): string {
   switch (f.kind) {
     case "credit":
-      return "the Anthropic account is out of credit";
+      return `the ${providerName()} account is out of credit`;
     case "auth":
-      return "the Anthropic API key was rejected";
+      return `the ${providerName()} API key was rejected`;
     case "rate_limit":
-      return "the Anthropic API kept rate limiting it and the retries ran out";
+      return `the ${providerName()} API kept rate limiting it and the retries ran out`;
     case "overloaded":
-      return "the Anthropic API was overloaded and the retries ran out";
+      return `the ${providerName()} API was overloaded and the retries ran out`;
     case "empty":
       return "the agent came back with nothing";
     case "api":
-      return `the Anthropic API returned an error (${shortText(f.detail, 120)})`;
+      return `the ${providerName()} API returned an error (${shortText(f.detail, 120)})`;
     case "stalled":
       return "its worker showed no activity for too long, so it was stopped";
     case "timeout":
@@ -131,9 +132,9 @@ export function failureReason(f: Pick<RunFailure, "kind" | "detail">): string {
 export function failureLabel(kind: FailureKind | undefined): string {
   switch (kind) {
     case "credit":
-      return "out of Anthropic credit";
+      return `out of ${providerName()} credit`;
     case "auth":
-      return "Anthropic key rejected";
+      return `${providerName()} key rejected`;
     case "rate_limit":
       return "rate limited";
     case "overloaded":
@@ -158,9 +159,9 @@ export function failureAction(kind: FailureKind, ids: string[]): string {
   const retry = ids.length === 1 ? `retry ${ids[0]}` : "retry <id>";
   switch (kind) {
     case "credit":
-      return "Please top up the Anthropic credit at console.anthropic.com, then send /resume and I will rerun them and restart the queue.";
+      return `Please top up the ${providerName()} credit at ${creditUrl()}, then send /resume and I will rerun them and restart the queue.`;
     case "auth":
-      return "Please check the ANTHROPIC_API_KEY in the workforce secrets is valid, then send /resume and I will rerun them and restart the queue.";
+      return `Please check the ${keyName()} in the workforce secrets is valid, then send /resume and I will rerun them and restart the queue.`;
     case "rate_limit":
     case "overloaded":
       return `Nothing needed from you beyond waiting a few minutes; send ${retry} to run it again.`;
