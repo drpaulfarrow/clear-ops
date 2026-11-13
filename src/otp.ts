@@ -51,7 +51,6 @@ export interface OtpRequest {
   id: string;
   host: string;
   jobId?: string;
-  replyTo?: string;
   createdAt: string;
   expiresAt: string;
 }
@@ -222,7 +221,6 @@ export class OtpRelay {
       id,
       host: input.host,
       ...(input.jobId ? { jobId: input.jobId } : {}),
-      replyTo: input.replyTo,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
     };
