@@ -2,7 +2,9 @@ import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config } from "./config.js";
 import { SitePolicy, termsWarning } from "./site-policy.js";
-import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError, cardVault, VAULT_CARD_PATH } from "./vault.js";
+import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError, cardVault, VAULT_CARD_PATH, VAULT_LINK_MINUTES } from "./vault.js";
+import type { Vault, CardVault } from "./vault.js";
+import { escapeHtml, field, htmlPage, expiredPage } from "./page-style.js";
 import { modelLine } from "./llm.js";
 import { spendLine } from "./spend.js";
 import { sdkRunner } from "./agents.js";
@@ -57,6 +59,10 @@ export interface AppDeps {
   githubStatus?: () => Promise<string>;
   /** Copies each finished job's output to the private outputs repository. Absent in tests. */
   outputs?: OutputsPublisher;
+  /** Paul's login vault. The singleton by default; the vault pages' test injects one with a pinned clock. */
+  vault?: Vault;
+  /** The card vault, for the same reason. */
+  cardVault?: CardVault;
 }
 
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
@@ -64,8 +70,6 @@ export const GOOGLE_CALLBACK_PATH = "/google/callback";
 /** A plain page for the browser after consent. Never echoes anything from the request. */
 const page = (title: string, text: string) =>
   `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">${title}</h1><p>${text}</p></body>`;
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-
 /** Pages that carry secrets are never cached, framed or allowed to load anything from elsewhere. */
 function noStore(res: express.Response): void {
   res.set({
@@ -76,18 +80,35 @@ function noStore(res: express.Response): void {
   });
 }
 
-/** The add-a-login form. The token rides in a hidden field so it never reaches a referrer or a log line. */
+/**
+ * The add-a-login form, in the service's house style (src/page-style.ts). The token rides in a hidden
+ * field so it never reaches a referrer or a log line, and the only thing the link carries into the page
+ * is the site's own name. No stored value is ever rendered here, and nothing typed is echoed back.
+ */
 function vaultForm(token: string, domain?: string): string {
-  const field = (label: string, name: string, type: string, extra = "") =>
-    `<label style="display:block;margin:.8rem 0 .2rem">${label}</label><input name="${name}" type="${type}" ${extra} style="width:100%;padding:.5rem;font-size:1rem">`;
-  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Add a login</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">Add a login for ClearOps</h1><p>Stored encrypted. Agents use it to sign in to this site only; they never see the password.</p><form method="post" action="${VAULT_ADD_PATH}" autocomplete="off"><input type="hidden" name="t" value="${escapeHtml(token)}">${field("Site (domain)", "domain", "text", `required placeholder="crunchbase.com" value="${escapeHtml(domain ?? "")}"`)}${field("Username or email", "username", "text", "required")}${field("Password", "password", "password", 'required autocomplete="new-password"')}${field("Two-factor setup key (optional)", "totp", "text", 'placeholder="the text code shown next to the QR code"')}<p style="font-size:.85rem;color:#555">Storing the two-factor key lets agents sign in without you, but the vault then holds both factors for this site.</p>${field("Login page address (optional)", "loginUrl", "url", 'placeholder="https://example.com/login"')}<button style="margin-top:1rem;padding:.6rem 1rem;font-size:1rem">Save</button></form></body>`;
+  const body = `<form method="post" action="${VAULT_ADD_PATH}" autocomplete="off"><input type="hidden" name="t" value="${escapeHtml(token)}">${field({ label: "Site (domain)", name: "domain", value: domain, placeholder: "crunchbase.com", required: true, attrs: 'autocapitalize="none" spellcheck="false"' })}${field({ label: "Username or email", name: "username", required: true, attrs: 'autocapitalize="none" spellcheck="false"' })}${field({ label: "Password", name: "password", type: "password", required: true, lock: true, attrs: 'autocomplete="new-password"' })}${field({ label: "Two-factor setup key (optional)", name: "totp", placeholder: "the text code shown next to the QR code", hint: "Storing the two-factor key lets agents sign in without you, but the vault then holds both factors for this site." })}${field({ label: "Login page address (optional)", name: "loginUrl", type: "url", placeholder: "https://example.com/login", attrs: 'autocapitalize="none" spellcheck="false"' })}<button type="submit">Save login</button></form>`;
+  return htmlPage({
+    title: "Add a login",
+    heading: "Save a login",
+    icon: "lock",
+    chip: domain,
+    text: "Stored encrypted, and used only by the service itself: an agent asks to sign in and the service fills the form. No agent ever sees the password.",
+    body,
+    foot: `This link works once, and expires ${VAULT_LINK_MINUTES} minutes after it was sent.`,
+  });
 }
 
-/** The add-a-card form. Nothing is echoed back; the token rides in a hidden field. */
+/** The add-a-card form, in the same house style. Nothing is echoed back; the token rides in a hidden field. */
 function cardForm(token: string): string {
-  const field = (label: string, name: string, extra = "") =>
-    `<label style="display:block;margin:.8rem 0 .2rem">${label}</label><input name="${name}" ${extra} style="width:100%;padding:.5rem;font-size:1rem">`;
-  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Add a card</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.4rem">Add a card for ClearOps</h1><p>Use a virtual card with a low limit. It is stored encrypted, never shown to an agent, and entered only on a checkout you approve, order by order. Adding a card replaces any earlier one.</p><form method="post" action="${VAULT_CARD_PATH}" autocomplete="off"><input type="hidden" name="t" value="${escapeHtml(token)}">${field("Card number", "number", 'required inputmode="numeric" autocomplete="off"')}${field("Expiry (MM/YY)", "expiry", 'required placeholder="08/28" autocomplete="off"')}${field("Security code", "cvc", 'required inputmode="numeric" autocomplete="off"')}${field("Name on card", "name", 'required autocomplete="off"')}${field("Billing postcode (optional)", "postcode", 'autocomplete="off"')}<button style="margin-top:1rem;padding:.6rem 1rem;font-size:1rem">Save</button></form></body>`;
+  const body = `<form method="post" action="${VAULT_CARD_PATH}" autocomplete="off"><input type="hidden" name="t" value="${escapeHtml(token)}">${field({ label: "Card number", name: "number", required: true, lock: true, attrs: 'inputmode="numeric" autocomplete="off"' })}${field({ label: "Expiry (MM/YY)", name: "expiry", required: true, placeholder: "08/28", attrs: 'autocomplete="off"' })}${field({ label: "Security code", name: "cvc", required: true, attrs: 'inputmode="numeric" autocomplete="off"' })}${field({ label: "Name on card", name: "name", required: true, attrs: 'autocomplete="off"' })}${field({ label: "Billing postcode (optional)", name: "postcode", attrs: 'autocomplete="off"' })}<button type="submit">Save card</button></form>`;
+  return htmlPage({
+    title: "Add a card",
+    heading: "Save a card",
+    icon: "card",
+    text: "Use a virtual card with a low limit. It is stored encrypted, never shown to an agent, and entered only on a checkout you approve, order by order. Adding a card replaces any earlier one.",
+    body,
+    foot: `This link works once, and expires ${VAULT_LINK_MINUTES} minutes after it was sent.`,
+  });
 }
 
 /** One purchase for Paul to approve. Everything shown is escaped page content the service read. */
@@ -100,6 +121,10 @@ function purchasePage(a: PurchaseAction, token: string, screenshot?: string): st
 
 /** Builds the Express app. Dependencies are injectable so tests can run it without the network. */
 export function buildApp(deps: AppDeps) {
+  // Paul's login vault and the card vault: the service's own singletons, unless a test injects ones with
+  // a pinned clock, which is how the one-time links' expiry is exercised through the pages themselves.
+  const loginVault = deps.vault ?? vault;
+  const cardStore = deps.cardVault ?? cardVault;
   // Live voice: the chief's and the jobs' messages pass a tap, so replies to the voice channel can be spoken (src/voice.ts).
   const tap = new VoiceTap();
   const tapped = tap.wrap(deps.messenger);
@@ -129,8 +154,8 @@ export function buildApp(deps: AppDeps) {
   const sitePolicy = new SitePolicy(deps.store, safeVaultDomains);
   const signup = new SignupGate(
     deps.store,
-    new BrowserSignupSubmitter((domain) => new BrowseSession({ policy: { mayAct: (host) => hostMatches(host, domain) }, cookiesFor: domain, vault })),
-    vault,
+    new BrowserSignupSubmitter((domain) => new BrowseSession({ policy: { mayAct: (host) => hostMatches(host, domain) }, cookiesFor: domain, vault: loginVault })),
+    loginVault,
     sitePolicy,
     deps.messenger,
   );
@@ -244,23 +269,33 @@ export function buildApp(deps: AppDeps) {
   app.get(VAULT_ADD_PATH, (req, res) => {
     noStore(res);
     const token = typeof req.query.t === "string" ? req.query.t : "";
-    const p = token ? vault.peek(token) : undefined;
-    if (!p) return res.status(400).type("html").send(page("Link expired", "This link has expired or was already used. Ask ClearOps for a new one."));
+    const p = token ? loginVault.peek(token) : undefined;
+    if (!p) return res.status(400).type("html").send(expiredPage("This link has expired or was already used. Ask ClearOps for a new one in chat.", "Nothing was saved."));
     res.type("html").send(vaultForm(token, p.domain));
   });
   app.post(VAULT_ADD_PATH, express.urlencoded({ extended: false, limit: "8kb" }), async (req, res) => {
     noStore(res);
     const b = (req.body ?? {}) as Record<string, string>;
     try {
-      const r = vault.add(String(b.t ?? ""), { domain: String(b.domain ?? ""), username: String(b.username ?? ""), password: String(b.password ?? ""), totp: String(b.totp ?? ""), loginUrl: String(b.loginUrl ?? "") });
+      const r = loginVault.add(String(b.t ?? ""), { domain: String(b.domain ?? ""), username: String(b.username ?? ""), password: String(b.password ?? ""), totp: String(b.totp ?? ""), loginUrl: String(b.loginUrl ?? "") });
       const warn = termsWarning(r.summary.domain);
-      res.type("html").send(page("Saved", `The login for ${escapeHtml(r.summary.domain)} is in the vault. Agents can now sign in there and act on the site, except paying, sending, posting and deleting. You can close this tab.`));
+      res.type("html").send(
+        htmlPage({
+          title: "Saved",
+          heading: "Login saved",
+          icon: "tick",
+          tone: "ok",
+          chip: r.summary.domain,
+          text: `The login for ${r.summary.domain} is in the vault. Agents can now sign in there and act on the site, except paying, sending, posting and deleting.`,
+          foot: "You can close this tab.",
+        }),
+      );
       await deps.messenger
         .send(r.replyTo, `Vault: saved the login for ${r.summary.domain} (${r.summary.username}${r.summary.twoFactor ? ", with two-factor" : ""}). Agents can now sign in and act there; paying, sending, posting and deleting still need you.${warn ? ` Note: ${warn}.` : ""} Say remove the ${r.summary.domain} login to delete it.`)
         .catch(() => undefined);
     } catch (err) {
       const msg = err instanceof VaultError ? err.message : "That could not be saved. Check the site and the login page address, and ask ClearOps for a new link if this one has expired.";
-      res.status(400).type("html").send(page("Not saved", escapeHtml(msg)));
+      res.status(400).type("html").send(htmlPage({ title: "Not saved", heading: "Not saved", icon: "alert", tone: "alert", text: msg, foot: "Nothing was saved. You can close this tab." }));
     }
   });
 
@@ -268,19 +303,29 @@ export function buildApp(deps: AppDeps) {
   app.get(VAULT_CARD_PATH, (req, res) => {
     noStore(res);
     const token = typeof req.query.t === "string" ? req.query.t : "";
-    if (!cardVault.valid(token)) return res.status(410).type("html").send(page("Link expired", "This link has expired or was already used. Ask ClearOps for a new one."));
+    if (!cardStore.valid(token)) return res.status(410).type("html").send(expiredPage("This link has expired or was already used. Ask ClearOps for a new one in chat.", "Nothing was saved."));
     res.type("html").send(cardForm(token));
   });
   app.post(VAULT_CARD_PATH, express.urlencoded({ extended: false, limit: "8kb" }), async (req, res) => {
     noStore(res);
     const b = (req.body ?? {}) as Record<string, string>;
     try {
-      const r = cardVault.add(String(b.t ?? ""), { number: String(b.number ?? ""), expiry: String(b.expiry ?? ""), cvc: String(b.cvc ?? ""), name: String(b.name ?? ""), postcode: String(b.postcode ?? "") });
-      res.type("html").send(page("Saved", `The card ending ${escapeHtml(r.summary.last4)} is in the vault. It is used only for a purchase you approve, item by item. You can close this tab.`));
+      const r = cardStore.add(String(b.t ?? ""), { number: String(b.number ?? ""), expiry: String(b.expiry ?? ""), cvc: String(b.cvc ?? ""), name: String(b.name ?? ""), postcode: String(b.postcode ?? "") });
+      res.type("html").send(
+        htmlPage({
+          title: "Saved",
+          heading: "Card saved",
+          icon: "tick",
+          tone: "ok",
+          chip: `Card ending ${r.summary.last4}`,
+          text: `The card ending ${r.summary.last4} is in the vault. It is used only for a purchase you approve, item by item.`,
+          foot: "You can close this tab.",
+        }),
+      );
       await deps.messenger.send(r.replyTo, `Vault: saved the card ending ${r.summary.last4} (expires ${r.summary.expiry}). It is entered only on a checkout you approve, never shown to an agent. Say remove the card to delete it.`).catch(() => undefined);
     } catch (err) {
       const msg = err instanceof VaultError ? err.message : "That could not be saved. Ask ClearOps for a new link and try again.";
-      res.status(400).type("html").send(page("Not saved", escapeHtml(msg)));
+      res.status(400).type("html").send(htmlPage({ title: "Not saved", heading: "Not saved", icon: "alert", tone: "alert", text: msg, foot: "Nothing was saved. You can close this tab." }));
     }
   });
 
