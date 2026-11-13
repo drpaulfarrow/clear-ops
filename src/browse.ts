@@ -352,7 +352,7 @@ export class BrowseSession {
     })(${JSON.stringify(sel)}, ${submitting ? "true" : "false"})`)) as string;
     const final = FINAL_ORDER.exec(words);
     if (final) {
-      throw new Error(`"${final[0]}" places an order or pays, and agents never press it. ${this.deps.purchasing ? "Call purchase_prepare with this button's number: Paul approves the exact order and the service presses it." : "Stop here and say in your report exactly what you would buy and where, so Paul can decide."}`);
+      throw new Error(`"${final[0]}" is a consequential action (it places an order or pays) and agents never press it. ${this.deps.purchasing ? "Call purchase_prepare with this button's number: Paul approves the exact order and the service presses it." : "Stop here and say in your report exactly what you would buy and where, so Paul can decide."}`);
     }
     // A job allowed to buy may move through checkout steps (nothing is paid by those).
     const hit = CONSEQUENTIAL.exec(words);
