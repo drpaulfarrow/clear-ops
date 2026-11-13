@@ -18,6 +18,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 ## Rules of the road
 
 - Jobs only start when you ask for them. Suggestions from reviews, research or the strategist come back as options for you to choose.
+- Send a voice note or an audio message instead of typing and the chief answers the transcript as if you had typed it; the audio itself is kept in your uploads. With no transcription key set, it says plainly that it cannot play it and asks you to type.
 - One engineering job per repository at a time; others queue, per repository. `/jobs` shows the queue.
 - Say which repository a job is about: the product (the default), `self` (the workforce) or `site` (drpaulfarrow.com, your personal site). Every worker can read all of them.
 - Ask for a new repository in chat ("create a repo called X", add "public" if you want it public). It is created under drpaulfarrow, private by default, with a README, and can be worked on straight away. Workers never delete repositories or change their settings, and never create one unless you asked.

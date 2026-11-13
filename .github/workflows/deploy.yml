@@ -59,6 +59,9 @@ jobs:
             EA_MODEL="${{ vars.EA_MODEL }}" \
             BRAVE_API_KEY="${{ secrets.BRAVE_API_KEY }}" \
             EXA_API_KEY="${{ secrets.EXA_API_KEY }}" \
+            TRANSCRIBE_API_KEY="${{ secrets.TRANSCRIBE_API_KEY }}" \
+            TRANSCRIBE_MODEL="${{ vars.TRANSCRIBE_MODEL }}" \
+            TRANSCRIBE_BASE_URL="${{ vars.TRANSCRIBE_BASE_URL }}" \
             GH_TOKEN="${{ secrets.GH_TOKEN }}" \
             TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" \
             ALLOWED_TELEGRAM_IDS="${{ secrets.ALLOWED_TELEGRAM_IDS }}" \
