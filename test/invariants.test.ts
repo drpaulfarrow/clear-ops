@@ -63,9 +63,13 @@ test("agents run headless: nothing waits on an interactive permission prompt", (
   assert.match(src("agents.ts"), /permissionMode: "dontAsk"/);
 });
 
-test("spend is capped on every run", () => {
+// Paul's call (13 Nov 2026): "remove all payment caps". Money limits are off unless he sets them, so
+// every run must still be bounded by a turn limit, and the money limit stays wired so it can come back.
+test("every run is bounded by a turn limit, and the money limit can still be set", () => {
   const jobs = src("jobs.ts");
   const orch = src("orchestrator.ts");
+  assert.match(jobs, /maxTurns: limits\.maxTurns/);
+  assert.match(orch, /maxTurns: \d+/);
   assert.match(jobs, /maxBudgetUsd:/);
   assert.match(orch, /maxBudgetUsd:/);
 });

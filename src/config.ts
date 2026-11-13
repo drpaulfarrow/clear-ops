@@ -7,6 +7,12 @@ function req(name: string): string {
 }
 
 /** A positive number from the environment, or the default when it is unset, zero or not a number. */
+/** A money limit that is off unless set: Paul's call (13 Nov 2026), "remove all payment caps". */
+function optionalUsd(raw: string | undefined): number | undefined {
+  const n = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 function positive(raw: string | undefined, fallback: number): number {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -161,7 +167,7 @@ export const config = {
     /** The unprivileged account the browser and branch previews run as (created in the Dockerfile). */
     user: process.env.DESIGN_USER || "designer",
     model: process.env.DESIGN_MODEL ?? "haiku",
-    budgetUsd: Number(process.env.DESIGN_BUDGET_USD ?? 10),
+    budgetUsd: optionalUsd(process.env.DESIGN_BUDGET_USD),
   },
   /**
    * Files the founder sends in chat. On the data volume, outside every git checkout, owner-only.
@@ -233,13 +239,14 @@ export const config = {
     ttlHours: positive(process.env.SIGNUP_TTL_HOURS, 6),
     dailyCap: positive(process.env.SIGNUP_DAILY_CAP, 3),
   },
-  jobBudgetUsd: Number(process.env.JOB_BUDGET_USD ?? 5),
-  engineerBudgetUsd: Number(process.env.ENGINEER_BUDGET_USD ?? 25),
+  /** Per-run money limits are off by default (Paul's call, 13 Nov 2026); set the variable to bring one back. Turn and runtime limits still stop a runaway run. */
+  jobBudgetUsd: optionalUsd(process.env.JOB_BUDGET_USD),
+  engineerBudgetUsd: optionalUsd(process.env.ENGINEER_BUDGET_USD),
   /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */
-  deepResearchBudgetUsd: Number(process.env.DEEP_RESEARCH_BUDGET_USD ?? 20),
+  deepResearchBudgetUsd: optionalUsd(process.env.DEEP_RESEARCH_BUDGET_USD),
   /** Minutes a running job may show no activity from its worker before it is stopped as stalled. */
-  /** The most the workforce spends on jobs finished in one London day; past it, new jobs wait. */
-  dailyBudgetUsd: positive(process.env.DAILY_BUDGET_USD, 20),
+  /** The most the workforce spends in one London day; past it, new jobs wait. Off (undefined) unless DAILY_BUDGET_USD is set: Paul's call, 13 Nov 2026. */
+  dailyBudgetUsd: optionalUsd(process.env.DAILY_BUDGET_USD),
   /**
    * Engineering jobs (engineer, create_agent) that may run at once on one repository, each in its own
    * working copy (the checkout, then git worktrees beside it). Paul's call (13 Nov 2026): two. At most 3.

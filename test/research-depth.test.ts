@@ -69,19 +69,20 @@ test("research depth is read from the brief when the chief does not set it", () 
   for (const b of ["What did SPUR announce this week?", "Find TollBit's pricing page"]) assert.equal(detectDepth(b), "standard", b);
 });
 
-test("deep research gets more turns and a larger, configurable budget; other kinds keep their limits", () => {
+test("deep research gets more turns and a configurable budget; every kind keeps a turn limit", () => {
   const std = runLimits("research", "standard");
   const deep = runLimits("research", "deep");
   assert.ok(deep.maxTurns > std.maxTurns);
   assert.ok(std.maxTurns >= 40, "standard research never drops below the old limit");
   assert.equal(deep.maxBudgetUsd, config.deepResearchBudgetUsd);
-  assert.ok(config.deepResearchBudgetUsd > config.jobBudgetUsd);
   assert.equal(std.maxBudgetUsd, config.jobBudgetUsd);
   assert.deepEqual(runLimits("engineer"), { maxTurns: 200, maxBudgetUsd: config.engineerBudgetUsd });
   assert.deepEqual(runLimits("maintain"), { maxTurns: 80, maxBudgetUsd: config.engineerBudgetUsd });
   assert.deepEqual(runLimits("design"), { maxTurns: 80, maxBudgetUsd: config.design.budgetUsd });
   assert.deepEqual(runLimits("write", "deep"), { maxTurns: 40, maxBudgetUsd: config.jobBudgetUsd }, "depth only applies to research");
-  for (const kind of JOB_KINDS) assert.ok(Number.isFinite(runLimits(kind, "deep").maxBudgetUsd), `${kind} is always capped`);
+  // Money limits are off by default (Paul's call, 13 Nov 2026); every kind is still bounded by turns.
+  for (const kind of JOB_KINDS) assert.ok(runLimits(kind, "deep").maxTurns > 0, `${kind} always has a turn limit`);
+  assert.equal(config.jobBudgetUsd, undefined, "no per-run money cap unless one is set");
 });
 
 test("a deep research job runs with the deep limits and note; a standard one without", async () => {
