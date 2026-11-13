@@ -53,6 +53,10 @@ image = (
     .run_commands(
         f"git clone https://github.com/kyutai-labs/unmute.git /opt/unmute && cd /opt/unmute && git checkout {UNMUTE_COMMIT}",
         "cd /opt/unmute && uv sync --frozen --no-dev",
+        # Load only Unmute's own voices (a few dozen files), not all 900 in kyutai/tts-voices: fetching
+        # every one at start-up got the container rate-limited by Hugging Face and the TTS never started.
+        "sed -i 's#hf-snapshot://kyutai/tts-voices/[*][*]/[*].safetensors#hf-snapshot://kyutai/tts-voices/unmute-prod-website/**/*.safetensors#' /opt/unmute/services/moshi-server/configs/tts.toml",
+        "grep -q 'tts-voices/unmute-prod-website/' /opt/unmute/services/moshi-server/configs/tts.toml",
     )
     # The gateway runs in the image's own Python.
     .pip_install("fastapi==0.162.5", "websockets==17.4", "sphn==0.2.1", "numpy==2.5.3", "httpx==0.28.1")
