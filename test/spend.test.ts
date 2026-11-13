@@ -51,11 +51,11 @@ test("/spend shows today's total, cap, what is left, breakdown and top 3, withou
   await orch.handle(FOUNDER, "/spend", { replyTo: FOUNDER });
   const out = sent.join("\n");
   assert.equal(calls(), 0, "no model call");
-  assert.match(out, /\$10\.00 on jobs, cap \$10\.00, \$0\.00 left, cap is blocking new jobs/);
-  assert.match(out, /By kind: engineer \$6\.00, research \$4\.00/);
-  assert.match(out, new RegExp(`Top: Big build \\(${big.id}\\) \\$6\\.00, Research one`));
+  assert.match(out, /\$10\.00 spent today \(our estimate: .*\), cap \$10\.00, \$0\.00 left, cap is blocking new jobs/);
+  assert.match(out, /By kind \(estimated\): engineer \$6\.00, research \$4\.00/);
+  assert.match(out, new RegExp(`Top \\(estimated\\): Big build \\(${big.id}\\) \\$6\\.00, Research one`));
   assert.ok(!out.includes("Research three"), "only the top three");
-  assert.match(out, /Known gap: .*chat/);
+  assert.match(out, /Known gaps: .*chat/);
   assert.ok(!out.includes("—"), "no em dashes");
 });
 
@@ -67,7 +67,10 @@ test("/spend yesterday and /spend YYYY-MM-DD use that London day; bad dates are 
   add("research", "Today research", 1, now);
   const day = londonYmd(ago);
   await orch.handle(FOUNDER, `/spend ${day}`, { replyTo: FOUNDER });
-  assert.match(sent.pop()!, new RegExp(`${day}\\): \\$3\\.25 on jobs, daily cap \\$10\\.00\\.\\nBy kind: research \\$3\\.25`));
+  const dayOut = sent.pop()!;
+  assert.match(dayOut, new RegExp(`${day}\\): \\$3\\.25 on jobs, daily cap \\$10\\.00\\.`));
+  assert.match(dayOut, /By kind \(estimated\): research \$3\.25/);
+  assert.match(dayOut, /OpenRouter's usage is read for today only/, "a past day says the figure is an estimate");
   await orch.handle(FOUNDER, "/spend yesterday", { replyTo: FOUNDER });
   assert.match(sent.pop()!, new RegExp(`Yesterday \\(${addDays(londonYmd(now), -1)}\\): \\$0\\.00`));
   await orch.handle(FOUNDER, "/spend 2026-02-31", { replyTo: FOUNDER });

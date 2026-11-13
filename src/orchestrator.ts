@@ -17,6 +17,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { BROWSE_KINDS } from "./web-tools.js";
+import { spendCaveat } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
 import { explainCloneFailure, repoRegistry } from "./repos.js";
 import { FOLLOWUP_COMMANDS, FollowUps, parseWhen } from "./followups.js";
@@ -155,7 +156,7 @@ export class Orchestrator {
     }
     if (/^\/jobs$/i.test(trimmed)) return this.messenger.send(from, this.jobsText());
     const spend = trimmed.match(/^\/spend(?:\s+(yesterday|today|\d{4}-\d{2}-\d{2}))?$/i);
-    if (spend) return this.messenger.send(from, this.spendText(spend[1]?.toLowerCase()));
+    if (spend) return this.messenger.send(from, await this.spendText(spend[1]?.toLowerCase()));
     if (/^\/status$/i.test(trimmed)) return this.messenger.send(from, this.githubStatus ? await this.githubStatus().catch(() => "GitHub: could not check just now.") : "No GitHub check is configured.");
     if (/^\/resume$/i.test(trimmed)) return this.messenger.send(from, await this.resumeJobs());
     const retry = trimmed.match(/^\/?retry\s+((?:[a-f0-9]{6}[\s,]*)+)$/i);
@@ -469,27 +470,35 @@ export class Orchestrator {
   }
 
   /** /spend [yesterday|YYYY-MM-DD]: spend on jobs for a London day. No model call. */
-  private spendText(arg?: string): string {
+  private async spendText(arg?: string): Promise<string> {
     const today = londonYmd(new Date());
     const day = !arg || arg === "today" ? today : arg === "yesterday" ? addDays(today, -1) : arg;
     if (Number.isNaN(Date.parse(`${day}T00:00:00Z`)) || new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) !== day) return "That is not a date. Use /spend, /spend yesterday or /spend YYYY-MM-DD.";
+    // One cached read of the provider's own usage (at most a call a minute), so today's figure is the bill.
+    await this.jobs.refreshSpend();
     const { total, jobs } = this.jobs.spendOn(day);
     const cap = config.dailyBudgetUsd;
     const usd = (n: number) => `$${n.toFixed(2)}`;
-    let first = `${day === today ? "Today" : day === addDays(today, -1) ? "Yesterday" : day} (${day}): ${usd(total)} on jobs`;
+    const label = day === today ? "Today" : day === addDays(today, -1) ? "Yesterday" : day;
+    const lines: string[] = [];
     if (day === today) {
+      const spend = this.jobs.spendState();
+      const caveat = spendCaveat(spend);
       const lifted = this.store.capDays().liftedOn === today;
-      first += `, cap ${usd(cap)}, ${usd(Math.max(0, cap - total))} left, ${this.jobs.capReached() ? "cap is blocking new jobs" : lifted && total >= cap ? "cap lifted for today, not blocking" : "not blocking jobs"}.`;
-    } else first += `, daily cap ${usd(cap)}.`;
-    const lines = [first];
+      const state = this.jobs.capReached() ? "cap is blocking new jobs" : lifted && spend.usd >= cap ? "cap lifted for today, not blocking" : "not blocking jobs";
+      lines.push(`${label} (${day}): ${usd(spend.usd)} spent today${caveat ? ` (our estimate: ${caveat})` : " (OpenRouter's own figure)"}, cap ${usd(cap)}, ${usd(Math.max(0, cap - spend.usd))} left, ${state}.`);
+      if (spend.source === "provider") lines.push(`The Agent SDK's estimate for today's jobs is ${usd(total)}: its price table, rounded up, so not the bill.`);
+    } else {
+      lines.push(`${label} (${day}): ${usd(total)} on jobs, daily cap ${usd(cap)}. OpenRouter's usage is read for today only, so a past day is the Agent SDK's estimate.`);
+    }
     if (jobs.length) {
       const by = new Map<string, number>();
       for (const j of jobs) by.set(j.kind, (by.get(j.kind) ?? 0) + (j.costUsd ?? 0));
-      lines.push("By kind: " + [...by].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k} ${usd(c)}`).join(", ") + ".");
+      lines.push("By kind (estimated): " + [...by].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k} ${usd(c)}`).join(", ") + ".");
       const top = [...jobs].sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0)).slice(0, 3);
-      lines.push("Top: " + top.map((j) => `${jobTitle(j)} (${j.id}) ${usd(j.costUsd ?? 0)}`).join(", ") + ".");
+      lines.push("Top (estimated): " + top.map((j) => `${jobTitle(j)} (${j.id}) ${usd(j.costUsd ?? 0)}`).join(", ") + ".");
     } else lines.push("No jobs with a recorded cost finished that day.");
-    lines.push("Known gap: the chief's own chat replies are not recorded, so they are not counted.");
+    lines.push("Known gaps: the chief's own chat replies are not in the estimate (on OpenRouter they are in the provider's figure), and the executive assistant runs on Anthropic, so it is in neither.");
     return lines.join("\n");
   }
 
