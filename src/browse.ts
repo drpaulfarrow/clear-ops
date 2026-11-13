@@ -120,6 +120,14 @@ const FILL_JS = `function (fills, submit) {
   for (var i = 0; i < fills.length; i++) {
     var el = document.querySelector('[data-clearops-field="' + fills[i].index + '"]');
     if (!el) continue;
+    // A consent box the plan Paul approved named with a plain yes (src/signup.ts refuses any other
+    // value). Nothing else on the page is ever ticked.
+    if (el.type === "checkbox" || el.type === "radio") {
+      el.checked = true;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      continue;
+    }
     var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : (el.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
     var desc = Object.getOwnPropertyDescriptor(proto, "value");
     if (desc && desc.set) desc.set.call(el, fills[i].value); else el.value = fills[i].value;
@@ -196,6 +204,12 @@ export interface BrowseDeps {
   purchasing?: boolean;
   /** Where the page may do more than read (src/site-policy.ts). Default: nowhere. */
   policy?: { mayAct(host: string): boolean };
+  /**
+   * Load Paul's saved cookies for this one domain only, instead of every site in the vault. The sign-up
+   * browser sets it (src/index.ts): a session that may act on one site has no business carrying his
+   * cookies for the others.
+   */
+  cookiesFor?: string;
   /** Paul's logins (src/vault.ts). Default: none. */
   vault?: {
     entryFor(host: string): VaultEntry | undefined;
@@ -303,8 +317,10 @@ export class BrowseSession {
     const { browser, stop } = await (this.deps.launch ?? launchChromium)(this.egress.url);
     this.stopBrowser = stop;
     this.context = await browser.newContext({ acceptDownloads: false, javaScriptEnabled: true, serviceWorkers: "block" });
-    // Sessions saved after earlier sign-ins, each limited to its own site's cookies.
-    const cookies = this.deps.vault?.savedCookies() ?? [];
+    // Sessions saved after earlier sign-ins, each limited to its own site's cookies, and to the one
+    // domain this session is for when it names one.
+    const only = this.deps.cookiesFor;
+    const cookies = (this.deps.vault?.savedCookies() ?? []).filter((c) => !only || hostMatches(String(c.domain ?? "").replace(/^\./, ""), only));
     if (cookies.length) await this.context.addCookies(cookies as unknown as Parameters<BrowserContext["addCookies"]>[0]).catch(() => undefined);
     await this.context.route("**/*", (route) => {
       const req = route.request();
