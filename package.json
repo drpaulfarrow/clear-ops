@@ -14,6 +14,7 @@
     "test": "node --import tsx --test test/*.test.ts",
     "test:changed": "node --import tsx scripts/test-changed.ts",
     "eval": "node --env-file-if-exists=.env --import tsx scripts/eval.ts",
+    "eval:chief": "node --env-file-if-exists=.env --import tsx scripts/eval-chief.ts",
     "simulate": "node --env-file-if-exists=.env --import tsx scripts/simulate.ts"
   },
   "dependencies": {

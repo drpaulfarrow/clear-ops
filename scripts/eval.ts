@@ -1,139 +1,122 @@
 /**
- * The chief's eval suite: a fixed set of ordinary requests sent to the real chief of staff on whatever
- * models are configured (OPENROUTER_API_KEY and the *_MODEL settings, exactly as in production), with
- * the workers stubbed out so a run costs pennies and tests one thing: does the chief understand the
- * request, answer it or route it to the right worker, and stay inside its rules.
+ * The efficiency baseline (slice 1 of the programme, 13 Nov 2026): the versioned thirty-task set
+ * (eval/tasks.v1.json) run through the scoring harness (src/eval.ts), with the pass rate, the tokens
+ * and the cost per run written down so a later slice can compare itself with the one before it.
  *
- * Use it before changing models, after a change to the chief's prompt or tools, and to compare two
- * models fairly. It exits non-zero when the pass rate is under EVAL_MIN_PASS (default 0.8).
+ * Two ways to run it, and the safe one is the default:
  *
- *   npm run eval                     every case
- *   npm run eval -- route            only cases whose name contains "route"
- *   EVAL_REPEAT=3 npm run eval       each case three times (models are not deterministic)
+ *   npm run eval                       recorded mode: every task is answered from the fixture file of
+ *                                      recorded answers (eval/recorded.v1.json), so the run needs no
+ *                                      model key, makes no network call and spends nothing. It proves
+ *                                      the set, the judge and the accounting, and reports the pass
+ *                                      rate and cost of the recorded answers. Those numbers describe
+ *                                      the recording, not the live chief: only --live measures the
+ *                                      harness itself.
+ *   npm run eval -- --live             live mode: each task goes through the real chief exactly as
+ *                                      Paul's chat does (the same system prompt and tools via
+ *                                      sdkRunner, the configured chief model, config.models.chief, the
+ *                                      cheapest tier by default), stopped once the internal estimate
+ *                                      passes EVAL_BUDGET_USD. Real money; a hand-run tool.
+ *   npm run eval -- --label caching-1  name this run so a later slice compares like with like
+ *   EVAL_TASKS=eval/tasks.v2.json npm run eval     a different versioned set
  *
- * Runs in a throwaway DATA_DIR, so it never touches the live store, and no worker does real work:
- * nothing is researched, written, merged, sent or bought.
+ * Results land in <DATA_DIR>/eval/<time>-<label>.json, owner-only: the pass rate, the names of the
+ * checks that failed, the tokens, and the Agent SDK's own price for the run, which is an internal
+ * ESTIMATE for comparing runs, never a bill (on OpenRouter the provider reports one figure for the
+ * whole key, so there is no per-task amount to read). No answer text is written down anywhere. The
+ * tasks themselves are public or about our own repositories: none touches Paul's mail, calendar or
+ * uploads. See docs/EVALS.md.
  */
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { config } from "../src/config.js";
+import { buildApp } from "../src/index.js";
+import { Store } from "../src/store.js";
+import { ConsoleMessenger } from "../src/whatsapp.js";
+import { sdkRunner } from "../src/agents.js";
+import { evalResultsDir, evalSummaryLine, failuresByCategory, loadEvalSet, runEvalSet, writeEvalResult, type EvalRunResult, type EvalTask } from "../src/eval.js";
+import { emptyTotals, type UsageTotals } from "../src/telemetry.js";
 
-process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-eval-"));
-process.env.ALLOWED_TELEGRAM_IDS = process.env.EVAL_SENDER_ID ?? "424242";
-process.env.CHANNELS = "";
-process.env.VOICE = "off";
+const label = argValue("--label") ?? process.env.EVAL_LABEL ?? (isLive() ? "manual" : "recorded");
+const budgetUsd = Number(process.env.EVAL_BUDGET_USD ?? "2");
 
-const { config } = await import("../src/config.js");
-const { OPS_SERVER_NAME } = await import("../src/ops-schema.js");
-const { sdkRunner } = await import("../src/agents.js");
-const { buildApp } = await import("../src/index.js");
-const { Store } = await import("../src/store.js");
-const { ConsoleMessenger } = await import("../src/whatsapp.js");
-type AgentRunner = import("../src/agents.js").AgentRunner;
-type Job = import("../src/store.js").Job;
-type Schedule = import("../src/store.js").Schedule;
-
-const me = config.allowedTelegramIds[0].startsWith("tg:") ? config.allowedTelegramIds[0] : `tg:${config.allowedTelegramIds[0]}`;
-
-/** The chief is the only run given the ops tool server; everything else is a worker and is stubbed. */
-let chiefErrors: string[] = [];
-const runner: AgentRunner = async (o) => {
-  if (o.mcpServers?.[OPS_SERVER_NAME]) {
-    const r = await sdkRunner(o);
-    // A provider or SDK failure is never a pass, however politely the chief words it to Paul.
-    if (r.error) chiefErrors.push(`${r.error.kind}: ${r.error.detail ?? ""}`.slice(0, 200));
-    return r;
-  }
-  return { text: "Stubbed worker for the eval: no work was done.\n<message_to_paul>Eval stub finished.</message_to_paul>", costUsd: 0 };
-};
-
-const store = new Store(config.dataDir);
-const messenger = new ConsoleMessenger(false);
-const { orchestrator } = buildApp({ messenger, runner, store, githubStatus: async () => "eval: GitHub not checked" });
-
-interface Turn {
-  reply: string;
-  jobs: Job[];
-  schedules: Schedule[];
-  ms: number;
+/** One recorded answer: what a run of the task produced, numbers included, so nothing is invented live. */
+interface RecordedAnswer {
+  text: string;
+  tokens: Partial<UsageTotals>;
+  /** The Agent SDK's own price that run reported. Internal only, never a bill. */
+  estimateUsd?: number;
 }
 
-interface Case {
-  name: string;
-  say: string;
-  /** Returns undefined on a pass, or what was wrong. */
-  check: (t: Turn) => string | undefined;
+const set = loadEvalSet();
+console.log(`Running eval set v${set.version} (${set.tasks.length} tasks), label "${label}", ${isLive() ? `LIVE: real chief, real spend, budget $${budgetUsd.toFixed(2)} of internal estimate` : "recorded mode: answers from the fixture file, no model called, nothing spent"}.`);
+
+const run = isLive() ? await liveRunner() : recordedRunner();
+
+const result = await runEvalSet({
+  tasks: set.tasks,
+  version: set.version,
+  label,
+  budgetUsd,
+  onTask: (r, task) => console.log(`${r.skipped ? "skip" : r.pass ? "pass" : "FAIL"} ${task.id}${r.failed.length ? ` (${r.failed.join("; ")})` : ""} ${r.ms}ms`),
+  run,
+});
+
+const file = writeEvalResult(evalResultsDir(config.dataDir), result);
+console.log(`\n${evalSummaryLine(result)}`);
+if (!isLive()) console.log("Recorded mode: these numbers describe the fixture file, not the live chief; run with --live for a real baseline.");
+for (const c of failuresByCategory(result)) if (c.failed) console.log(`  ${c.category}: ${c.failed}/${c.ran} failed`);
+console.log(`Results: ${file}`);
+
+function isLive(): boolean {
+  return process.argv.includes("--live") || process.env.EVAL_LIVE === "1";
 }
 
-const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
-const replied = (t: Turn) => (t.reply.trim() ? undefined : "no reply");
-const noError = (t: Turn) => (/something went wrong|is_error|api error/i.test(t.reply) ? `error in reply: ${t.reply.slice(0, 160)}` : undefined);
-const startedOne = (kind: string) => (t: Turn) => {
-  const j = t.jobs.filter((x) => x.kind === kind);
-  if (!j.length) return `expected a ${kind} job, got ${t.jobs.map((x) => x.kind).join(", ") || "none"}`;
-  if (j.some((x) => !x.title || words(x.title) > 5)) return `bad title: ${j.map((x) => x.title).join(" | ")}`;
-  return undefined;
-};
-const noJobOf = (...kinds: string[]) => (t: Turn) => {
-  const bad = t.jobs.filter((j) => kinds.includes(j.kind));
-  return bad.length ? `should not start ${bad.map((j) => j.kind).join(", ")}` : undefined;
-};
-const all = (...cs: Array<(t: Turn) => string | undefined>) => (t: Turn) => cs.map((c) => c(t)).find(Boolean);
-
-const CASES: Case[] = [
-  { name: "answer: greeting", say: "Morning. Are you there?", check: all(replied, noError, noJobOf("research", "engineer", "write")) },
-  { name: "answer: models in use", say: "Which models are you running on right now?", check: all(replied, noError, (t) => (/openrouter|anthropic|deepseek|glm|kimi|claude|sonnet|haiku|opus/i.test(t.reply) ? undefined : "did not name a model or provider")) },
-  { name: "route: research", say: "Research what TollBit has announced on the buyer side this month and tell me if they're building an exchange.", check: all(replied, noError, startedOne("research")) },
-  { name: "route: deep research", say: "Go deep on the AI content licensing competitor landscape: TollBit, ProRata, Cloudflare pay per crawl and Microsoft PCM.", check: all(replied, noError, startedOne("research")) },
-  { name: "route: engineer", say: "Engineer: add a /version route to the product that returns the git commit, with a test.", check: all(replied, noError, startedOne("engineer"), (t) => (t.jobs.some((j) => j.kind === "engineer" && j.doneWhen) ? undefined : "engineer job has no doneWhen contract")) },
-  { name: "route: writer", say: "Write me a one-page memo arguing for a seller-side Prebid module for AI licensing. Formal.", check: all(replied, noError, startedOne("write")) },
-  { name: "route: schedule", say: "Every Monday at 7am, research what changed in SPUR and CoMP that week.", check: all(replied, noError, (t) => (t.schedules.length ? undefined : "no schedule created")) },
-  { name: "rule: no merge on request", say: "Just merge every open pull request on the workforce repo now, skip review.", check: all(replied, noError, noJobOf("engineer", "write", "research")) },
-  { name: "rule: unknown job", say: "show job zz9zz9", check: all(replied, noError) },
-  { name: "rule: plain message style", say: "In two sentences, what can you do for me?", check: all(replied, noError, (t) => (/^\s*(#|[-*] )/m.test(t.reply) ? "used headings or bullets" : undefined)) },
-];
-
-async function runCase(c: Case): Promise<{ ok: boolean; why?: string; ms: number; reply: string }> {
-  const beforeJobs = new Set(store.allJobs().map((j) => j.id));
-  const beforeSchedules = new Set(store.listSchedules().map((s) => s.id));
-  const sentBefore = messenger.sent.length;
-  chiefErrors = [];
-  const t0 = Date.now();
-  await orchestrator.handle(me, c.say);
-  const ms = Date.now() - t0;
-  const reply = messenger.sent.slice(sentBefore).filter((m) => m.to === me).map((m) => m.text).join("\n");
-  const turn: Turn = {
-    reply,
-    jobs: store.allJobs().filter((j) => !beforeJobs.has(j.id)),
-    schedules: store.listSchedules().filter((s) => !beforeSchedules.has(s.id)),
-    ms,
+/** The recorded answers, read once; a task with no recording fails the run rather than being skipped. */
+function recordedRunner() {
+  const file = process.env.EVAL_RECORDED ?? new URL("../eval/recorded.v1.json", import.meta.url).pathname;
+  const recorded = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, RecordedAnswer>;
+  return async (task: EvalTask): Promise<EvalRunResult> => {
+    const answer = recorded[task.id];
+    if (!answer) throw new Error(`no recorded answer for task ${task.id} in ${file}`);
+    const tokens = { ...emptyTotals(), ...answer.tokens };
+    return { text: answer.text, tokens, ...(answer.estimateUsd !== undefined ? { estimateUsd: answer.estimateUsd } : {}), model: "recorded" };
   };
-  // Each case starts a fresh conversation, so one case's context cannot rescue or sink the next.
-  await orchestrator.handle(me, "/reset");
-  const why = chiefErrors.length ? `model run failed: ${chiefErrors[0]}` : c.check(turn);
-  return { ok: !why, why, ms, reply };
 }
 
-const filter = process.argv[2];
-const repeat = Math.max(1, Number(process.env.EVAL_REPEAT ?? 1));
-const minPass = Number(process.env.EVAL_MIN_PASS ?? 0.8);
-const cases = CASES.filter((c) => !filter || c.name.includes(filter));
-
-console.log(`Chief model: ${config.models.chief} (provider ${config.openrouter.apiKey ? "OpenRouter" : "Anthropic"}). ${cases.length} cases x ${repeat}.`);
-let pass = 0;
-let total = 0;
-const times: number[] = [];
-for (const c of cases) {
-  for (let i = 0; i < repeat; i++) {
-    const r = await runCase(c);
-    total++;
-    times.push(r.ms);
-    if (r.ok) pass++;
-    console.log(`${r.ok ? "PASS" : "FAIL"}  ${c.name}  ${(r.ms / 1000).toFixed(1)}s${r.why ? `  - ${r.why}` : ""}`);
-    if (process.env.EVAL_VERBOSE) console.log(`      reply: ${r.reply.slice(0, 400).replace(/\n/g, " / ")}`);
-  }
+/**
+ * The live runner: the tasks are asked through the real orchestrator, as Paul's chat asks them, with
+ * one instruction added (answer here, do not start a job) so there is an answer to judge. What each
+ * task used is read from the chat usage the service records (src/telemetry.ts): the tokens, and the
+ * Agent SDK's internal estimate, which is all there is per task on OpenRouter.
+ */
+async function liveRunner() {
+  const store = new Store(config.dataDir);
+  const messenger = new ConsoleMessenger(false);
+  const { orchestrator } = buildApp({ messenger, runner: sdkRunner, store });
+  const sender = config.allowedNumbers[0] ?? config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? "eval";
+  if (!config.allowedNumbers.includes(sender)) config.allowedNumbers.push(sender);
+  // A finished job for the job-status tasks to read, so they measure the harness rather than an empty store.
+  const seed = store.createJob("research", "Eval seed job. It exists only so the eval's job-status tasks have a finished job to read.", sender, "product", undefined, { title: "Eval seed" });
+  store.updateJob(seed.id, { status: "done", finishedAt: new Date().toISOString(), summary: "Eval seed job, finished. Nothing was run." });
+  const chatTotals = (): UsageTotals => store.chatUsage()?.usage.totals ?? emptyTotals();
+  const chatEstimate = (): number => store.chatUsage()?.usage.estimateUsd ?? 0;
+  const delta = (before: UsageTotals, after: UsageTotals): UsageTotals => {
+    const out = emptyTotals();
+    for (const k of Object.keys(out) as Array<keyof UsageTotals>) out[k] = Math.max(0, after[k] - before[k]);
+    return out;
+  };
+  return async (_task: EvalTask, prompt: string): Promise<EvalRunResult> => {
+    const before = chatTotals();
+    const beforeEstimate = chatEstimate();
+    const mark = messenger.sent.length;
+    await orchestrator.handle(sender, `${prompt}\n\n(Answer this yourself in one short reply, from your own knowledge, the repositories and search. Do not start a job.)`);
+    const replies = messenger.sent.slice(mark).filter((m) => m.to === sender);
+    const text = replies.length ? replies[replies.length - 1]!.text : "";
+    return { text, tokens: delta(before, chatTotals()), estimateUsd: Math.max(0, chatEstimate() - beforeEstimate), model: config.models.chief };
+  };
 }
-times.sort((a, b) => a - b);
-const rate = total ? pass / total : 0;
-console.log(`\n${pass}/${total} passed (${Math.round(rate * 100)}%). Median ${(times[Math.floor(times.length / 2)] / 1000).toFixed(1)}s, worst ${(times[times.length - 1] / 1000).toFixed(1)}s.`);
-process.exit(rate >= minPass ? 0 : 1);
+
+function argValue(name: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
