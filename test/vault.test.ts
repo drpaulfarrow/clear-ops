@@ -198,7 +198,8 @@ test(
         if (req.method === "POST" && req.url === "/verify") {
           got.push({ path: req.url, body });
           res.setHeader("set-cookie", "sid=abc; Path=/");
-          return res.end(`<title>Account</title><p>Welcome back</p>`);
+          // This page echoes the code back at the worker, as some sites do.
+          return res.end(`<title>Account</title><p>Welcome back. Your code 112233 was accepted.</p>`);
         }
         res.end(`<title>Login</title><form action="/login" method="post"><input name="email" type="email" placeholder="Email"><input name="password" type="password" placeholder="Password"><button>Sign in</button></form>`);
       });
@@ -225,6 +226,7 @@ test(
       assert.equal(asks[0]!.domain, "127.0.0.1");
       assert.match(got.find((g) => g.path === "/verify")!.body, /otp=112233/, "the service typed the relay's code");
       assert.ok(!after.includes("112233"), "the code never reaches the worker's view");
+      assert.match(after, /Your code \*{6} was accepted/, "a page that echoes the code back is masked out of what the worker reads");
       assert.deepEqual(saved, ["127.0.0.1"], "the signed-in session is saved for later jobs");
     } finally {
       await session.close();
@@ -335,7 +337,7 @@ test(
 );
 
 test(
-  "a purchase job whose sign-in needs a code waits for the relay, then the order still goes through the purchase gate",
+  "a purchase job whose sign-in needs a code waits for the relay, then carries on to the checkout review",
   { skip: (!chrome && "no Chromium here") || (noDesigner && "running as root with no designer user") },
   async () => {
     config.design.chromiumPath = chrome!;
@@ -398,20 +400,16 @@ test(
       const signed = await signingIn;
       assert.match(signed, /Welcome back/, "the sign-in carries on once the code is in");
       assert.ok(!signed.includes("112233") && !asks.join(" ").includes("112233"), "the code is nowhere the worker or chat can see");
-      // On to the basket and the checkout review, as the job would: the purchase flow is unchanged.
+      // On to the basket and the checkout review, as the job would: the relay-mediated sign-in leads
+      // straight into the purchase path, which is otherwise unchanged. This checkout is the test's own
+      // plain-http loopback page and the gate's own rule is that a checkout must be https, so the gate
+      // stops there and presses nothing (the approve-and-press path is covered by test/purchase.test.ts).
       const basket = await session.open(`${base}/basket`);
       const place = Number(basket.match(/\[(\d+)\] button: Place your order/)![1]);
       const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-otp-buy-")));
-      const sent: string[] = [];
-      const gate = new PurchaseGate(store, { summary: () => undefined, forApprovedPurchase: () => undefined }, { send: async (_to: string, t: string) => void sent.push(t) }, { ttlMs: 3_000 });
-      const waiting = gate.prepareAndWait(session, place, { jobId: "job1", replyTo: PAUL });
-      const approval = await waitFor(() => sent[0]);
-      const buyId = approval!.match(/\(([a-f0-9]{6}),/)?.[1];
-      assert.ok(buyId, `expected the approval ask: ${approval}`);
+      const gate = new PurchaseGate(store, { summary: () => undefined, forApprovedPurchase: () => undefined }, { send: async () => undefined }, { ttlMs: 3_000 });
+      await assert.rejects(() => gate.prepareAndWait(session, place, { jobId: "job1", replyTo: PAUL }), /not on an https page/, "the gate still applies its own rule to the checkout the job reached");
       assert.deepEqual(posted, [], "nothing is pressed before Paul decides the order");
-      gate.decide(buyId!, "approve", PAUL);
-      assert.match(await waiting, /Order placed/, "the approved order goes through");
-      assert.deepEqual(posted, ["/order"], "the button is pressed once, after his own approval");
     } finally {
       await session.close();
       server.close();

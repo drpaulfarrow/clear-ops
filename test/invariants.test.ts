@@ -838,6 +838,8 @@ test("a one-time code is handled ONLY by the service relay: never a model, never
   assert.match(pressButton, /hostMatches\(new URL\(page\.url\(\)\)\.hostname, domain\)/, "the code page's own button is pressed only on the login's own site");
   assert.match(pressButton, /CONSEQUENTIAL\.test\(words\)[\s\S]{0,140}continue;/, "only a verifying or continuing button is pressed, never a consequential one");
   assert.match(browse, /await this\.clearCodeFields\(otpSel\);/, "the code is wiped out of the page after it is entered");
+  assert.match(browse, /return this\.enteredCode \? seen\.replaceAll\(this\.enteredCode, "\*"\.repeat\(this\.enteredCode\.length\)\) : seen;/, "a page that echoes the code back cannot put it in front of a model");
+  assert.match(browse, /this\.page = undefined;\s*this\.enteredCode = undefined;/, "the code does not outlive the job's browser");
   const browseToolLine = browse.split("\n").find((l) => l.includes("export const BROWSE_TOOLS")) ?? "";
   assert.doesNotMatch(browseToolLine, /otp|code/i, "a worker has no tool for a code");
   // Every browsing job is told, in its prompt, that the service handles codes and a code approves nothing else.
