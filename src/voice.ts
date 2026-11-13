@@ -259,6 +259,9 @@ export class VoiceBrain {
 
     const first = await this.complete(messages, true, write, signal);
     if (!first.toolCall) return;
+    // Say something now: Unmute speaks a word only once the next whitespace arrives, so end with a space,
+    // and never leave Paul in silence while ClearOps works.
+    write(first.text.trim() ? " " : "One moment. ");
     let request = "";
     try {
       request = String(JSON.parse(first.toolCall.function.arguments || "{}").request ?? "").trim();
@@ -275,8 +278,10 @@ export class VoiceBrain {
     const wait = this.deps.answerWaitMs ?? config.voice.answerWaitSeconds * 1000;
     const answer = this.deps.tap.next(session.address, wait);
     void this.deps.ask(session.sender, session.address, voiceRequestText(request)).catch((err) => console.warn(`voice: ask failed: ${err instanceof Error ? err.message : err}`));
+    const started = Date.now();
     const text = await answer;
-    if (text === undefined) return "ClearOps is still working on it and will post its answer in the Discord chat. Tell Paul that in one short sentence.";
+    console.log(`voice: asked ClearOps (${request.length} chars); ${text === undefined ? "no answer yet" : "answered"} after ${Math.round((Date.now() - started) / 1000)}s`);
+    if (text === undefined) return "ClearOps is still working on it. Tell Paul in one short sentence that it is on it and you will tell him as soon as it answers.";
     return `ClearOps answered (also posted in the chat): ${speakable(text)}`;
   }
 

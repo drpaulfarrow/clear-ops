@@ -122,12 +122,15 @@ export const config = {
     gatewayUrl: (process.env.VOICE_GATEWAY_URL ?? "").replace(/\/+$/, ""),
     /** The model the voice brain talks with, an alias or an OpenRouter id. Fast matters more than clever: ClearOps does the work. */
     model: process.env.VOICE_MODEL || "haiku",
-    /** Kyutai TTS voice, a path in kyutai/tts-voices. Cleo is a woman's voice (the one Unmute ships as "Gertrude"). */
-    voiceName: process.env.VOICE_NAME || "unmute-prod-website/freesound/440565_why-is-there-educationwav.mp3",
+    /**
+     * Kyutai TTS voice, a path in kyutai/tts-voices. Cleo is VCTK speaker p225, a woman from southern England.
+     * Only voices the image loads can be used (voice/voice.py: the default and vctk/p22x).
+     */
+    voiceName: process.env.VOICE_NAME || "vctk/p225_023.wav",
     /** Leave the channel after this many minutes with nobody speaking, so the GPU can stop. */
     idleMinutes: positive(process.env.VOICE_IDLE_MINUTES, 10),
     /** How long the voice brain waits for ClearOps to answer before saying it will post in chat. */
-    answerWaitSeconds: positive(process.env.VOICE_ANSWER_WAIT_SECONDS, 25),
+    answerWaitSeconds: positive(process.env.VOICE_ANSWER_WAIT_SECONDS, 12),
   },
   /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */
   browse: {

@@ -93,7 +93,7 @@ test("the brain hands work to ClearOps as a voice request and speaks the answer"
   assert.equal(asked.length, 1);
   assert.ok(asked[0].startsWith("dc:u:1|dc:c:9|Voice request from Paul"));
   assert.match(asked[0], /what jobs are running$/);
-  assert.equal(out.join(""), "One moment.Two jobs are running.");
+  assert.equal(out.join(""), "One moment. Two jobs are running.");
   const second = bodies[1].messages as Array<{ role: string; content: string }>;
   const tool = second.find((m) => m.role === "tool")!;
   assert.match(tool.content, /ClearOps answered/);
@@ -110,6 +110,7 @@ test("a slow answer is promised in chat and passed on later as news", async () =
   await brain.reply([{ role: "assistant", content: "Hi" }, { role: "user", content: "research prebid eleven" }], (t) => out.push(t));
   const tool = (bodies[1].messages as Array<{ role: string; content: string }>).find((m) => m.role === "tool")!;
   assert.match(tool.content, /still working/);
+  assert.ok(out.join("").startsWith("One moment. "), "Paul hears something straight away, with a trailing space so Unmute speaks it");
   tap.saw("dc:c:9", "Started research on Prebid 11.");
   out.length = 0;
   await brain.reply([{ role: "assistant", content: "It's on it." }, { role: "user", content: "..." }], (t) => out.push(t));
