@@ -532,8 +532,11 @@ export class BrowseSession {
       }
       if (filledPassword && (await otp.count())) {
         if (entry.totp) {
-          // The vault holds the two-factor setup key: unchanged, the service generates the code itself.
-          await otp.fill(totp(entry.totp));
+          const generated = totp(entry.totp);
+          // The vault holds the two-factor setup key: unchanged, the service makes the code itself and,
+          // exactly like a code the relay fetched, keeps it out of everything the page reads back.
+          await otp.fill(generated);
+          this.enteredCode = generated;
         } else {
           // No setup key stored. The service gets the code itself, from the site's own email or from
           // Paul's own chat, and types it in here; the session is never thrown away and no model, log,

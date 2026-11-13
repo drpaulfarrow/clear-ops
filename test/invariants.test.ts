@@ -839,6 +839,7 @@ test("a one-time code is handled ONLY by the service relay: never a model, never
   assert.match(pressButton, /CONSEQUENTIAL\.test\(words\)[\s\S]{0,140}continue;/, "only a verifying or continuing button is pressed, never a consequential one");
   assert.match(browse, /await this\.clearCodeFields\(otpSel\);/, "the code is wiped out of the page after it is entered");
   assert.match(browse, /return this\.enteredCode \? seen\.replaceAll\(this\.enteredCode, "\*"\.repeat\(this\.enteredCode\.length\)\) : seen;/, "a page that echoes the code back cannot put it in front of a model");
+  assert.match(browse, /const generated = totp\(entry\.totp\);[\s\S]{0,300}this\.enteredCode = generated;/, "a code the vault's own key generated is kept out of what the page reads back too");
   assert.match(browse, /this\.page = undefined;\s*this\.enteredCode = undefined;/, "the code does not outlive the job's browser");
   const browseToolLine = browse.split("\n").find((l) => l.includes("export const BROWSE_TOOLS")) ?? "";
   assert.doesNotMatch(browseToolLine, /otp|code/i, "a worker has no tool for a code");
