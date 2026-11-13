@@ -12,14 +12,20 @@
  * difference between the cumulative reading and the usage recorded when the day began, kept in the
  * store so a restart does not lose it.
  *
- * The SDK estimate is kept and used only as a fallback, and every message says which figure it is.
+ * The SDK estimate is internal only (Paul's call, 13 Nov 2026: "Remove the agent sdk estimate it's
+ * not helpful"). It never reaches a message: the only figure ever shown to a person is the
+ * provider's, and where that cannot be read the reply says so and shows no substitute. Internally it
+ * does two jobs: it is the stand-in the daily cap is judged on while the provider cannot be read
+ * (never as zero, always with `spendDisplay` saying there is no figure), and the Agent SDK's own
+ * per-run budget cap, which is what stops a single runaway run.
+ *
  * An Anthropic-only deployment is unchanged: there is no usage endpoint to read, and the SDK's
  * list-price cost is the figure, labelled as Anthropic's own list price rather than as an estimate,
  * because on Anthropic that is what is billed.
  *
  * The provider is asked at most once a minute (`refresh()` is cached), a reading older than
- * `SPEND_MAX_AGE_MS` is treated as stale and the estimate is used instead, and a failure, a rate
- * limit or a non-numeric reply all fall back rather than silently counting as zero.
+ * `SPEND_MAX_AGE_MS` is treated as stale, and a failure, a rate limit or a non-numeric reply all
+ * fall back to the internal stand-in rather than silently counting as zero.
  *
  * Known gap: a restart that spans midnight re-bases the day on the first reading after boot, so
  * spend between midnight and that reading is not counted. It is a soft cap: a single run is still
@@ -31,7 +37,7 @@ import { londonYmd } from "./london.js";
 
 /** At most one call to the provider a minute, however often the cap is checked. */
 export const SPEND_REFRESH_MS = 60_000;
-/** A reading older than this is stale: the estimate is used instead, and said so. */
+/** A reading older than this is stale: the internal stand-in is used instead, and nothing is shown. */
 export const SPEND_MAX_AGE_MS = 5 * 60_000;
 /** How long one usage call may take before it is abandoned. */
 export const SPEND_TIMEOUT_MS = 5_000;
@@ -39,7 +45,7 @@ export const SPEND_TIMEOUT_MS = 5_000;
 /**
  * Where a spend figure came from: OpenRouter's own account, Anthropic's own list prices (which is
  * the bill when the workforce runs on Anthropic directly), or our rounded-up price table, which is
- * an estimate and never the bill.
+ * an estimate, is never the bill, and is never shown to anyone.
  */
 export type SpendSource = "provider" | "anthropic" | "estimate";
 
@@ -51,13 +57,13 @@ export interface SpendReading {
   at: number;
 }
 
-/** Spend for one London day, with its source, so an estimate is never passed off as the bill. */
+/** Spend for one London day, with its source. `usd` is shown only when `spendDisplay` calls it a figure. */
 export interface RealSpend {
   usd: number;
   source: SpendSource;
   /** When the provider figure was read, when there is one. */
   asOf?: number;
-  /** Why this is only an estimate, when it is. */
+  /** Why there is no provider figure, when there is none. */
   note?: string;
 }
 
@@ -190,14 +196,14 @@ export class SpendMeter {
       });
       if (!res.ok) {
         this.failure = res.status === 401 || res.status === 403 ? "OpenRouter rejected the key on the usage check" : res.status === 429 ? "OpenRouter rate-limited the usage check" : `OpenRouter returned ${res.status} on the usage check`;
-        this.warn(`${this.failure}; the cap falls back to the estimate.`);
+        this.warn(`${this.failure}; the cap falls back to the internal stand-in and nothing is shown.`);
         return;
       }
       const body = (await res.json()) as { data?: { usage?: unknown } };
       const usd = Number(body?.data?.usage);
       if (!Number.isFinite(usd) || usd < 0) {
         this.failure = "OpenRouter's usage reply was not a number";
-        this.warn(`${this.failure}; the cap falls back to the estimate.`);
+        this.warn(`${this.failure}; the cap falls back to the internal stand-in and nothing is shown.`);
         return;
       }
       this.failure = undefined;
@@ -207,7 +213,7 @@ export class SpendMeter {
       this.rollBaseline(previous, reading);
     } catch (err) {
       this.failure = `OpenRouter could not be read (${err instanceof Error ? err.message : String(err)})`;
-      this.warn(`${this.failure}; the cap falls back to the estimate.`);
+      this.warn(`${this.failure}; the cap falls back to the internal stand-in and nothing is shown.`);
     } finally {
       clearTimeout(timer);
     }
@@ -229,28 +235,32 @@ export class SpendMeter {
   }
 }
 
-/** A figure with its source, for chat: an estimate is never written as the bill. */
+/**
+ * How one spend figure may reach a message: the provider's own number with the words that say whose
+ * it is, or the plain fact that there is none. There is no third case, so no message can print the
+ * SDK's estimate by accident.
+ */
+export type SpendDisplay =
+  | { kind: "figure"; usd: number; label: string }
+  | { kind: "unreadable"; reason: string };
+
+/** The one way a spend figure reaches a person. An estimate becomes `unreadable`, never a number. */
+export function spendDisplay(spend: RealSpend): SpendDisplay {
+  if (spend.source === "provider") return { kind: "figure", usd: spend.usd, label: "OpenRouter's own figure" };
+  if (spend.source === "anthropic") return { kind: "figure", usd: spend.usd, label: "Anthropic's own list price" };
+  return { kind: "unreadable", reason: spend.note ?? "OpenRouter could not be read" };
+}
+
+/** A figure with its source, or that there is none: the SDK's estimate is never written as spend. */
 export function spendPhrase(spend: RealSpend): string {
   if (spend.source === "provider") return `$${spend.usd.toFixed(2)} charged by OpenRouter`;
   if (spend.source === "anthropic") return `$${spend.usd.toFixed(2)} charged by Anthropic (list price)`;
-  return `$${spend.usd.toFixed(2)} estimated`;
+  return `no spend figure (${spend.note ?? "OpenRouter could not be read"})`;
 }
 
-/** Why a figure is only an estimate, or undefined when it is a provider's own (OpenRouter or Anthropic). */
+/** Why there is no provider figure, or undefined when there is one. Internal: the reason, never a number. */
 export function spendCaveat(spend: RealSpend): string | undefined {
   return spend.source === "estimate" ? spend.note : undefined;
-}
-
-/** Which figure this is, in one clause, so no message can pass an estimate off as the bill. */
-export function spendSourceLabel(spend: RealSpend): string {
-  if (spend.source === "provider") return "OpenRouter's own figure";
-  if (spend.source === "anthropic") return "Anthropic's own list price";
-  return `our estimate: ${spend.note ?? "the Agent SDK's price table"}`;
-}
-
-/** Which figure a job's `costUsd` is, in one word, for `/spend`'s per-job lines. */
-export function jobCostWord(job: { costSource?: "provider" | "estimate" }): string {
-  return job.costSource === "provider" ? "charged" : "estimated";
 }
 
 /** The meter the service uses: the store keeps the day's starting figure so a restart keeps it. */
@@ -258,8 +268,8 @@ export function storeMeter(store: { usageStart: () => SpendBaseline | undefined;
   return new SpendMeter({ load: () => store.usageStart(), save: (b) => store.setUsageStart(b) });
 }
 
-/** One start-up log line: where the spend figure comes from. */
+/** One start-up log line: where the spend figure comes from. The SDK's estimate is internal and not shown. */
 export function spendLine(): string {
-  if (!config.openrouter.apiKey) return "Spend: the Agent SDK's cost at Anthropic's list prices (no provider usage endpoint to read).";
-  return `Spend: OpenRouter's own account usage (${OPENROUTER_BASE_URL}/v1/key, read at most once a minute); the Agent SDK's price table is the fallback and never the bill.`;
+  if (!config.openrouter.apiKey) return "Spend: the Agent SDK's cost at Anthropic's list prices (no provider usage endpoint to read). Nothing else is shown.";
+  return `Spend: OpenRouter's own account usage (${OPENROUTER_BASE_URL}/v1/key, read at most once a minute) and only that figure; the Agent SDK's estimate is internal (the per-run cap and the stand-in the daily cap falls back to) and is never shown.`;
 }

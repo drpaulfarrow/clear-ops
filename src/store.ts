@@ -102,16 +102,12 @@ export interface Job {
   outputPath?: string;
   /**
    * The Agent SDK's cost for the run, priced from the table in src/llm.ts: an ESTIMATE, not the
-   * provider's bill. The daily cap uses the provider's own usage figure instead (src/spend.ts);
-   * this stays for the per-run cap, the fallback and the per-kind breakdown.
+   * provider's bill. Internal only, never shown to anyone (Paul's call, 13 Nov 2026): it is the
+   * stand-in the daily cap is judged on while the provider cannot be read, and the record of what a
+   * run cost. The cap uses the provider's own usage figure whenever it can be read (src/spend.ts),
+   * and only a provider figure is ever displayed.
    */
   costUsd?: number;
-  /**
-   * Which figure `costUsd` is, so no display can present an estimate as the bill. Per job it is
-   * "estimate": the SDK prices each run from its own table, and the provider's usage figure is
-   * cumulative for the account, so it is not attributed to a single job (src/spend.ts).
-   */
-  costSource?: "provider" | "estimate";
   error?: string;
   /**
    * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,
@@ -364,6 +360,11 @@ export interface Settings {
   githubProblemTold?: string;
   /** When the one-off copy of existing job outputs to the outputs repository finished. */
   outputsBackfilled?: string;
+  /**
+   * The jobs board's long-lived token (src/jobs-board.ts), minted by the service on first use and
+   * printed in chat by /board. Only a read-only page of job metadata is behind it, never a secret.
+   */
+  jobsBoardToken?: string;
 }
 
 interface State {

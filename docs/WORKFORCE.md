@@ -29,11 +29,11 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 - Ask for a new repository in chat ("create a repo called X", add "public" if you want it public). It is created under drpaulfarrow, private by default, with a README, and can be worked on straight away. Workers never delete repositories or change their settings, and never create one unless you asked.
 - Anything outside the engineer's normal remit waits for `YES <id>`, `send <id>`, `cancel <id>` or `buy <id>` (an email, invitation or cancellation the assistant prepared, or an order a job prepared; you see its exact text, or the shop, the items, the total and a picture, first). An email, invitation or cancellation expires after 24 hours (`OUTBOUND_TTL_HOURS`) and an order after 20 minutes (`PURCHASE_WAIT_MINUTES`). Deploys of the product happen through GitHub Actions, not from the workforce.
 - Buying works the same way: a job fills the basket and stops at the checkout page, pressing nothing, and nothing is bought until you approve that exact order with `buy <id>` or on the one-time approval page; there is no spending limit, and the README's "Buying things" section has the rest.
-- Daily spend is capped (`DAILY_BUDGET_USD`, default 20); `/spend` shows today's, `/resume` lifts a cap or a credit hold.
+- Daily spend is capped (`DAILY_BUDGET_USD`, default 20); `/spend` shows one figure, OpenRouter's own, and says so plainly if it cannot be read; `/resume` lifts a cap or a credit hold.
 
 ## Commands
 
-`/jobs` `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared) and `buy cancel <id>`. Each approval command is for one item, you send it yourself, and it expires.
+`/jobs` `/board` (a link to the read-only jobs board page) `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared) and `buy cancel <id>`. Each approval command is for one item, you send it yourself, and it expires.
 
 ## Things only you do
 

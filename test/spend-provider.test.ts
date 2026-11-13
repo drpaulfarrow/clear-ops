@@ -1,7 +1,9 @@
 /**
  * The daily cap counts what the provider actually charges: OpenRouter's own usage figure where it can
- * be read, the Agent SDK's estimate only as a fallback, and never an unread figure as zero. The
- * provider is stubbed throughout; no test here touches the network.
+ * be read, the Agent SDK's estimate only as an internal fallback, and never an unread figure as zero.
+ * The estimate is never shown to anyone, whatever the state of the provider: where the figure cannot
+ * be read the message says so and shows no substitute. The provider is stubbed throughout; no test
+ * here touches the network.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,7 +21,7 @@ const { JobRunner } = await import("../src/jobs.js");
 const { Orchestrator } = await import("../src/orchestrator.js");
 const { Scheduler } = await import("../src/scheduler.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
-const { SpendMeter, spendCaveat, spendPhrase, spendSourceLabel } = await import("../src/spend.js");
+const { SpendMeter, spendCaveat, spendDisplay, spendPhrase } = await import("../src/spend.js");
 const { londonYmd } = await import("../src/london.js");
 import type { AgentRunner } from "../src/agents.js";
 
@@ -114,9 +116,11 @@ test("the cap counts OpenRouter's own usage for the day, not the SDK's rounded-u
   await h.orch.handle(FOUNDER, "/spend", { replyTo: FOUNDER });
   const out = h.sent.at(-1)!;
   assert.match(out, /Today \(\d{4}-\d{2}-\d{2}\): \$1\.66 spent today \(OpenRouter's own figure\), cap \$10\.00, \$8\.34 left, not blocking jobs\./);
-  assert.match(out, /The Agent SDK's estimate for today's jobs is \$20\.00: its price table, rounded up, so not the bill\./);
-  assert.match(out, /By kind \(estimated\): research \$20\.00\./);
-  assert.match(out, /Top: Costly research \(\w+\) \$20\.00 estimated/);
+  assert.match(out, /No split by job: OpenRouter reports one figure for the whole key, so there are no per-job amounts\./);
+  // The $20 the SDK priced the job at is nowhere in the reply: the only figure is the provider's.
+  assert.ok(!out.includes("20.00"), "the SDK's estimate is not shown");
+  assert.ok(!/estimat/i.test(out), "nothing is labelled an estimate");
+  assert.ok(!/By kind|Top:/.test(out), "no per-kind or per-job lines on a provider figure");
 });
 
 test("a job whose turn comes is confirmed against the provider, so a stale estimate cannot hold the queue", async () => {
@@ -134,22 +138,55 @@ test("a job whose turn comes is confirmed against the provider, so a stale estim
   assert.equal(h.sent.filter((t) => /daily spend cap/.test(t)).length, 0, "no false 'cap is hit' message on the queue path");
 });
 
-test("with the provider unreachable the estimate is used, said to be an estimate, and the cap still blocks", async () => {
+test("with the provider unreachable the internal stand-in holds the cap, and no figure is shown", async () => {
   const h = harness({ usage: [new Error("getaddrinfo ENOTFOUND openrouter.ai")] });
   h.estimated(12);
   await h.jobs.refreshSpend();
   const spend = h.jobs.spendState();
   assert.equal(spend.source, "estimate");
-  assert.equal(spend.usd, 12);
+  assert.equal(spend.usd, 12, "internally the stand-in is still 12");
   assert.match(spendCaveat(spend)!, /OpenRouter could not be read/);
   assert.equal(h.jobs.capReached(), true, "an unknown provider figure is never treated as zero");
+  // The one way a figure reaches a message reports that there is none, not the stand-in.
+  assert.equal(spendDisplay(spend).kind, "unreadable");
+  assert.ok(!spendPhrase(spend).includes("12"), "spendPhrase carries no number for an unread figure");
 
   h.jobs.start("research", "R1", FOUNDER);
   await waitFor(() => h.sent.some((t) => /daily spend cap/.test(t)));
   const notice = h.sent.find((t) => /daily spend cap/.test(t))!;
-  assert.match(notice, /\$10 is hit: \$12\.00 spent today \(our estimate: OpenRouter could not be read/);
+  assert.match(notice, /The daily spend cap of \$10\.00 is holding new jobs, starting with/);
+  assert.match(notice, /OpenRouter's usage could not be read just now \(OpenRouter could not be read/);
+  assert.match(notice, /judged on an internal stand-in figure/);
   assert.match(notice, /\/resume/);
-  assert.deepEqual(h.started, [], "nothing started while the estimated spend is past the cap");
+  assert.ok(!notice.includes("12.00"), "the cap notice does not print the estimate");
+  assert.ok(!/estimat/i.test(notice), "and does not call it an estimate");
+  assert.deepEqual(h.started, [], "nothing started while the stand-in is past the cap");
+
+  // /spend shows no substitute figure either, and says plainly that there is none.
+  await h.orch.handle(FOUNDER, "/spend", { replyTo: FOUNDER });
+  const out = h.sent.at(-1)!;
+  assert.match(out, /Today \(\d{4}-\d{2}-\d{2}\): OpenRouter's usage could not be read just now \(OpenRouter could not be read/);
+  assert.match(out, /so there is no spend figure to show\. Cap \$10\.00\./);
+  assert.match(out, /New jobs are waiting on that cap/);
+  assert.ok(!out.includes("12.00"), "no substituted figure");
+  assert.ok(!/estimat/i.test(out), "nothing is labelled an estimate");
+});
+
+test("past the cap on the provider's own figure, the notice names it and nothing else", async () => {
+  // 100.00 at the start of the day, 112.00 now: OpenRouter says 12.00 was charged, past the $10 cap.
+  const h = harness({ usage: [100, 112] });
+  h.estimated(30); // the SDK priced the day at 30; it is never shown
+  await h.jobs.refreshSpend();
+  h.clock.t += 2 * MINUTE;
+  await h.jobs.refreshSpend();
+  assert.equal(h.jobs.spendState().usd, 12);
+
+  h.jobs.start("research", "R1", FOUNDER);
+  await waitFor(() => h.sent.some((t) => /daily spend cap/.test(t)));
+  const notice = h.sent.find((t) => /daily spend cap/.test(t))!;
+  assert.match(notice, /The daily spend cap of \$10\.00 is hit: \$12\.00 spent today \(OpenRouter's own figure\), so new jobs are waiting, starting with/);
+  assert.ok(!notice.includes("30.00"), "the SDK's estimate is not shown next to it");
+  assert.ok(!/estimat/i.test(notice), "nothing is labelled an estimate");
 });
 
 test("a rate limit falls back the same way, and the provider is not hammered", async () => {
@@ -164,7 +201,7 @@ test("a rate limit falls back the same way, and the provider is not hammered", a
   assert.equal(h.calls.length, 2, "a minute later it may ask again");
 });
 
-test("a reading that has gone stale is not trusted: the estimate is used and labelled so", async () => {
+test("a reading that has gone stale is not trusted: the internal stand-in is used and no figure is shown", async () => {
   const h = harness({ usage: [40], maxAgeMs: 2 * MINUTE });
   h.estimated(12);
   await h.jobs.refreshSpend();
@@ -172,8 +209,9 @@ test("a reading that has gone stale is not trusted: the estimate is used and lab
   h.clock.t += 5 * MINUTE; // no further reading: the figure is now too old to bill from
   const spend = h.jobs.spendState();
   assert.equal(spend.source, "estimate");
-  assert.equal(spend.usd, 12);
+  assert.equal(spend.usd, 12, "internally the stand-in is still 12");
   assert.match(spendCaveat(spend)!, /too old to trust/);
+  assert.equal(spendDisplay(spend).kind, "unreadable", "and none of it reaches a message");
 });
 
 test("the day boundary restarts the count from the last reading of the day before, across a restart", async () => {
@@ -231,6 +269,6 @@ test("Anthropic mode keeps the SDK's list-price cost and never calls a usage end
   // On Anthropic the SDK's list-price cost is the bill, so it is not called an estimate.
   assert.deepEqual({ usd: spend.usd, source: spend.source }, { usd: 4.5, source: "anthropic" });
   assert.equal(spendCaveat(spend), undefined, "the bill is not caveated");
-  assert.equal(spendSourceLabel(spend), "Anthropic's own list price");
+  assert.deepEqual(spendDisplay(spend), { kind: "figure", usd: 4.5, label: "Anthropic's own list price" });
   assert.equal(spendPhrase(spend), "$4.50 charged by Anthropic (list price)");
 });

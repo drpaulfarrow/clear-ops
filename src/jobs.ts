@@ -20,7 +20,7 @@ import type { Messenger } from "./whatsapp.js";
 import { shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
-import { spendSourceLabel, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
+import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 
@@ -136,7 +136,8 @@ export class JobRunner {
   private readonly otp?: OtpRelay;
   /**
    * Where the spend figure comes from (src/spend.ts): the provider's own usage where it can be read,
-   * the Agent SDK's price table as a fallback. The daily cap uses it; the estimate alone never bills.
+   * and the SDK's estimate only as the internal stand-in the daily cap falls back to. Only the
+   * provider's figure is ever shown; `spendDisplay` is the one way it reaches a message.
    */
   private readonly spend: SpendMeter;
 
@@ -205,9 +206,10 @@ export class JobRunner {
   }
 
   /**
-   * The estimate: what the Agent SDK priced jobs that finished today (London) at, from the table in
-   * src/llm.ts. Not the bill on OpenRouter, so the cap does not use it when the provider's own
-   * figure can be read (`spendState`); it is the fallback and the per-kind breakdown.
+   * The SDK's own estimate for jobs that finished today (London), priced from the table in
+   * src/llm.ts. Internal only, never shown to anyone: on OpenRouter it is not the bill, so the cap
+   * uses the provider's own figure whenever it can be read (`spendState`) and this is only the
+   * stand-in for when it cannot.
    */
   spentToday(): number {
     return this.spendOn(londonYmd(new Date(this.now()))).total;
@@ -221,7 +223,8 @@ export class JobRunner {
 
   /**
    * Today's spend (London) with its source: OpenRouter's own figure when it has been read recently,
-   * the estimate otherwise. Never an unread or stale provider figure counted as zero.
+   * the internal stand-in otherwise (which `spendDisplay` reports as there being no figure at all).
+   * Never an unread or stale provider figure counted as zero.
    */
   spendState(): RealSpend {
     return this.spend.today(this.spentToday(), londonYmd(new Date(this.now())));
@@ -268,11 +271,16 @@ export class JobRunner {
     const today = londonYmd(new Date(this.now()));
     if (this.store.capDays().notifiedOn !== today) {
       this.store.setCapDays({ notifiedOn: today });
-      const spend = this.spendState();
-      const spent = `$${spend.usd.toFixed(2)} spent today (${spendSourceLabel(spend)})`;
-      void this.messenger
-        .send(blocked.replyTo ?? blocked.requestedBy, `The daily spend cap of $${config.dailyBudgetUsd} is hit: ${spent}, so new jobs are waiting, starting with ${jobLabel(blocked)}. Send /resume to lift it for the rest of today, or they start tomorrow.`)
-        .catch(() => undefined);
+      const cap = `$${config.dailyBudgetUsd.toFixed(2)}`;
+      const tail = "Send /resume to lift it for the rest of today, or they start tomorrow.";
+      // The provider's own figure, or that there is none. The SDK's estimate is never printed: when
+      // OpenRouter cannot be read the message says so and says the cap is on an internal stand-in.
+      const display = spendDisplay(this.spendState());
+      const text =
+        display.kind === "figure"
+          ? `The daily spend cap of ${cap} is hit: $${display.usd.toFixed(2)} spent today (${display.label}), so new jobs are waiting, starting with ${jobLabel(blocked)}. ${tail}`
+          : `The daily spend cap of ${cap} is holding new jobs, starting with ${jobLabel(blocked)}: OpenRouter's usage could not be read just now (${display.reason}), so I cannot say what today has cost and the cap is judged on an internal stand-in figure. ${tail}`;
+      void this.messenger.send(blocked.replyTo ?? blocked.requestedBy, text).catch(() => undefined);
     }
   }
 
@@ -522,7 +530,7 @@ export class JobRunner {
    */
   async resumeInterrupted(): Promise<number> {
     // One read of the provider's usage before any queue moves, so a restart does not resume jobs on
-    // a stale day figure. Cached and time-limited; a failure falls back to the estimate.
+    // a stale day figure. Cached and time-limited; a failure falls back to the internal stand-in.
     await this.refreshSpend().catch(() => undefined);
     const jobs = this.store
       .interruptedJobs()
@@ -683,7 +691,7 @@ export class JobRunner {
       // it is recorded as failed, and nothing follows it (no review, no fix round, no "Finished").
       const failed = runFailure(result);
       if (failed) {
-        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd, costSource: "estimate" });
+        if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
         throw new RunFailedError(failed);
       }
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
@@ -695,7 +703,6 @@ export class JobRunner {
         summary: message,
         outputPath,
         costUsd: result.costUsd,
-        costSource: result.costUsd === undefined ? undefined : "estimate",
       });
       try {
         const done = this.store.getJob(id);
