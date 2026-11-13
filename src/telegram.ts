@@ -206,7 +206,8 @@ export class TelegramPoller {
         for (const u of data.result ?? []) {
           this.offset = u.update_id + 1;
           for (const m of parseUpdates([u])) {
-            if (this.isAllowed(m.from)) void this.handle(m.from, m.text, { messageId: m.messageId, ...(m.files ? { attachments: m.files.map((f) => telegramAttachment(f)) } : {}) });
+            // Files ride in the same call, inside the allowlist check: an unlisted sender is never fetched for.
+            if (this.isAllowed(m.from)) void this.handle(m.from, m.text, m.files ? { attachments: m.files.map((f) => telegramAttachment(f)), messageId: m.messageId } : { messageId: m.messageId });
             else if (!this.hinted.has(m.from)) {
               // Tell the sender their id once, so the operator can allowlist it. Nothing else leaks.
               this.hinted.add(m.from);
