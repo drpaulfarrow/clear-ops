@@ -161,10 +161,10 @@ test("Telegram updates carry documents, the largest photo and the caption as the
     { update_id: 4, message: { message_id: 10, text: "hi", chat: { id: 99887766, type: "private" } } },
   ]);
   assert.equal(msgs.length, 3, "group messages are ignored");
-  assert.deepEqual(msgs[0], { from: "tg:99887766", text: "cross-reference this", files: [{ fileId: "D", name: "Connections.csv", mimeType: "text/csv", size: 1200 }] });
+  assert.deepEqual(msgs[0], { from: "tg:99887766", text: "cross-reference this", messageId: "7", files: [{ fileId: "D", name: "Connections.csv", mimeType: "text/csv", size: 1200 }] });
   assert.deepEqual(msgs[1].files, [{ fileId: "large", name: "photo-8.jpg", mimeType: "image/jpeg", size: 9000 }]);
   assert.equal(msgs[1].text, "");
-  assert.deepEqual(msgs[2], { from: "tg:99887766", text: "hi" });
+  assert.deepEqual(msgs[2], { from: "tg:99887766", text: "hi", messageId: "10" });
 });
 
 test("Discord attachments reach the handler only from allowlisted users, and only download from Discord's CDN", async () => {
