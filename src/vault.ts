@@ -41,6 +41,9 @@ export class VaultError extends Error {}
 
 const ADD_TTL_MS = 15 * 60_000;
 
+/** How long a one-time add link lasts, in whole minutes: the pages say so in plain words. */
+export const VAULT_LINK_MINUTES = ADD_TTL_MS / 60_000;
+
 export const vaultDir = () => path.join(config.dataDir, "vault");
 
 function key(): Buffer {
