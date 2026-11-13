@@ -20,7 +20,7 @@ import { z } from "zod";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { config } from "./config.js";
 import { designIdentity, designerTemp, startEgressProxy, type EgressProxy } from "./design.js";
-import { CONSEQUENTIAL, neverReason } from "./site-policy.js";
+import { CONSEQUENTIAL, FINAL_ORDER, checkoutStepOnly, neverReason } from "./site-policy.js";
 import type { SignupPage } from "./signup.js";
 import { hostMatches, totp, type VaultEntry } from "./vault.js";
 
@@ -45,7 +45,7 @@ const SNAPSHOT_JS = `function (maxText, maxEls) {
   var items = els.map(function (el, i) {
     el.setAttribute("data-clearops-ref", String(i + 1));
     var tag = el.tagName.toLowerCase();
-    var label = (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || (el.type === "password" ? "" : el.value) || "").replace(/\\s+/g, " ").trim().slice(0, 80);
+    var label = (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || (el.type === "password" || /cc-|card|cvc|cvv|csc|securitycode/i.test((el.getAttribute("autocomplete") || "") + " " + (el.name || "") + " " + (el.id || "")) ? "" : el.value) || "").replace(/\\s+/g, " ").trim().slice(0, 80);
     var kind = tag === "a" ? "link" : (tag === "input" || tag === "textarea") ? "field(" + (el.type || "text") + ")" : tag === "select" ? "select" : "button";
     var href = tag === "a" ? " -> " + String(el.href).slice(0, 120) : "";
     return "[" + (i + 1) + "] " + kind + ": " + (label || "(no label)") + href;
@@ -150,9 +150,50 @@ export function checkUrl(raw: string): string {
 }
 
 /** What a session needs from the outside world. Tests replace the browser with a fake. */
+/** The checkout page as the purchase gate reads it (src/purchase.ts). Untrusted content: never shown to a model. */
+export interface CheckoutPage {
+  url: string;
+  host: string;
+  title: string;
+  text: string;
+  button: string;
+  needsCard: boolean;
+  /** Base64 JPEG of the visible page, for Paul's approval page. */
+  screenshot?: string;
+}
+
+/** The page changed between Paul's approval and the click: nothing was pressed. */
+export class PurchaseChanged extends Error {}
+
+/**
+ * Runs in a page or frame: finds card fields by what they ask for and, when marking, tags each with
+ * data-clearops-card="number|exp|month|year|cvc|name|postcode". Returns how many it found.
+ */
+const CARD_FIELDS_JS = `function (mark) {
+  var found = 0;
+  var els = Array.prototype.slice.call(document.querySelectorAll("input, select"));
+  els.forEach(function (el) {
+    var t = ((el.getAttribute("autocomplete") || "") + " " + (el.name || "") + " " + (el.id || "") + " " + (el.getAttribute("placeholder") || "") + " " + (el.getAttribute("aria-label") || "")).toLowerCase();
+    var kind = null;
+    if (/cc-number|card.?number|cardnumber|\\bcard no|numero/.test(t)) kind = "number";
+    else if (/cc-exp-month|exp.?month|expiry.?month/.test(t)) kind = "month";
+    else if (/cc-exp-year|exp.?year|expiry.?year/.test(t)) kind = el.maxLength === 4 || /yyyy/.test(t) ? "year4" : "year";
+    else if (/cc-exp|expir|mm ?\\/ ?yy|exp.?date/.test(t)) kind = "exp";
+    else if (/cc-csc|cvc|cvv|csc|security.?code/.test(t)) kind = "cvc";
+    else if (/cc-name|name.?on.?card|cardholder|card.?holder/.test(t)) kind = "name";
+    else if (/billing.*(postal|post.?code|zip)|cc-postal/.test(t)) kind = "postcode";
+    if (!kind) return;
+    found++;
+    if (mark) el.setAttribute("data-clearops-card", kind);
+  });
+  return found;
+}`;
+
 export interface BrowseDeps {
   launch?: (proxy: string) => Promise<{ browser: Browser; stop: () => Promise<void> }>;
   proxy?: () => Promise<EgressProxy>;
+  /** A job holding the purchase permit: it may take checkout steps, never the final order (src/purchase.ts). */
+  purchasing?: boolean;
   /** Where the page may do more than read (src/site-policy.ts). Default: nowhere. */
   policy?: { mayAct(host: string): boolean };
   /** Paul's logins (src/vault.ts). Default: none. */
@@ -250,6 +291,8 @@ export class BrowseSession {
   private stopBrowser?: () => Promise<void>;
   private egress?: EgressProxy;
   private actions = 0;
+  /** Until when the page may write anywhere: only the seconds after an approved purchase's final click. */
+  private purchaseUntil = 0;
   readonly refused: string[] = [];
 
   constructor(private readonly deps: BrowseDeps = {}) {}
@@ -274,6 +317,9 @@ export class BrowseSession {
         // not a URL we can place: refused below
       }
       if (host && this.deps.policy?.mayAct(host)) return route.continue();
+      // For a moment after Paul approved an exact order and the service pressed its final button: the
+      // shop and its payment provider may complete the payment (src/purchase.ts).
+      if (this.purchaseUntil > Date.now()) return route.continue();
       this.refused.push(`${req.method()} ${req.url()}`);
       return route.abort("blockedbyclient");
     });
@@ -304,7 +350,13 @@ export class BrowseSession {
       }
       return parts.join(" ");
     })(${JSON.stringify(sel)}, ${submitting ? "true" : "false"})`)) as string;
+    const final = FINAL_ORDER.exec(words);
+    if (final) {
+      throw new Error(`"${final[0]}" places an order or pays, and agents never press it. ${this.deps.purchasing ? "Call purchase_prepare with this button's number: Paul approves the exact order and the service presses it." : "Stop here and say in your report exactly what you would buy and where, so Paul can decide."}`);
+    }
+    // A job allowed to buy may move through checkout steps (nothing is paid by those).
     const hit = CONSEQUENTIAL.exec(words);
+    if (hit && this.deps.purchasing && checkoutStepOnly(words)) return;
     if (hit) {
       throw new Error(`"${hit[0]}" is a consequential action (paying, sending, posting, deleting and the like) and agents never do those themselves. Stop here and say in your report exactly what you would do and where, so Paul can decide.`);
     }
@@ -373,6 +425,8 @@ export class BrowseSession {
     const type = await page.getAttribute(sel, "type");
     if (type && /password/i.test(type)) throw new Error("password fields are off limits: this browser never signs in");
     if (type && /password/i.test(type) === false && /otp|one-time/i.test((await page.getAttribute(sel, "autocomplete")) ?? "")) throw new Error("two-factor codes are entered by sign_in, not typed");
+    const cardish = `${(await page.getAttribute(sel, "autocomplete")) ?? ""} ${(await page.getAttribute(sel, "name")) ?? ""} ${(await page.getAttribute(sel, "id")) ?? ""}`;
+    if (/cc-|card|cvc|cvv|csc/i.test(cardish)) throw new Error("card fields are off limits: the service enters the card itself, only after Paul approves the exact order");
     if (submit) await this.guard(sel, true);
     await page.fill(sel, text.slice(0, 500));
     if (submit) {
@@ -484,6 +538,70 @@ export class BrowseSession {
     await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => undefined);
     const text = (await page.evaluate(`((document.body && document.body.innerText) || "").slice(0, ${MAX_TEXT})`)) as string;
     return { url: page.url(), title: await page.title(), text };
+  }
+
+  /**
+   * The checkout page as the purchase gate needs it (src/purchase.ts): where it is, what it says, the
+   * final button's words, whether it asks for card details, and a picture for Paul's approval page. It
+   * decides nothing and clicks nothing.
+   */
+  async checkout(ref: number): Promise<CheckoutPage> {
+    const page = await this.ensure();
+    const sel = `[data-clearops-ref="${Math.floor(ref)}"]`;
+    const button = ((await page.evaluate(`(function (sel) { var el = document.querySelector(sel); return el ? ((el.innerText || el.value || el.getAttribute("aria-label") || "") + "").replace(/\\s+/g, " ").trim().slice(0, 80) : null; })(${JSON.stringify(sel)})`)) as string | null);
+    if (button === null) throw new Error(`there is no element ${ref} on the page now: read the page again and give the number of the final button`);
+    const text = (await page.evaluate(`((document.body && document.body.innerText) || "").slice(0, ${MAX_TEXT})`)) as string;
+    let needsCard = false;
+    for (const frame of page.frames()) {
+      const n = (await frame.evaluate(`(${CARD_FIELDS_JS})(false)`).catch(() => 0)) as number;
+      if (n > 0) needsCard = true;
+    }
+    const shot = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false }).catch(() => undefined);
+    return { url: page.url(), host: new URL(page.url()).hostname, title: await page.title(), text, button, needsCard, screenshot: shot ? shot.toString("base64") : undefined };
+  }
+
+  /**
+   * Completes a purchase Paul approved: reached only from the purchase gate, with the exact order he saw.
+   * Checks the page is still the same shop showing the same total, enters the card only if the page asks
+   * for one, presses the final button the agent named, and lets the payment go through for a moment.
+   */
+  async completePurchase(ref: number, expect: { host: string; total: string }, card?: { number: string; expiry: string; cvc: string; name: string; postcode?: string }): Promise<{ url: string; title: string; text: string; cardEntered: boolean }> {
+    const page = await this.ensure();
+    const here = new URL(page.url()).hostname;
+    if (here !== expect.host) throw new PurchaseChanged(`the browser is now on ${here}, not ${expect.host}`);
+    const text = (await page.evaluate(`((document.body && document.body.innerText) || "").slice(0, ${MAX_TEXT})`)) as string;
+    if (!text.includes(expect.total)) throw new PurchaseChanged(`the page no longer shows the total you approved (${expect.total})`);
+    const sel = `[data-clearops-ref="${Math.floor(ref)}"]`;
+    if (!(await page.$(sel))) throw new PurchaseChanged("the final button is no longer on the page");
+    let cardEntered = false;
+    if (card) {
+      const [mm, yy] = card.expiry.split("/");
+      const values: Record<string, string> = { number: card.number, exp: `${mm}/${yy}`, month: mm, year: yy, year4: `20${yy}`, cvc: card.cvc, name: card.name, postcode: card.postcode ?? "" };
+      for (const frame of page.frames()) {
+        const n = (await frame.evaluate(`(${CARD_FIELDS_JS})(true)`).catch(() => 0)) as number;
+        if (!n) continue;
+        for (const kind of Object.keys(values)) {
+          const field = await frame.$(`[data-clearops-card="${kind}"]`);
+          if (!field || !values[kind]) continue;
+          const tag = await field.evaluate((e) => (e as { tagName: string }).tagName.toLowerCase());
+          if (tag === "select") await field.selectOption([values[kind], String(Number(values[kind]))]).catch(() => undefined);
+          else await field.fill(values[kind]);
+          cardEntered = true;
+        }
+      }
+    }
+    this.purchaseUntil = Date.now() + 90_000;
+    try {
+      await page.click(sel);
+      await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await page.waitForLoadState("networkidle", { timeout: 20_000 }).catch(() => undefined);
+    } finally {
+      // Card details never stay in the page for the agent to read back.
+      for (const frame of page.frames()) await frame.evaluate(`document.querySelectorAll("[data-clearops-card]").forEach(function (e) { try { e.value = ""; } catch (x) {} })`).catch(() => undefined);
+      this.purchaseUntil = Date.now() + 15_000;
+    }
+    const after = (await page.evaluate(`((document.body && document.body.innerText) || "").slice(0, ${MAX_TEXT})`)) as string;
+    return { url: page.url(), title: await page.title(), text: after, cardEntered };
   }
 
   async back(): Promise<string> {

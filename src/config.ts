@@ -130,6 +130,14 @@ export const config = {
     /** How long Cleo waits for ClearOps to answer before saying it is on it. */
     answerWaitSeconds: positive(process.env.VOICE_ANSWER_WAIT_SECONDS, 12),
   },
+  /**
+   * Purchases (src/purchase.ts): every one approved by Paul, no spending limit (his call, 13 Nov 2026).
+   * How long a prepared purchase waits for his decision; the job waits with it, so this stays well under
+   * JOB_STALL_MINUTES.
+   */
+  purchase: {
+    waitMinutes: Math.min(positive(process.env.PURCHASE_WAIT_MINUTES, 20), 25),
+  },
   /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */
   browse: {
     enabled: (process.env.BROWSE ?? "on").toLowerCase() !== "off",

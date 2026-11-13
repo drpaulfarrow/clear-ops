@@ -744,3 +744,31 @@ test("live voice listens only to the allowlisted speaker and can never approve a
   assert.match(voice, /export const VOICE_PREFIX = "Voice request from Paul/, "every spoken request starts with the voice prefix, so no approval command can match");
   assert.doesNotMatch(voice + bridge, /writeFile|appendFile|createWriteStream/, "voice audio is never saved");
 });
+
+test("a purchase is placed ONLY through the purchase gate, after Paul's own decision", () => {
+  const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
+  for (const f of files) {
+    const body = src(f);
+    if (f !== "purchase.ts" && f !== "browse.ts") assert.doesNotMatch(body, /\.completePurchase\(/, `${f} must not complete a purchase`);
+    if (f !== "purchase.ts" && f !== "vault.ts") assert.doesNotMatch(body, /forApprovedPurchase\(/, `${f} must not read the card`);
+  }
+  const gate = src("purchase.ts");
+  const waitAt = gate.indexOf("const decision = await new Promise");
+  const execAt = gate.indexOf("return await this.execute(action.id)");
+  assert.ok(waitAt > -1 && execAt > waitAt, "the gate presses nothing before Paul decides");
+  assert.match(gate, /if \(decision === "expired"\)[\s\S]*if \(decision === "declined"\)/, "expired and declined purchases press nothing");
+  assert.match(gate, /if \(!isAllowed\(by\)\) return "";/, "only an allowlisted chat account decides in chat");
+  assert.match(gate, /decideWithToken[\s\S]*if \(!this\.tokenValid\(id, token\)\) return undefined;/, "the page needs its single-use token");
+  assert.match(gate, /const never = neverReason\(page\.host\);/, "never on a money, email, Microsoft or infrastructure site");
+  const orch = src("orchestrator.ts");
+  const allowAt = orch.indexOf("if (!isAllowed(sender))");
+  const buyAt = orch.indexOf("const buyCmd = parsePurchaseCommand(trimmed);");
+  const chiefAt = orch.indexOf("return this.askChief(");
+  assert.ok(allowAt > -1 && buyAt > allowAt && chiefAt > buyAt, "buy <id> is matched after the allowlist and before any model");
+  const browse = src("browse.ts");
+  assert.match(browse, /const final = FINAL_ORDER\.exec\(words\);\s*if \(final\) \{\s*throw/, "agents never press the final order button");
+  assert.match(browse, /card fields are off limits/, "agents never type card details");
+  const store = src("store.ts");
+  const record = store.slice(store.indexOf("export interface PurchaseAction"), store.indexOf("export type SignupStatus"));
+  assert.doesNotMatch(record, /\bnumber\b|\bcvc\b/, "the purchase record never holds the card");
+});
