@@ -152,6 +152,7 @@ test("the day report says whose money figure it is, and says so when there is no
     provider: "openrouter",
     calls: [],
     totals: { ...T.emptyTotals(), calls: 3, promptTokens: 10, cachedTokens: 90, completionTokens: 5, toolCalls: 2 },
+    estimateUsd: 0.9876,
   });
   const jobs = [
     { id: "aaa111", kind: "research" as const, title: "SPUR research", usage },
@@ -163,8 +164,9 @@ test("the day report says whose money figure it is, and says so when there is no
   assert.match(text, /No cost per kind or top jobs by cost: OpenRouter reports one figure for the whole API key/);
   assert.match(text, /Tokens per kind: research 105, engineer 105\./);
   assert.match(text, /The chief's own chat turns are not recorded for that day/);
-  // Nothing the SDK priced appears in anything Paul can read.
-  assert.doesNotMatch(text, /estimate/i);
+  // Nothing the SDK priced appears in anything Paul can read: the internal estimate is in the record,
+  // and not one figure of it reaches a line.
+  assert.doesNotMatch(text, /0\.9876|\$0\.99/);
   assert.doesNotMatch(text, /\$0\.00/);
 
   // The provider cannot be read: the line says so and shows no substitute.

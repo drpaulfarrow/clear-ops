@@ -238,7 +238,9 @@ export async function runEvalSet(o: EvalOptions): Promise<EvalRun> {
       continue;
     }
     const verdict = judgeAnswer(task, outcome.text, o.vars);
-    const estimate = Number.isFinite(outcome.estimateUsd) ? (outcome.estimateUsd ?? 0) : 0;
+    // Rounded to a millionth of a dollar: the SDK reports dollars and cents well past that, and a
+    // results file should read the same on two machines.
+    const estimate = Number.isFinite(outcome.estimateUsd) ? Math.round((outcome.estimateUsd ?? 0) * 1e6) / 1e6 : 0;
     spent += estimate;
     if (outcome.tokens) addTotals(totals, outcome.tokens);
     const result: EvalTaskResult = {
@@ -262,7 +264,7 @@ export async function runEvalSet(o: EvalOptions): Promise<EvalRun> {
     startedAt: new Date(started).toISOString(),
     finishedAt: new Date(now()).toISOString(),
     budgetUsd: budget,
-    estimateUsd: spent,
+    estimateUsd: Math.round(spent * 1e6) / 1e6,
     totals,
     cacheHitRate: cacheHitRate(totals) ?? null,
     passed,
