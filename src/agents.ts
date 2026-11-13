@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { workerGithubEnv } from "./github-auth.js";
-import { LLM_STRIPPED, llmEnv, llmManagedSettings, provider, resolveModel } from "./llm.js";
+import { DIRECT_STRIPPED, LLM_STRIPPED, llmEnv, llmManagedSettings, provider, resolveModel } from "./llm.js";
 import type { JobKind, JobTarget } from "./store.js";
 import { CV_TOOLS, cvDir, cvServer } from "./cv.js";
 import { DECK_TOOLS, deckDir, deckServer } from "./decks.js";
@@ -62,9 +62,12 @@ export interface RunResult {
 export type AgentRunner = (o: RunOptions) => Promise<RunResult>;
 
 /** The worker environment: GitHub credentials, minus the raw OpenRouter variables in OpenRouter mode. */
-async function workerEnv(): Promise<NodeJS.ProcessEnv> {
+async function workerEnv(direct = false): Promise<NodeJS.ProcessEnv> {
   const env = await workerGithubEnv();
   if (provider() === "openrouter") for (const k of LLM_STRIPPED) delete env[k];
+  // Pinned to Anthropic: drop any gateway settings in the service's own environment (a base URL or
+  // model mapping set by hand in the Fly secrets), so this run really goes to api.anthropic.com.
+  if (direct) for (const k of DIRECT_STRIPPED) delete env[k];
   return env;
 }
 
@@ -78,7 +81,7 @@ export const sdkRunner: AgentRunner = async (o) => {
   let sdkError: string | undefined;
   // Pinned to Anthropic (the executive assistant): never falls back to another provider. Without an
   // Anthropic key the run fails as an auth failure rather than sending mail content elsewhere.
-  const direct = o.provider === "anthropic" && provider() === "openrouter";
+  const direct = o.provider === "anthropic";
   if (direct && !process.env.ANTHROPIC_API_KEY) {
     return { text: "", error: { kind: "auth", detail: "ANTHROPIC_API_KEY is not set, and this agent runs only on Anthropic's API." } };
   }
@@ -104,7 +107,7 @@ export const sdkRunner: AgentRunner = async (o) => {
         // OpenRouter mode: price its models so total_cost_usd and maxBudgetUsd stay meaningful.
         ...(!direct && llmManagedSettings() ? { managedSettings: llmManagedSettings() } : {}),
         env: {
-          ...(await workerEnv()),
+          ...(await workerEnv(direct)),
           ...(direct ? {} : llmEnv()),
           CLAUDE_CONFIG_DIR: path.join(config.dataDir, "claude"),
           CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
