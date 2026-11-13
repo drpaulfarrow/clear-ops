@@ -100,25 +100,30 @@ async function launchChromium(proxy: string): Promise<{ browser: Browser; stop: 
       ...(asRoot ? { uid: who.uid, gid: who.gid } : {}),
     });
     let stderr = "";
-    child.stderr?.on("data", (d) => (stderr = (stderr + String(d)).slice(-4000)));
+    // Chromium prints "DevTools listening on ws://127.0.0.1:<port>/..." once it is ready; the
+    // DevToolsActivePort file in the profile is the fallback for builds that do not.
     const port = await new Promise<number>((resolve, reject) => {
       const file = path.join(profile, "data", "DevToolsActivePort");
-      const deadline = Date.now() + 15_000;
-      const tick = setInterval(() => {
-        if (child.exitCode !== null) {
-          clearInterval(tick);
-          reject(new Error(`Chromium exited: ${stderr.split("\n").find((l) => l.trim()) ?? child.exitCode}`));
-        } else if (fs.existsSync(file)) {
-          const p = Number(fs.readFileSync(file, "utf8").split("\n")[0]);
-          if (p > 0) {
-            clearInterval(tick);
-            resolve(p);
-          }
-        } else if (Date.now() > deadline) {
-          clearInterval(tick);
-          reject(new Error("Chromium did not start in time"));
-        }
-      }, 100);
+      const deadline = Date.now() + 20_000;
+      const fromLog = () => Number(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(stderr)?.[1] ?? 0);
+      const fromFile = () => (fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8").split("\n")[0]) : 0);
+      const done = (fn: () => void) => {
+        clearInterval(tick);
+        child.stderr?.off("data", onData);
+        fn();
+      };
+      const check = () => {
+        const p = fromLog() || fromFile();
+        if (p > 0) done(() => resolve(p));
+        else if (child.exitCode !== null) done(() => reject(new Error(`Chromium exited: ${stderr.split("\n").find((l) => l.trim()) ?? child.exitCode}`)));
+        else if (Date.now() > deadline) done(() => reject(new Error(`Chromium did not start in time${stderr.trim() ? `: ${stderr.trim().split("\n").pop()}` : ""}`)));
+      };
+      const onData = (d: Buffer) => {
+        stderr = (stderr + String(d)).slice(-4000);
+        check();
+      };
+      child.stderr?.on("data", onData);
+      const tick = setInterval(check, 100);
     });
     return { child, port };
   };

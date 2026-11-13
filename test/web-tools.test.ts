@@ -102,7 +102,8 @@ test("the browser opens only public http(s) addresses and allows only reading me
 });
 
 const chrome = (() => {
-  for (const c of [process.env.CHROMIUM_PATH, "chromium", "google-chrome"]) {
+  // google-chrome first: on CI runners "chromium" can be a snap wrapper that cannot use a profile in /tmp.
+  for (const c of [process.env.CHROMIUM_PATH, "google-chrome", "chromium"]) {
     if (!c) continue;
     try {
       execFileSync("which", [c], { stdio: "ignore" });
