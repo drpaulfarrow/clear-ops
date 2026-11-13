@@ -17,7 +17,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { BROWSE_KINDS } from "./web-tools.js";
-import { jobCostWord, spendSourceLabel } from "./spend.js";
+import { spendDisplay } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
 import { explainCloneFailure, repoRegistry } from "./repos.js";
 import { FOLLOWUP_COMMANDS, FollowUps, parseWhen } from "./followups.js";
@@ -469,36 +469,73 @@ export class Orchestrator {
     }
   }
 
-  /** /spend [yesterday|YYYY-MM-DD]: spend on jobs for a London day. No model call. */
+  /**
+   * /spend [yesterday|YYYY-MM-DD]: spend on jobs for a London day. No model call.
+   *
+   * One figure about money, and it is the provider's. The Agent SDK's estimate is never shown (Paul's
+   * call, 13 Nov 2026): the only ways this can answer with a number are OpenRouter's own usage for
+   * today (the bill) and, when the workforce runs on Anthropic directly, Anthropic's own list-price
+   * cost, which is the bill there. When neither can be read it says so and shows no substitute.
+   */
   private async spendText(arg?: string): Promise<string> {
     const today = londonYmd(new Date());
     const day = !arg || arg === "today" ? today : arg === "yesterday" ? addDays(today, -1) : arg;
     if (Number.isNaN(Date.parse(`${day}T00:00:00Z`)) || new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) !== day) return "That is not a date. Use /spend, /spend yesterday or /spend YYYY-MM-DD.";
-    // One cached read of the provider's own usage (at most a call a minute), so today's figure is the bill.
-    await this.jobs.refreshSpend();
-    const { total, jobs } = this.jobs.spendOn(day);
     const cap = config.dailyBudgetUsd;
     const usd = (n: number) => `$${n.toFixed(2)}`;
     const label = day === today ? "Today" : day === addDays(today, -1) ? "Yesterday" : day;
-    const lines: string[] = [];
+    // Running on Anthropic directly: no usage endpoint exists and the SDK's list-price cost is what is
+    // billed, so a job's recorded cost is a real figure and any day can be answered.
+    const onAnthropic = this.jobs.spendState().source === "anthropic";
     if (day === today) {
+      // One cached read of the provider's own usage (at most a call a minute), so today's figure is the bill.
+      await this.jobs.refreshSpend();
       const spend = this.jobs.spendState();
+      const display = spendDisplay(spend);
+      if (display.kind === "unreadable") {
+        const lines = [`${label} (${day}): OpenRouter's usage could not be read just now (${display.reason}), so there is no spend figure to show. Cap ${usd(cap)}.`];
+        if (this.jobs.capReached()) lines.push("New jobs are waiting on that cap, which is being judged on an internal stand-in figure while OpenRouter cannot be read. Send /resume to lift it for the rest of today, or they start tomorrow.");
+        return lines.join("\n");
+      }
       const lifted = this.store.capDays().liftedOn === today;
-      const state = this.jobs.capReached() ? "cap is blocking new jobs" : lifted && spend.usd >= cap ? "cap lifted for today, not blocking" : "not blocking jobs";
-      lines.push(`${label} (${day}): ${usd(spend.usd)} spent today (${spendSourceLabel(spend)}), cap ${usd(cap)}, ${usd(Math.max(0, cap - spend.usd))} left, ${state}.`);
-      if (spend.source === "provider") lines.push(`The Agent SDK's estimate for today's jobs is ${usd(total)}: its price table, rounded up, so not the bill.`);
-    } else {
-      lines.push(`${label} (${day}): ${usd(total)} on jobs, daily cap ${usd(cap)}. OpenRouter's usage is read for today only, so a past day is the Agent SDK's estimate.`);
+      const state = this.jobs.capReached() ? "cap is blocking new jobs" : lifted && display.usd >= cap ? "cap lifted for today, not blocking" : "not blocking jobs";
+      const lines = [`${label} (${day}): ${usd(display.usd)} spent today (${display.label}), cap ${usd(cap)}, ${usd(Math.max(0, cap - display.usd))} left, ${state}.`];
+      if (spend.source === "anthropic") {
+        lines.push(...this.splitByJob(day));
+        lines.push("The chief's own chat replies are not recorded, so they are not in this figure.");
+      } else {
+        // OpenRouter's figure is cumulative for the key, so there is no per-job amount to show. What
+        // the SDK priced each job at is an estimate, and it is not shown, here or anywhere else.
+        lines.push("No split by job: OpenRouter reports one figure for the whole key, so there are no per-job amounts.");
+        lines.push("The executive assistant runs on Anthropic, so its spend is not in this figure.");
+      }
+      return lines.join("\n");
     }
-    if (jobs.length) {
-      const by = new Map<string, number>();
-      for (const j of jobs) by.set(j.kind, (by.get(j.kind) ?? 0) + (j.costUsd ?? 0));
-      lines.push("By kind (estimated): " + [...by].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k} ${usd(c)}`).join(", ") + ".");
-      const top = [...jobs].sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0)).slice(0, 3);
-      lines.push("Top: " + top.map((j) => `${jobTitle(j)} (${j.id}) ${usd(j.costUsd ?? 0)} ${jobCostWord(j)}`).join(", ") + ".");
-    } else lines.push("No jobs with a recorded cost finished that day.");
-    lines.push("Known gaps: the chief's own chat replies are not in the estimate (on OpenRouter they are in the provider's figure), and the executive assistant runs on Anthropic, so it is in neither.");
-    return lines.join("\n");
+    if (!onAnthropic) {
+      // OpenRouter reports one running total for the key, not per day, so a finished day cannot be read
+      // back from it. The SDK's estimate is not shown in its place.
+      return `${label} (${day}): OpenRouter reports one running figure for the whole key, not per day, so I cannot say what that day cost.`;
+    }
+    const total = this.jobs.spendOn(day).total;
+    return [`${label} (${day}): ${usd(total)} on jobs (Anthropic's own list price), cap ${usd(cap)} a day.`, ...this.splitByJob(day)].join("\n");
+  }
+
+  /**
+   * A day's jobs, by kind and biggest first, from what each job recorded. Only used where those
+   * figures are real (Anthropic's own list price), never on OpenRouter, where they are the SDK's
+   * rounded-up estimate and are not shown at all.
+   */
+  private splitByJob(day: string): string[] {
+    const usd = (n: number) => `$${n.toFixed(2)}`;
+    const { jobs } = this.jobs.spendOn(day);
+    if (!jobs.length) return ["No jobs with a recorded cost finished that day."];
+    const by = new Map<string, number>();
+    for (const j of jobs) by.set(j.kind, (by.get(j.kind) ?? 0) + (j.costUsd ?? 0));
+    const top = [...jobs].sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0)).slice(0, 3);
+    return [
+      "By kind: " + [...by].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k} ${usd(c)}`).join(", ") + ".",
+      "Top: " + top.map((j) => `${jobTitle(j)} (${j.id}) ${usd(j.costUsd ?? 0)}`).join(", ") + ".",
+    ];
   }
 
   private jobsText(): string {
