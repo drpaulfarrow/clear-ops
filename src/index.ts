@@ -7,7 +7,7 @@ import { JobRunner } from "./jobs.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
 import { Store, type EaPermit, type JobPermit } from "./store.js";
-import { CloudApiMessenger, parseInbound, verifySignature, type Messenger } from "./whatsapp.js";
+import { CloudApiMessenger, parseInbound, verifySignature, whatsappAttachment, type Messenger } from "./whatsapp.js";
 import { TelegramMessenger, TelegramPoller } from "./telegram.js";
 import { DiscordListener } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
@@ -138,7 +138,9 @@ export function buildApp(deps: AppDeps) {
       return res.sendStatus(401);
     }
     res.sendStatus(200);
-    for (const m of parseInbound(req.body)) void orchestrator.handle(m.from, m.text);
+    // An audio message arrives as a media id; its bytes are fetched in the orchestrator, after the
+    // allowlist check, like every other attachment.
+    for (const m of parseInbound(req.body)) void orchestrator.handle(m.from, m.text, m.audio ? { attachments: [whatsappAttachment(m.audio)] } : {});
   });
 
   // Google's redirect after Paul consents. The single-use state ties it to the allowlisted chat that
