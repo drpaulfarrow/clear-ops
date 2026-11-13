@@ -360,6 +360,11 @@ export interface Settings {
   githubProblemTold?: string;
   /** When the one-off copy of existing job outputs to the outputs repository finished. */
   outputsBackfilled?: string;
+  /**
+   * The jobs board's long-lived token (src/jobs-board.ts), minted by the service on first use and
+   * printed in chat by /board. Only a read-only page of job metadata is behind it, never a secret.
+   */
+  jobsBoardToken?: string;
 }
 
 interface State {

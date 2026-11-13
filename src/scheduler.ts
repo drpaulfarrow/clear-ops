@@ -1,6 +1,18 @@
 import cron, { type ScheduledTask } from "node-cron";
 import type { JobRunner } from "./jobs.js";
-import type { Schedule, Store } from "./store.js";
+import type { JobKind, Schedule, Store } from "./store.js";
+import { scheduleTitle } from "./titles.js";
+
+/** An enabled schedule and when it next runs, for the jobs board (src/jobs-board.ts). */
+export interface ScheduledRun {
+  id: string;
+  title: string;
+  kind: JobKind;
+  cron: string;
+  timezone: string;
+  /** Next run, ISO, or undefined when the task is not armed. */
+  next?: string;
+}
 
 /** Recurring jobs (a weekly brief, a daily competitor check) kept in the store and re-armed on boot. */
 export class Scheduler {
@@ -30,6 +42,25 @@ export class Scheduler {
 
   list(): Schedule[] {
     return this.store.listSchedules().filter((s) => s.enabled);
+  }
+
+  /**
+   * The enabled schedules with their next run, for the jobs board. Reads only: it never arms,
+   * stops or runs anything, and a task that is not armed simply has no next run.
+   */
+  upcoming(): ScheduledRun[] {
+    return this.store
+      .listSchedules()
+      .filter((s) => s.enabled)
+      .map((s) => {
+        let next: string | undefined;
+        try {
+          next = this.tasks.get(s.id)?.getNextRun()?.toISOString();
+        } catch {
+          next = undefined;
+        }
+        return { id: s.id, title: scheduleTitle(s), kind: s.kind, cron: s.cron, timezone: s.timezone, ...(next ? { next } : {}) };
+      });
   }
 
   private arm(s: Schedule): void {

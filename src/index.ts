@@ -36,6 +36,7 @@ import { VoiceBrain, VoiceTap, voiceEnabled } from "./voice.js";
 import type { PurchaseAction } from "./store.js";
 import { PURCHASE_PATH, PurchaseGate } from "./purchase.js";
 import { VoiceBridge } from "./voice-bridge.js";
+import { BOARD_PATH, boardData, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
 
 export interface AppDeps {
   messenger: Messenger;
@@ -301,6 +302,24 @@ export function buildApp(deps: AppDeps) {
     const said = verb ? purchase.decideWithToken(id, String(b.t ?? ""), verb) : undefined;
     if (!said) return res.status(410).type("html").send(page("Link expired", "This approval link has expired or was already used. Nothing was bought from it."));
     res.type("html").send(page(verb === "approve" ? "Approved" : "Declined", escapeHtml(said)));
+  });
+
+  /**
+   * The jobs board: one read-only page Paul bookmarks and opens on his phone instead of typing /jobs.
+   * GET only, behind a long-lived token the service minted itself (/board prints the link in chat).
+   * It changes nothing and shows no spend, brief or output; with ?format=json the same data is JSON.
+   */
+  const boardHeaders = (res: express.Response) => {
+    noStore(res);
+    res.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
+  };
+  app.get(BOARD_PATH, (req, res) => {
+    boardHeaders(res);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    if (!boardTokenValid(deps.store, token)) return res.status(404).type("html").send(refusedPage());
+    const board = boardData({ store: deps.store, queue: jobs, schedules: scheduler.upcoming() });
+    if (req.query.format === "json") return res.type("application/json").send(JSON.stringify(board));
+    res.type("html").send(renderBoard(board, token));
   });
 
   return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, voice };
