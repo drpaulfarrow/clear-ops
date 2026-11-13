@@ -23,8 +23,12 @@ import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
+import { preparedCopies, setupNote, type PreparedCopies } from "./setup.js";
 
 const exec = promisify(execFile);
+
+/** The kinds that build and test what they write, so their working copy is worth preparing (src/setup.ts). */
+const BUILDS = (kind: JobKind) => PR_KINDS.includes(kind) || kind === "maintain";
 
 /**
  * The repository an engineering job writes to, or undefined for kinds that write no code. Only one
@@ -137,6 +141,8 @@ export class JobRunner {
   private readonly spend: SpendMeter;
   /** The running commentary in each job's thread (src/status.ts JobProgress). */
   private readonly progressOpts: JobProgressOptions;
+  /** Reused dependency installs for the working copies coding jobs run in (src/setup.ts). */
+  private readonly setup: PreparedCopies;
   /** How many workers are running right now (not waiting for a deploy): what the deploy waits on. */
   activeCount(): number {
     return [...this.live.values()].filter((l) => !l.waiting && !l.stop).length;
@@ -148,13 +154,14 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; slots?: number; spend?: SpendMeter; progress?: JobProgressOptions } = {},
+    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; slots?: number; spend?: SpendMeter; progress?: JobProgressOptions; setup?: PreparedCopies } = {},
   ) {
     this.progressOpts = opts.progress ?? {};
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
     this.onOutput = opts.onOutput;
     this.purchase = opts.purchase;
     this.spend = opts.spend ?? storeMeter(store);
+    this.setup = opts.setup ?? preparedCopies;
     this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
     const l = opts.liveness ?? {};
     this.stallMs = l.stallMs ?? config.jobStallMinutes * MINUTE;
@@ -630,7 +637,13 @@ export class JobRunner {
       const base = workerSpec(job.kind, job.target);
       // An engineering job running beside another on the same repository works in its own copy of it.
       const lane = lockKey(job) && job.lane && base.cwd ? await ensureLane(base.cwd, job.lane) : undefined;
-      const spec = lane && base.cwd ? { ...base, cwd: lane, prompt: `${base.prompt}\n\n${laneNote(base.cwd, lane)}` } : base;
+      const copied = lane && base.cwd ? { ...base, cwd: lane, prompt: `${base.prompt}\n\n${laneNote(base.cwd, lane)}` } : base;
+      // A coding job's working copy is given the dependencies another job already installed for this
+      // lockfile (src/setup.ts), and is told exactly what it got. Anything that goes wrong there
+      // leaves the worker to install for itself, as it did before.
+      const prepared = BUILDS(job.kind) && copied.cwd ? await this.setup.prepare(copied.cwd).catch(() => undefined) : undefined;
+      const deps = prepared && copied.cwd ? setupNote(prepared, copied.cwd) : "";
+      const spec = deps ? { ...copied, prompt: `${copied.prompt}\n\n${deps}` } : copied;
       const perJob = spec.perJob?.(id) ?? {};
       // Engineers building a design spec may read the designer's assets.
       const dirs = perJob.additionalDirectories ?? (job.designLoop ? [...readableDirs(), designRoot()] : undefined);

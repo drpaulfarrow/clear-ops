@@ -15,6 +15,7 @@ import { EA_SERVER } from "./ea.js";
 import { repoRegistry } from "./repos.js";
 import { REPORT_RULE } from "./messages.js";
 import { classifyError, type RunFailure } from "./failures.js";
+import { setupWorkerEnv } from "./setup.js";
 
 export interface RunOptions {
   prompt: string;
@@ -67,7 +68,7 @@ export type AgentRunner = (o: RunOptions) => Promise<RunResult>;
 
 /** The worker environment: GitHub credentials, minus the raw OpenRouter variables in OpenRouter mode. */
 async function workerEnv(direct = false): Promise<NodeJS.ProcessEnv> {
-  const env = await workerGithubEnv();
+  const env = { ...(await workerGithubEnv()), ...setupWorkerEnv() };
   if (provider() === "openrouter") for (const k of LLM_STRIPPED) delete env[k];
   // Search keys are used by the service's own search tools only, never by a worker.
   for (const k of SEARCH_SECRETS) delete env[k];
@@ -241,6 +242,13 @@ export interface WorkerSpec {
 const UPDATE_BRANCH = `Bringing a pull request branch up to date with the default branch is part of your job; never leave it for the founder to click "Update branch". Do it without rewriting history: either gh pr update-branch <number> (a merge on GitHub; never pass --rebase), then git pull on the branch; or, on the checked-out branch, git fetch origin and git pull --no-rebase origin main (use the repository's default branch name), resolve any conflicts, run the tests, commit and git push as normal. git merge is not available to you, and never force-push, rebase a pushed branch or push to the default branch.`;
 
 /**
+ * How to use a machine four jobs share, and the cheap half of the fix for setup: dependencies are
+ * already in the working copy (src/setup.ts), and the suite is what CI runs, so it runs once, at the
+ * end, while the files you touched carry the iteration.
+ */
+const BUILD_TEST_DISCIPLINE = `Machine and time: the dependencies this repository needs are already installed in your working copy, so do not run npm ci or npm install unless you change package.json or package-lock.json (then run npm ci once, from the shared cache). Node's test runner already runs test files in parallel, sized to this machine. While you iterate, run only the test files you touched, by passing them to the repository's own test command (in this workforce repository: node --import tsx --test test/<name>.test.ts), and typecheck with npm run build, which is quick. Run the whole suite once, when the change is ready. Never start two heavy builds or test runs at once: another job may be compiling on the same machine, and the two together are slower than one after the other.`;
+
+/**
  * The machine-readable last lines of every maintainer report. The job runner reads them to close the
  * review loop: "changes requested" starts an engineer fix round, "needs Paul" messages the founder.
  */
@@ -385,6 +393,8 @@ Your process for every task:
 
 ${UPDATE_BRANCH}
 
+${BUILD_TEST_DISCIPLINE}
+
 Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with your report: the pull request URL, what changed, which files, test results, and open questions. ${CLEAN_ROOM}`,
       };
     case "maintain":
@@ -400,7 +410,7 @@ Rules: never force-push, never rewrite shared history, never commit secrets or .
 
 For each open pull request (gh pr list, newest first, or the one named in your brief):
 1. Fetch and check out the branch. Read the description, then the full diff against the default branch.
-2. Run the full test suite and any linter or typecheck the repo defines. Confirm CI is green on the pull request (gh pr checks). Red CI means not mergeable.
+2. Run npm run test:changed and npm run build. It runs the whole suite unless every file the branch changed is documentation (Markdown, text or something under docs/), in which case it prints what it saw and stops: documentation cannot change a source or test file, and CI has already run the full suite on the pull request, so check that with gh pr checks instead. It never skips silently; say in your report which of the two happened. Confirm CI is green on the pull request (gh pr checks). Red CI means not mergeable. ${BUILD_TEST_DISCIPLINE}
 3. Review for correctness, security (secrets, injection, unsafe shell, auth), tests that actually exercise the change, scope creep, and anything that weakens the invariants in CLAUDE.md. Be specific: file, line, what is wrong, what to do.
 4. If the only thing in the way is that the branch is behind the default branch and it merges cleanly, update it yourself with gh pr update-branch <number> (a merge, never --rebase), wait for CI to go green, then carry on. Nobody should have to click "Update branch".
 5. If it is mergeable: gh pr merge <number> --merge --delete-branch. If not: gh pr review <number> --request-changes with your comments, and do not merge. Your review is sent to an engineer automatically, who fixes it on the same branch, and you will review it again; so make each blocking comment specific enough to act on without asking.
@@ -671,7 +681,7 @@ Brief: <a complete, self-contained brief the worker can run with no other contex
 Why: <one or two sentences on why no new kind is needed>
 The chief of staff will offer to set it up with schedule_job once Paul agrees. A new kind is justified only when the agent needs a distinct role, method or quality bar that would otherwise have to be repeated in every brief, or a different tool set from any existing kind.
 
-Step 3, implement a new worker kind, following the engineer process: read README.md and CLAUDE.md, create a branch clear/agent-<slug> from origin's default branch, commit in small conventional commits, run npm run build and npm test until both are green, push, and open a pull request with gh pr create. Never merge, never push the default branch; the maintainer reviews and merges after you finish. The change must be consistent with how existing kinds are defined:
+Step 3, implement a new worker kind, following the engineer process: read README.md and CLAUDE.md, create a branch clear/agent-<slug> from origin's default branch, commit in small conventional commits, run npm run build and npm test until both are green, push, and open a pull request with gh pr create. Never merge, never push the default branch; the maintainer reviews and merges after you finish. ${BUILD_TEST_DISCIPLINE} The change must be consistent with how existing kinds are defined:
 - Add the kind to JobKind in src/store.ts and to JOB_KINDS in src/agents.ts, and add a case to workerSpec() with name, description, model, allowedTools, tools and prompt. Add any per-kind limits in src/jobs.ts only if the defaults do not fit.
 - Write the system prompt properly: who the agent is and who it serves, its method step by step, its full report's format and length, what "nothing found" looks like, and what it must not do. Prose-producing agents end with \${HOUSE_STYLE}. Every prompt ends with \${CLEAN_ROOM}; there are no exceptions.
 - Paul's messaging rule holds for the new agent too: workerSpec() appends REPORT_RULE (src/messages.ts) to every kind, so the agent writes its full report to the saved output and a three or four sentence plain message for chat. Keep that: do not bypass workerSpec(), do not tell the agent to put headings, bullets, "Outcome:" or verdict lines in its message to Paul, and repeat the rule in the new prompt itself in one sentence ("Your message to Paul is three or four plain sentences: what was done, what he needs to do if anything, and a link; no headings, no Outcome:, no bullet lists; detail goes in the report"). Any machine-readable line the job runner reads goes in the report, never the message.

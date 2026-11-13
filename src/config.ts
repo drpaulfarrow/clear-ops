@@ -246,6 +246,24 @@ export const config = {
    */
   engineerSlots: Math.min(Math.floor(positive(process.env.ENGINEER_SLOTS, 2)), 3),
   jobStallMinutes: positive(process.env.JOB_STALL_MINUTES, 30),
+  /**
+   * Reused installs for engineering jobs (src/setup.ts): one `npm ci` per package-lock.json, kept on
+   * the data volume and hard-linked into each working copy, and the npm cache the workers use, so a
+   * job does not install what another job already installed. SETUP=off leaves every job as it was.
+   */
+  setup: {
+    enabled: (process.env.SETUP ?? "on").toLowerCase() !== "off",
+    /** The store, outside every checkout. */
+    dir: path.resolve(process.env.SETUP_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "setup")),
+    /** Keep at least this much of the volume free, in MB: nothing is written below it. */
+    minFreeMb: positive(process.env.SETUP_MIN_FREE_MB, 300),
+    /** How many lockfile stores to keep, newest first. */
+    keep: Math.max(1, Math.floor(positive(process.env.SETUP_KEEP, 2))),
+    /** How long a job waits for another job already installing the same lockfile. */
+    waitMs: positive(process.env.SETUP_WAIT_MINUTES, 10) * 60_000,
+    /** The npm cache every worker install reads and writes, when the volume has room for it. */
+    npmCacheDir: path.resolve(process.env.NPM_CACHE_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "setup", "npm-cache")),
+  },
   /** The longest any job may run, in minutes, before it is stopped. */
   jobMaxRuntimeMinutes: positive(process.env.JOB_MAX_RUNTIME_MINUTES, 240),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */
