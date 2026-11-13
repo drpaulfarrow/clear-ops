@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { workerGithubEnv } from "./github-auth.js";
+import { SEARCH_SECRETS } from "./search.js";
 import { DIRECT_STRIPPED, LLM_STRIPPED, llmEnv, llmManagedSettings, provider, resolveModel } from "./llm.js";
 import type { JobKind, JobTarget } from "./store.js";
 import { CV_TOOLS, cvDir, cvServer } from "./cv.js";
@@ -65,6 +66,8 @@ export type AgentRunner = (o: RunOptions) => Promise<RunResult>;
 async function workerEnv(direct = false): Promise<NodeJS.ProcessEnv> {
   const env = await workerGithubEnv();
   if (provider() === "openrouter") for (const k of LLM_STRIPPED) delete env[k];
+  // Search keys are used by the service's own search tools only, never by a worker.
+  for (const k of SEARCH_SECRETS) delete env[k];
   // Pinned to Anthropic: drop any gateway settings in the service's own environment (a base URL or
   // model mapping set by hand in the Fly secrets), so this run really goes to api.anthropic.com.
   if (direct) for (const k of DIRECT_STRIPPED) delete env[k];

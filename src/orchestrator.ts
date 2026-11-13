@@ -22,6 +22,7 @@ import { PAUL_STYLE, shortText, tidyReply } from "./messages.js";
 import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
 import { creditUrl, keyName, modelNote, providerName } from "./llm.js";
+import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
@@ -195,9 +196,10 @@ export class Orchestrator {
         systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes(),
         model: config.models.chief,
         resume: this.store.getSession(from),
-        allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*"],
+        allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
         tools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep"],
-        mcpServers: { ops: this.opsServer(sender, from, messageId) },
+        // The chief gets the service's own search for quick answers; the browser is for workers only.
+        mcpServers: { ops: this.opsServer(sender, from, messageId), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
         maxTurns: 25,
         maxBudgetUsd: config.jobBudgetUsd,
         onToolUse: (name, input) => status.update(describeToolUse(name, input)),

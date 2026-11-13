@@ -219,6 +219,11 @@ Spend caps keep working because each model in use has a price row handed to the 
 
 Before relying on it: OpenRouter documents that Claude Code, which the Agent SDK runs on, is only guaranteed with Anthropic models, so try a research job, a draft and a small engineer job and read the results. Check WebSearch in particular, since it is a server-side tool. In OpenRouter's privacy settings, allow only providers with zero data retention: the chief and the follow-up drafts still see summaries and snippets of mail, and they go to whichever provider serves the model. Remove `OPENROUTER_API_KEY` to go back to Anthropic.
 
+## Web search and browsing
+Research-type workers (research, write, ideate, advisor, prebid, cv) and the chief get the service's own search: `web_search` on Brave (set `BRAVE_API_KEY`) and `exa_search` on Exa (set `EXA_API_KEY`), each appearing only when its key is set. The service calls the APIs itself, so search works on any model, including open models on OpenRouter, and the keys never reach a model or a worker. Results are fenced as untrusted content.
+
+Research, ideate, advisor and prebid also get a real browser (`open`, `read`, `click`, `type`, `back`, `src/browse.ts`) for pages WebFetch cannot read and sites that need navigating. It is the design worker's headless Chromium with the same containment: it runs as the unprivileged `designer` user with a fresh profile per job, every request goes through the egress proxy that refuses private addresses, and it is read-only by construction: the page may only make GET, HEAD and OPTIONS requests, so it can follow links and run searches but cannot sign in, post, buy or submit anything; password fields and downloads are refused. The executive assistant, DNS agent, engineers and designer never get these tools. `BROWSE=off` turns it off; `BROWSE_MAX_ACTIONS` (default 60) caps actions per job.
+
 ## Configuration
 See `.env.example`. The important ones:
 
