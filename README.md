@@ -35,7 +35,7 @@ What did Sam last say about pricing?
 Prep me for my 10am.
 connect Google   /google   /google disconnect
 show job 93137e
-/jobs   /status   /pending   /reset   /help   /uploads
+/board   /jobs   /status   /pending   /reset   /help   /uploads
 /resume   retry 3552e7
 /spend   /spend yesterday
 What DNS records does clearexchange.ai have?
@@ -75,6 +75,11 @@ Join any voice channel in the ClearOps server and the bot joins you and Cleo, th
 Ask in chat ("order more coffee pods on Amazon", "buy that book") and a job fills the basket in its browser, signing in with your vault login, and goes to the final checkout page. It never presses the button that places the order. Instead you get the shop, the items and the total, with a link to a one-time approval page showing a picture of the checkout and Approve or Decline buttons. Reply `buy <id>` or `buy cancel <id>` in chat if you prefer. There is no spending limit, but nothing is bought without your approval of that exact order. If the shop or the total changed since you saw it, nothing is pressed.
 
 Card: for shops that ask for card details, add one card to the vault on a one-time page (ask ClearOps for the card link). Use a virtual card with a low limit. It is stored encrypted, never shown to an agent or in chat (only its last four digits), and entered by the service only on a checkout you approved. Amazon uses the card already saved in your Amazon account. "Remove the card" deletes it.
+
+### The jobs board (a page on your phone)
+Send `/board` and you get a link to a page on this service you can bookmark. It shows jobs at a glance, laid out for a phone: what is running now (each job's title, kind, id, how long it has been going and when its worker last did anything), what is queued (in order, behind which job, and which repository's queue it is in), what finished in the last day (the outcome, with a link to a saved output where there is one) and the next run of each schedule. It refreshes itself every ten seconds.
+
+The link carries a long-lived token the service mints itself and keeps in the store; sending `/board` again gives the same link, and the token is never logged. Nothing on the page changes anything: it is one read-only route, with no button, no form and no model call, so it cannot cancel, resume, retry, spend or merge anything. It deliberately shows no spend, cost, budget or cap figure anywhere, and never a job's brief, output, transcript, file path, secret or anything from your mail or calendar: titles, kind, status, timings, repository, ids and a link to a saved output only.
 
 ## Set up in five steps
 

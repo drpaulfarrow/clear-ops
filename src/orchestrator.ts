@@ -9,6 +9,7 @@ import type { Scheduler } from "./scheduler.js";
 import type { Job, JobKind, JobTarget, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
+import { boardUrl } from "./jobs-board.js";
 import { describeUploads, formatSize, inlineImages, receiptText, transcriptAsMessage, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
 import { isAudio, transcribe, TranscribeError, transcriptionAvailable, transcriptionUnavailableReason } from "./transcribe.js";
 import { GoogleAuth, setupSteps } from "./google.js";
@@ -155,6 +156,9 @@ export class Orchestrator {
       return this.messenger.send(from, "Started a fresh conversation. Jobs, schedules and notes are kept.");
     }
     if (/^\/jobs$/i.test(trimmed)) return this.messenger.send(from, this.jobsText());
+    // The jobs board link: the same list as /jobs, as a page Paul can bookmark on his phone. The token
+    // is minted once and kept in the store; only the read-only board is behind it.
+    if (/^\/board$/i.test(trimmed)) return this.messenger.send(from, this.boardText());
     const spend = trimmed.match(/^\/spend(?:\s+(yesterday|today|\d{4}-\d{2}-\d{2}))?$/i);
     if (spend) return this.messenger.send(from, await this.spendText(spend[1]?.toLowerCase()));
     if (/^\/status$/i.test(trimmed)) return this.messenger.send(from, this.githubStatus ? await this.githubStatus().catch(() => "GitHub: could not check just now.") : "No GitHub check is configured.");
@@ -499,6 +503,10 @@ export class Orchestrator {
     } else lines.push("No jobs with a recorded cost finished that day.");
     lines.push("Known gaps: the chief's own chat replies are not in the estimate (on OpenRouter they are in the provider's figure), and the executive assistant runs on Anthropic, so it is in neither.");
     return lines.join("\n");
+  }
+
+  private boardText(): string {
+    return `The jobs board is at ${boardUrl(this.store)}. Bookmark it on your phone: it shows what is running, what is queued and behind what, what finished recently and what is scheduled, and it refreshes itself. It is read only, and it shows no costs.`;
   }
 
   private jobsText(): string {
@@ -947,6 +955,7 @@ const HELP = `Talk to me normally. I answer quick things myself and delegate the
 
 Commands:
 /jobs: recent jobs
+/board: a link to the jobs board, a read-only page you can bookmark on your phone
 /spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free
 /resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
 retry <id>: rerun one failed job
