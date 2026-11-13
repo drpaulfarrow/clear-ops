@@ -1,6 +1,7 @@
 import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config } from "./config.js";
+import { modelLine } from "./llm.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
 import { Orchestrator } from "./orchestrator.js";
@@ -170,6 +171,7 @@ export function buildApp(deps: AppDeps) {
 const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/").split("/").pop()!);
 if (isMain) {
   assertProductionConfig();
+  console.log(modelLine());
   const store = new Store(config.dataDir);
   repoRegistry.load(store);
   // With the GitHub App configured, keep its installation token fresh for git and gh during long jobs.

@@ -1,3 +1,4 @@
+import { runRoute } from "./llm.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -525,7 +526,7 @@ export class JobRunner {
       const result = await this.run({
         prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${depth}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
-        model: spec.model,
+        ...runRoute(job, spec.model),
         cwd: spec.cwd,
         allowedTools: createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools,
         disallowedTools: spec.disallowedTools,

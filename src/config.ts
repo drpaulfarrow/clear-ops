@@ -72,10 +72,31 @@ export const config = {
     appSecret: process.env.WHATSAPP_APP_SECRET ?? "",
     apiVersion: process.env.WHATSAPP_API_VERSION ?? "v21.0",
   },
+  /**
+   * OpenRouter instead of Anthropic: set OPENROUTER_API_KEY and every agent goes through OpenRouter
+   * (src/llm.ts). The aliases the roles use map to OPENROUTER_HAIKU_MODEL, _SONNET_, _OPUS_ and
+   * _FABLE_ (defaults in src/llm.ts); OPENROUTER_PRICES (JSON) prices models the defaults do not cover.
+   */
+  openrouter: {
+    apiKey: process.env.OPENROUTER_API_KEY ?? "",
+    models: {
+      haiku: process.env.OPENROUTER_HAIKU_MODEL ?? "",
+      sonnet: process.env.OPENROUTER_SONNET_MODEL ?? "",
+      opus: process.env.OPENROUTER_OPUS_MODEL ?? "",
+      fable: process.env.OPENROUTER_FABLE_MODEL ?? "",
+    },
+    prices: process.env.OPENROUTER_PRICES ?? "",
+  },
   models: {
     chief: process.env.CHIEF_MODEL ?? "haiku",
     worker: process.env.WORKER_MODEL ?? "haiku",
     engineer: process.env.ENGINEER_MODEL ?? "haiku",
+    /**
+     * The executive assistant reads Paul's mail and calendar. Paul's call (13 Nov 2026): it runs on
+     * Claude Sonnet on Anthropic's API directly, even when OPENROUTER_API_KEY sends everything else to
+     * open models (src/llm.ts `runRoute`). Follow-up nudge drafts are the exception and use WORKER_MODEL.
+     */
+    ea: process.env.EA_MODEL || "sonnet",
   },
   /** The design worker: what it looks at, its browser, model and spend cap per job. */
   design: {
@@ -165,7 +186,8 @@ export function isAllowed(from: string): boolean {
 
 /** Validate what production needs. Tests and the simulator skip this. */
 export function assertProductionConfig(): void {
-  req("ANTHROPIC_API_KEY");
+  // One model provider: OpenRouter when its key is set (it wins), otherwise Anthropic.
+  if (!process.env.OPENROUTER_API_KEY && !process.env.ANTHROPIC_API_KEY) throw new Error("Missing required environment variable OPENROUTER_API_KEY or ANTHROPIC_API_KEY");
   // A channel whose token is missing is dropped with a warning rather than stopping the service,
   // so adding Discord to the list before its token exists cannot take Telegram down.
   const usable: Channel[] = [];
