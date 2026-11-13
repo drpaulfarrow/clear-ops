@@ -390,7 +390,8 @@ test(
       // The sign-in holds the page and waits for the relay rather than dead-ending on the code step.
       const signingIn = session.signIn();
       const ask = await waitFor(() => asks[0]);
-      assert.match(ask ?? "", /127\.0\.0\.1 asked for a code to sign in\. Reply: code [a-f0-9]{6}/);
+      assert.match(ask ?? "", /^127 asked for a code to sign in\. Reply: code [a-f0-9]{6}\b/, "the ask names the site, the id and nothing else");
+      assert.match(ask ?? "", /Type the code where it says <the code>\. It goes straight into the page/, "and tells him where the code goes");
       const codeId = ask!.match(/code ([a-f0-9]{6})/)![1];
       assert.ok(relay.pending().length === 1, "the sign-in is waiting for the code");
       assert.equal(relay.redeem({ id: codeId, code: "112233", by: PAUL }).accepted, true);
