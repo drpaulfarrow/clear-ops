@@ -859,6 +859,59 @@ test("a one-time code is handled ONLY by the service relay: never a model, never
   assert.doesNotMatch(src("store.ts"), /otp|one-?time code|verification code/i, "the store holds no code");
 });
 
+/* ---------- The ordinary mechanics of a page (14 Nov 2026) ---------- */
+
+test("a browsing agent works a page's own mechanics itself, and never asks Paul to work the page for it", () => {
+  const mechanics = src("page-mechanics.ts");
+  const browse = src("browse.ts");
+  const webTools = src("web-tools.ts");
+
+  // The decision is made from the page's own numbered controls and its own words, in one module that
+  // presses nothing and talks to no one: no browser, no messenger, no model, no secret, no store.
+  const code = mechanics.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  for (const forbidden of [/page\./, /click\(/, /Messenger|messenger|\.send\(/, /config\b/, /Store\b|store\./, /agent|model|llm/i, /fs\.|fetch\(/]) {
+    assert.doesNotMatch(code, forbidden, `page-mechanics.ts only decides: ${forbidden}`);
+  }
+  assert.match(mechanics, /export function verificationStep\(/, "the verification screen is decided in one place");
+  assert.match(mechanics, /export function interruptionStep\(/, "and so are the cookie wall, the region chooser and the offer");
+  // Nothing consequential is ever pressed there, whatever a page says: paying, sending content, posting,
+  // deleting, changing an account (src/site-policy.ts CONSEQUENTIAL is the worker's own click; this is
+  // the service's, and it is narrower still).
+  assert.match(mechanics, /const NEVER_PRESS = \/\\b\(pay\|payment\|buy\|purchase/, "the service's own presses never pay or buy");
+  assert.match(mechanics, /!NEVER_PRESS\.test\(i\.words\)/, "a consequential control is filtered out of every decision");
+  assert.match(mechanics, /if \(!asksForVerification\(text\) && !routes\.length\) return undefined;/, "nothing is pressed on a page that is not asking to verify a sign-in");
+  // The route that reaches Paul is chosen by the service, never asked of him: text, then WhatsApp, then a
+  // call, and the authenticator app only when the vault holds that site's own two-factor setup key.
+  assert.match(mechanics, /if \(AUTH_ROUTE\.test\(words\)\) return totpHeld \? 4 : 0;/, "a route we hold no key for is not a route");
+  assert.match(mechanics, /if \(TEXT_ROUTE\.test\(words\)\) return 3;/, "a text reaches him first");
+  assert.match(mechanics, /if \(WHATSAPP_ROUTE\.test\(words\)\) return 2;/);
+  assert.match(mechanics, /if \(CALL_ROUTE\.test\(words\)\) return 1;/);
+  assert.match(mechanics, /const resend = usable\.find\(\(i\) => RESEND\.test\(i\.words\)\);/, "the site's own didn't-receive-a-code path is taken first");
+  // The browser presses only what was decided, only while the login's own site is in front of it, only a
+  // handful of times, and only when the sign-in is the thing waiting.
+  const drive = browse.slice(browse.indexOf("private async driveVerification"), browse.indexOf("private async verificationStuck"));
+  assert.match(drive, /if \(!onSite\(\)\) return pressed > 0;/, "the verification screen is driven only on the login's own site");
+  assert.match(drive, /if \(!action \|\| this\.verificationClicks >= MAX_VERIFICATION_CLICKS\) return pressed > 0;/, "and only a handful of times");
+  assert.match(browse, /const MAX_VERIFICATION_CLICKS = \d+;/, "the cap is a plain number");
+  assert.match(drive, /verificationStep\(items, text, \{ totp: totpHeld, done \}\)/, "the press is the module's decision and nothing else");
+  assert.match(browse, /if \(\(filledPassword \|\| sawVerification\) && \(await this\.driveVerification\(entry\.domain, entry\.totp !== undefined\)\)\)/, "it is driven only from a sign-in");
+  assert.match(browse, /if \(await this\.verificationStuck\(\)\) throw new Error\(`\$\{entry\.domain\} is still asking to verify the sign-in/, "a sign-in that never finished is reported, never called signed in");
+  // A worker is never told to work the screen itself and never sees a route question: the one message
+  // about a code is the service's own, asking him for the code.
+  const ask = src("otp.ts").slice(src("otp.ts").indexOf("private askText("));
+  assert.doesNotMatch(ask.slice(0, ask.indexOf("}")), /\b(text|sms|whatsapp|call|phone|route|choose|option|which)\b/i, "the ask never asks Paul to choose a route");
+  const note = src("otp.ts").slice(src("otp.ts").indexOf("export const OTP_NOTE"));
+  assert.match(note, /Never ask Paul to choose a delivery route/, "and the browsing worker is told never to ask him to choose one");
+  assert.match(note, /drives the verification screen itself/, "the service, not the worker, drives the screen");
+  // Every browsing job carries the mechanics rule, beside the one-time code rule.
+  assert.match(webTools, /PAGE_MECHANICS_NOTE/, "every browsing job carries the page mechanics rule");
+  assert.match(mechanics, /export const PAGE_MECHANICS_NOTE/);
+  // The service's own presses go through the same numbered controls the worker's tools use, and the
+  // browser still refuses to act anywhere agents may only read (the request guard is untouched).
+  assert.match(browse, /await page\.click\(`\[data-clearops-ref="\$\{Math\.floor\(ref\)\}"\]`, \{ timeout: 4000 \}\)/, "a decided press uses the page's own numbered control");
+  assert.match(browse, /private async settleInterruptions\(\)/, "the walls are cleared where a page is opened, read or followed");
+});
+
 /* ---------- Retrieval as a harness decision (slice 5 of Paul's efficiency brief, 13 Nov 2026) ---------- */
 
 test("retrieval is a harness decision, budgeted in code and never run on a strong model or another role", () => {
