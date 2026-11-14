@@ -288,7 +288,15 @@ h2{font-size:1rem;margin:1.4rem 0 .5rem;color:#333;border-bottom:1px solid #e2e2
 .job summary{font-size:.8rem;color:#1a56db;cursor:pointer}
 .job .x{margin:.3rem 0 0;font-size:.85rem;color:#444}
 .badge{display:inline-block;font-size:.75rem;padding:.05rem .4rem;border-radius:999px;background:#eef1f5;color:#333;margin-left:.35rem;vertical-align:middle}
-.badge.run{background:#e6f4ea;color:#1a7f37}
+/* A running card reads as alive: a small arc turning beside the badge and a soft pulse on the badge
+   itself. Transform and opacity only, so the phone does the cheapest kind of work, and no size change,
+   so nothing on the card moves. Both durations divide the ten second refresh exactly (1.25s x 8,
+   2.5s x 4), so the reload restarts them on the same phase and Paul never sees the seam. */
+.badge.run{background:#e6f4ea;color:#1a7f37;display:inline-flex;align-items:center;gap:.3em;animation:board-pulse 2.5s ease-in-out infinite}
+.arc{width:.62em;height:.62em;border-radius:50%;border:1.5px solid #a9d3b8;border-top-color:#1a7f37;flex:none;animation:board-spin 1.25s linear infinite}
+@keyframes board-spin{to{transform:rotate(360deg)}}
+@keyframes board-pulse{50%{opacity:.6}}
+@media (prefers-reduced-motion:reduce){.badge.run,.arc{animation:none}}
 .badge.fail{background:#fdecec;color:#b42318}
 .note{font-size:.85rem;color:#555;margin:.2rem 0 0}
 .warn{border:1px solid #f0d9a8;background:#fdf6e6;border-radius:8px;padding:.5rem .75rem;margin:.6rem 0;font-size:.9rem}
@@ -298,7 +306,13 @@ h2{font-size:1rem;margin:1.4rem 0 .5rem;color:#333;border-bottom:1px solid #e2e2
 a{color:#1a56db}`;
 
 function jobBlock(job: BoardJob): string {
-  const badge = job.status === "running" ? `<span class="badge run">running</span>` : job.status === "failed" ? `<span class="badge fail">failed</span>` : "";
+  // Only a running card carries the arc: the one card whose job is actually alive right now.
+  const badge =
+    job.status === "running"
+      ? `<span class="badge run"><span class="arc" aria-hidden="true"></span>running</span>`
+      : job.status === "failed"
+        ? `<span class="badge fail">failed</span>`
+        : "";
   // What the job is: the short description read off its brief, or the honest note that there is none.
   const what = job.description
     ? `<p class="d">${escapeHtml(job.description)}</p>`

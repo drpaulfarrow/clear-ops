@@ -10,6 +10,7 @@ import type { Job, JobKind, JobTarget, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
 import { boardUrl } from "./jobs-board.js";
+import { reportsUrl } from "./reports.js";
 import { describeUploads, formatSize, inlineImages, receiptText, transcriptAsMessage, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
 import { isAudio, transcribe, TranscribeError, transcriptionAvailable, transcriptionUnavailableReason } from "./transcribe.js";
 import { GoogleAuth, setupSteps } from "./google.js";
@@ -30,6 +31,7 @@ import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
 import { creditUrl, keyName, modelNote, providerName } from "./llm.js";
 import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
+import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { normaliseDomain, SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault, cardVault } from "./vault.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
@@ -177,6 +179,9 @@ export class Orchestrator {
     // The jobs board link: the same list as /jobs, as a page Paul can bookmark on his phone. The token
     // is minted once and kept in the store; only the read-only board is behind it.
     if (/^\/board$/i.test(trimmed)) return this.messenger.send(from, this.boardText());
+    // The reports link: every saved job output as a page he can read on his phone. Its own token, kept
+    // in the store; only the read-only reports pages are behind it (src/reports.ts).
+    if (/^\/reports$/i.test(trimmed)) return this.messenger.send(from, this.reportsText());
     const spend = trimmed.match(/^\/spend(?:\s+(yesterday|today|\d{4}-\d{2}-\d{2}))?$/i);
     if (spend) return this.messenger.send(from, await this.spendText(spend[1]?.toLowerCase()));
     if (/^\/status$/i.test(trimmed)) return this.messenger.send(from, this.githubStatus ? await this.githubStatus().catch(() => "GitHub: could not check just now.") : "No GitHub check is configured.");
@@ -266,10 +271,18 @@ export class Orchestrator {
     const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
     try {
       const context = await this.threadContext(from);
+      const base = context ? `${context}\n\n${prompt}` : prompt;
+      // Retrieval as a harness decision (src/retrieval.ts): before the chief composes its reply, the
+      // service decides on the cheap tier whether a search is needed and runs it itself, so a search is
+      // never left to whether the model thinks of it. The decision is kept with the turn, and the
+      // status line says what it is doing as it does it.
+      const outcome = await retrieve(prompt, { note: (line) => status.update(line) });
+      this.store.recordRetrievalTurn(outcome.record);
+      const asked = outcome.evidence ? `${outcome.evidence}\n\n${base}` : base;
       const result = await this.run({
-        prompt: context ? `${context}\n\n${prompt}` : prompt,
+        prompt: asked,
         ...(images?.length ? { images } : {}),
-        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes(),
+        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes() + `\n\n${EVIDENCE_RULE}`,
         model: config.models.chief,
         resume: this.store.getSession(from),
         allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
@@ -567,6 +580,10 @@ export class Orchestrator {
 
   private boardText(): string {
     return `The jobs board is at ${boardUrl(this.store)}. Bookmark it on your phone: it shows what is running, what is queued and behind what, what finished recently and what is scheduled, and it refreshes itself. It is read only, and it shows no costs.`;
+  }
+
+  private reportsText(): string {
+    return `The saved reports are at ${reportsUrl(this.store)}. Bookmark it on your phone: it lists every saved job output newest first, and tapping one opens it as a proper page you can read, formatted, instead of raw Markdown. It is read only, and assistant and CV outputs are never there.`;
   }
 
   private jobsText(): string {
@@ -1018,6 +1035,7 @@ const HELP = `Talk to me normally. I answer quick things myself and delegate the
 Commands:
 /jobs: recent jobs
 /board: a link to the jobs board, a read-only page you can bookmark on your phone
+/reports: a link to your saved reports, every finished job's output as a page you can read on your phone
 /spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free
 /resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
 retry <id>: rerun one failed job

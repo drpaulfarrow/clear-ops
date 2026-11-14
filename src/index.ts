@@ -41,6 +41,8 @@ import { OtpRelay } from "./otp.js";
 import { GmailCodeReader, type CodeMailbox } from "./mail-code.js";
 import { VoiceBridge } from "./voice-bridge.js";
 import { BOARD_PATH, boardData, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
+import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
+import fs from "node:fs";
 
 export interface AppDeps {
   messenger: Messenger;
@@ -376,6 +378,50 @@ export function buildApp(deps: AppDeps) {
     const board = boardData({ store: deps.store, queue: jobs, schedules: scheduler.upcoming() });
     if (req.query.format === "json") return res.type("application/json").send(JSON.stringify(board));
     res.type("html").send(renderBoard(board, token));
+  });
+
+  /**
+   * The reports view: every saved job output as a page Paul can read on his phone, at a stable
+   * address. Two GET routes behind the same long-lived token /reports prints in chat, and nothing
+   * else: no model call, no form and no write of any kind. Which outputs exist is decided by the same
+   * rules as the copy in the private outputs repository (src/output-folders.ts), so an assistant, CV
+   * or upload-derived output is not here either. The Markdown is rendered by src/reports.ts, which
+   * escapes everything, and a saved .html file beside an output is served under a policy that allows
+   * no script at all.
+   */
+  const reportHeaders = (res: express.Response, csp: string) => {
+    noStore(res);
+    res.set("Content-Security-Policy", csp);
+    res.set("X-Content-Type-Options", "nosniff");
+  };
+  app.get(REPORTS_PATH, (req, res) => {
+    reportHeaders(res, PAGE_CSP);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    if (!reportsTokenValid(deps.store, token)) return res.status(404).type("html").send(reportsRefusedPage());
+    res.type("html").send(renderReportsIndex(reportEntries(deps.store), token));
+  });
+  app.get(`${REPORTS_PATH}/:id`, (req, res) => {
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    const report = reportsTokenValid(deps.store, token) ? reportFor(deps.store, String(req.params.id ?? "")) : undefined;
+    if (!report) {
+      reportHeaders(res, PAGE_CSP);
+      return res.status(404).type("html").send(reportsRefusedPage());
+    }
+    if (report.htmlPath) {
+      // A self-contained page the worker saved beside the Markdown, served as-is (the sandbox and
+      // default-src 'none' mean anything script-shaped in it simply does not run).
+      reportHeaders(res, FILE_CSP);
+      let html: string;
+      try {
+        html = fs.readFileSync(report.htmlPath, "utf8");
+      } catch {
+        reportHeaders(res, PAGE_CSP);
+        return res.status(404).type("html").send(reportsRefusedPage());
+      }
+      return res.type("html").send(html);
+    }
+    reportHeaders(res, PAGE_CSP);
+    res.type("html").send(renderReportPage(report.entry, report.markdown ?? "", token));
   });
 
   return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, voice };
