@@ -3,9 +3,9 @@
  *
  * `npm test` runs everything, and CI runs it on every push and pull request. A review runs this
  * instead: it looks at what the branch changed against the default branch and, when every changed
- * file is documentation (Markdown, plain text, or something under docs/), says what it saw and stops
- * without running the suite. A documentation diff cannot change a source or a test file, and the
- * full suite has already run on the pull request in CI, which the maintainer checks.
+ * file is a documentation file, says what it saw and stops without running the suite. A documentation
+ * diff cannot change a source or a test file, and the full suite has already run on the pull request
+ * in CI, which the maintainer checks.
  *
  * Anything else, including a diff it cannot read, runs the whole suite exactly as CI does. It never
  * skips silently: it always prints what it looked at and what it decided.
@@ -14,9 +14,15 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Documentation only: Markdown, plain text, or anything under docs/. Nothing compiled or executed. */
+/**
+ * Documentation only: a documentation extension, wherever the file lives. The extension is what
+ * decides, not the folder, because nothing under `docs/` is documentation by definition
+ * (`docs/install.sh` and `docs/x.ts` are neither documentation nor part of the suite's own tree).
+ */
+const DOCUMENTATION = /\.(md|markdown|mdx|txt|rst|adoc)$/i;
+
 export function docsOnly(paths: string[]): boolean {
-  return paths.length > 0 && paths.every((p) => /\.(md|markdown|txt)$/i.test(p) || p.startsWith("docs/"));
+  return paths.length > 0 && paths.every((p) => DOCUMENTATION.test(p));
 }
 
 function git(args: string[], dir: string): string {
