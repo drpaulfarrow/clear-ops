@@ -253,6 +253,28 @@ test("the two metered search checks run hourly, and the cheap ones every five mi
   assert.equal(runs.get("Exa search"), 25);
   assert.equal(timed.snapshot().length, 3, "every probe still has a result to show");
   assert.equal(timed.snapshot().find((p) => p.name === "cheap")!.checkedAt, new Date(clock).toISOString());
+
+  // A check that takes time to answer must not push its own cadence out by how long it took: the pass
+  // is measured from when it began, or a five minute check would slowly drift to ten.
+  clock = NOW;
+  runs.clear();
+  const slowToAnswer = new HealthProbes(
+    [
+      {
+        name: "cheap",
+        check: async () => {
+          clock += 90_000;
+          runs.set("cheap", (runs.get("cheap") ?? 0) + 1);
+          return { state: "ok" as const, detail: "answered" };
+        },
+      },
+    ],
+    { now: () => clock, intervalMs: PROBE_INTERVAL_MS },
+  );
+  await slowToAnswer.tick(); // the pass begins at NOW; the check itself takes a minute and a half
+  clock = NOW + PROBE_INTERVAL_MS; // five minutes after the pass began, not after it finished
+  await slowToAnswer.pulse();
+  assert.equal(runs.get("cheap"), 2, "a slow answer does not delay the next check by its own duration");
 });
 
 test("the probe keys come from config, the same place the models read them", async () => {

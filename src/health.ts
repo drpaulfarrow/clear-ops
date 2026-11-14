@@ -115,16 +115,23 @@ export class HealthProbes {
     });
   }
 
-  /** One pass over the given probes, each one bounded, no probe able to throw or to hang the pass. */
-  private async run(probes: readonly HealthProbe[]): Promise<void> {
+  /**
+   * One pass over the given probes, each one bounded, no probe able to throw or to hang the pass.
+   *
+   * `at` is when the pass began, and it is what both the `checkedAt` on every result and each probe's
+   * own interval are measured from. It is deliberately not the moment a probe happened to answer: a
+   * check that takes a second must not push its own next run a second later, or a five minute cadence
+   * would slowly walk out to ten.
+   */
+  private async run(probes: readonly HealthProbe[], at: number): Promise<void> {
     if (!probes.length || this.passing) return;
     this.passing = true;
+    const checkedAt = new Date(at).toISOString();
     try {
       for (const probe of probes) {
         const outcome = await bounded(probe.check(), this.timeoutMs);
-        const at = this.now();
         this.lastRun.set(probe.name, at);
-        this.results.set(probe.name, { name: probe.name, state: outcome.state, detail: outcome.detail, checkedAt: new Date(at).toISOString() });
+        this.results.set(probe.name, { name: probe.name, state: outcome.state, detail: outcome.detail, checkedAt });
       }
     } finally {
       this.passing = false;
@@ -136,7 +143,7 @@ export class HealthProbes {
    * does once at boot, so the page has every line on it straight away.
    */
   async tick(): Promise<void> {
-    await this.run(this.probes);
+    await this.run(this.probes, this.now());
   }
 
   /**
@@ -145,7 +152,7 @@ export class HealthProbes {
    * injectable, so a test can drive a day of it without a timer.
    */
   async pulse(at: number = this.now()): Promise<void> {
-    await this.run(this.due(at));
+    await this.run(this.due(at), at);
   }
 
   /** The last result of every probe, in the order the probes were given. */
