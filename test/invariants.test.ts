@@ -858,3 +858,56 @@ test("a one-time code is handled ONLY by the service relay: never a model, never
   // The store is left out of it entirely: the code has no record to live in.
   assert.doesNotMatch(src("store.ts"), /otp|one-?time code|verification code/i, "the store holds no code");
 });
+
+/* ---------- Retrieval as a harness decision (slice 5 of Paul's efficiency brief, 13 Nov 2026) ---------- */
+
+test("retrieval is a harness decision, budgeted in code and never run on a strong model or another role", () => {
+  const r = src("retrieval.ts");
+  const jobs = src("jobs.ts");
+  const orch = src("orchestrator.ts");
+
+  // The decision step runs on the cheapest tier: a strong alias, the designer's or the assistant's role is refused.
+  assert.match(r, /export const RETRIEVAL_MODEL_ALIAS = "haiku"/);
+  assert.match(r, /const STRONG_ALIASES = \["sonnet", "opus", "fable"\]/);
+  assert.match(r, /if \(STRONG_ALIASES\.includes\(lower\)\) return RETRIEVAL_MODEL_ALIAS/, "a strong model is never used for the decision");
+  assert.match(r, /raw === config\.models\.ea \|\| raw === config\.design\.model/, "the assistant's and the designer's roles are refused");
+
+  // The budget is the harness's own, never something asked of the model, and every refusal is recorded.
+  assert.match(r, /const maxSearches = \(\) => config\.retrieval\.maxSearches/, "the search budget is code, not a prompt");
+  assert.match(r, /if \(used >= maxSearches\(\)\) \{[\s\S]{0,200}refusals\.push\(/, "the search budget refuses and records the refusal");
+  assert.match(r, /if \(usedF >= maxFetches\(\)\) \{[\s\S]{0,200}refusals\.push\(/, "the fetch budget refuses and records the refusal");
+
+  // The other engine is tried once, and only when the first returned nothing.
+  assert.match(r, /if \(!first\.results\.length && !first\.record\.error\) \{[\s\S]{0,400}otherEngine\(step\.engine\)/, "the other engine is the one fallback");
+
+  // Evidence: cite the source or mark it as memory; an empty search is empty; never invent.
+  assert.match(r, /export const EVIDENCE_RULE = /, "the evidence rule exists for prompts");
+  assert.match(r, /Never invent a fact the search did not return/, "the evidence block forbids invention");
+  assert.match(r, /found nothing\. Say plainly that nothing was found rather than filling the gap from memory/, "an empty search is reported as empty");
+  assert.match(r, /could not check whether a web search was needed/, "a failed decision step is said plainly");
+
+  // The chief and every search-carrying worker run it before the answer is composed, and it is stored with the turn or job.
+  assert.match(orch, /const outcome = await retrieve\(prompt\)/, "the chief's turn runs the decision first");
+  assert.match(orch, /this\.store\.recordRetrievalTurn\(outcome\.record\)/, "the chief's decision is stored with the turn");
+  assert.match(orch, /EVIDENCE_RULE/, "the chief carries the evidence rule");
+  assert.match(jobs, /if \(SEARCH_KINDS\.includes\(job\.kind\) && !job\.resumed\) \{[\s\S]{0,240}await retrieve\(job\.brief\)/, "every search-carrying worker runs the decision first");
+  assert.match(jobs, /this\.store\.updateJob\(id, \{ retrieval: outcome\.record \}\)/, "a worker's decision is stored with the job");
+  assert.match(jobs, /systemPrompt: SEARCH_KINDS\.includes\(job\.kind\) \? `\$\{spec\.prompt\}\\n\\n\$\{EVIDENCE_RULE\}` : spec\.prompt/, "the evidence rule is in every search-carrying worker's prompt");
+  // Kinds that never search are left exactly as they were.
+  assert.doesNotMatch(jobs, /SEARCH_KINDS\.includes\(job\.kind\)[^;]{0,40}\b(ea|dns|design|engineer|maintain)\b/, "no other kind runs the decision step");
+});
+
+test("the retrieval record holds the decision, never Paul's mail, calendar or uploads, and never a key", () => {
+  const r = src("retrieval.ts");
+  const iface = r.slice(r.indexOf("export interface RetrievalRecord {"), r.indexOf("export interface RetrievalOutcome"));
+  for (const field of ["mail", "calendar", "inbox", "upload", "body", "subject", "recipient", "request"]) {
+    assert.doesNotMatch(iface, new RegExp(`\\b${field}`, "i"), `the stored record has no ${field}`);
+  }
+  assert.match(iface, /searches: RetrievalSearchRecord\[\]/, "only the decision and what the web returned are stored");
+  // The decision step reaches no mail, calendar or upload code, and the keys come from config alone.
+  assert.doesNotMatch(r, /from "\.\/ea\.js"|from "\.\/google\.js"|from "\.\/uploads\.js"/, "no mail, calendar or uploads");
+  assert.doesNotMatch(r, /process\.env\.BRAVE_API_KEY|process\.env\.EXA_API_KEY/, "the search keys come from config only");
+  assert.match(r, /SEARCH_SECRETS|braveSearch|exaSearch/, "the service makes the search call, never a model");
+  // And the chief's own records are bounded, so the store cannot grow without limit.
+  assert.match(src("store.ts"), /RETRIEVAL_TURNS_KEPT/, "the chief's retrieval records are bounded");
+});
