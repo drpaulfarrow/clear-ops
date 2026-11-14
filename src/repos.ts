@@ -119,11 +119,21 @@ export const repoRegistry = new RepoRegistry();
 const SETTINGS_PATH = "In GitHub open Settings, Developer settings, Personal access tokens, then";
 const REPLACE_SECRET = "then replace the GH_TOKEN secret in the clear-ops repository (Settings, Secrets and variables, Actions) and re-run the latest deploy workflow so the service picks it up.";
 
-/** Removes the token (and any token-bearing URL) from text before it is logged, returned or shown. */
+/**
+ * Removes the token (and any token-bearing URL) from text before it is logged, returned or shown.
+ * The key shapes below are the ones a brief, a report or a tool result is most likely to carry
+ * (GitHub, JWTs and private keys, bearer tokens, and the common provider prefixes), because the text
+ * being redacted is now also rendered on the jobs board (src/job-descriptions.ts).
+ */
 export function redact(text: string, token = process.env.GH_TOKEN ?? ""): string {
   let out = text.replace(/x-access-token:[^@\s]+@/g, "x-access-token:***@").replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/g, "***")
     .replace(/eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, "***")
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "***");
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "***")
+    .replace(/\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/g, "***")
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, "***")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{8,}/g, "***")
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, "***")
+    .replace(/\bAIza[0-9A-Za-z_-]{30,}/g, "***");
   out = out.replace(/\b(Bearer|sso-key) +[\w.~+/=:-]{6,}/gi, "$1 ***");
   for (const t of [token, process.env.GODADDY_API_TOKEN ?? ""]) if (t.length >= 6) out = out.split(t).join("***");
   return out;
