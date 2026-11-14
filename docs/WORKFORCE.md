@@ -34,7 +34,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 ## Commands
 
-`/jobs` `/board` (a link to the read-only jobs board page) `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared), `buy cancel <id>` and `code <id> <the code>` (the code a site sent you, put into the sign-in page that is waiting for it). Each approval command is for one item, you send it yourself, and it expires.
+`/jobs` `/board` (a link to the read-only jobs board page) `/password` (a private one-time link to set or change the password that opens the browser pages; type it there, never in chat, and setting it signs out every device) `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared), `buy cancel <id>` and `code <id> <the code>` (the code a site sent you, put into the sign-in page that is waiting for it). Each approval command is for one item, you send it yourself, and it expires.
 
 ## Things only you do
 
