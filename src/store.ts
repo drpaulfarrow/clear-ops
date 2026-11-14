@@ -367,6 +367,12 @@ export interface Settings {
    * printed in chat by /board. Only a read-only page of job metadata is behind it, never a secret.
    */
   jobsBoardToken?: string;
+  /**
+   * The reports view's long-lived token (src/reports.ts), minted on first use and printed in chat by
+   * /reports. It is its own token, not the board's, because it opens saved outputs rather than job
+   * metadata; the same rules apply (compared in constant time, never logged, read-only pages only).
+   */
+  reportsToken?: string;
 }
 
 interface State {
