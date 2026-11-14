@@ -18,7 +18,7 @@ import { DiscordListener } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
-import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoProblemsMessage } from "./bootstrap.js";
+import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoCredentialLine, repoProblemsMessage } from "./bootstrap.js";
 import { startTokenRefresher } from "./github-auth.js";
 import { repoRegistry } from "./repos.js";
 import { REPO_SERVER, repoServer } from "./repo-tools.js";
@@ -396,6 +396,8 @@ if (isMain) {
   const repoProblems = await bootstrapRepos();
   const github = await githubProblemMessage().catch(() => ({ message: undefined, line: "GitHub: health check failed." }));
   console.log(github.line);
+  // Which credential reaches each managed repository, one plain line: the variable's name, never a token.
+  console.log(repoCredentialLine());
 
   // One messenger per channel, routed by address prefix; one orchestrator behind all of them.
   const routes: Array<{ prefix: string; messenger: Messenger }> = [];

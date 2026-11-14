@@ -1,6 +1,7 @@
 import path from "node:path";
 import { config } from "./config.js";
 import { githubAuth } from "./github-auth.js";
+import { perRepoTokenFix, repoTokens } from "./repo-tokens.js";
 import type { Store } from "./store.js";
 
 /**
@@ -115,16 +116,23 @@ export const repoRegistry = new RepoRegistry();
 
 /* ---------- GitHub access: plain-English failures ---------- */
 
+/** Re-exported from src/repo-tokens.ts so a failure message and the health report say the same thing. */
+export { perRepoTokenFix };
+
 const SETTINGS_PATH = "In GitHub open Settings, Developer settings, Personal access tokens, then";
 const REPLACE_SECRET = "then replace the GH_TOKEN secret in the clear-ops repository (Settings, Secrets and variables, Actions) and re-run the latest deploy workflow so the service picks it up.";
 
-/** Removes the token (and any token-bearing URL) from text before it is logged, returned or shown. */
+/**
+ * Removes the token (and any token-bearing URL) from text before it is logged, returned or shown.
+ * GH_TOKEN, the GoDaddy token and every per-repository token (`DOUBLESHIFT_TOKEN`, `REPO_TOKENS`) are
+ * covered, however they were set, so a token can never reach a log, a message or a job output.
+ */
 export function redact(text: string, token = process.env.GH_TOKEN ?? ""): string {
   let out = text.replace(/x-access-token:[^@\s]+@/g, "x-access-token:***@").replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/g, "***")
     .replace(/eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, "***")
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "***");
   out = out.replace(/\b(Bearer|sso-key) +[\w.~+/=:-]{6,}/gi, "$1 ***");
-  for (const t of [token, process.env.GODADDY_API_TOKEN ?? ""]) if (t.length >= 6) out = out.split(t).join("***");
+  for (const t of [token, process.env.GODADDY_API_TOKEN ?? "", ...repoTokens.secrets(repoRegistry.aliases())]) if (t.length >= 6) out = out.split(t).join("***");
   return out;
 }
 
@@ -162,16 +170,22 @@ export function explainCreateFailure(status: number, owner: string, name: string
 
 /**
  * What Paul must change when a clone or push fails. With a fine-grained token this is almost always
- * missing repository access: a token only reaches the repositories it was granted.
+ * missing repository access: a token only reaches the repositories it was granted. When the repository
+ * has its own token, that token is the only credential it uses, so the message names it and never
+ * suggests falling back to another one that may have no access.
  */
-export function explainCloneFailure(slug: string, detail = ""): string {
+export function explainCloneFailure(slug: string, detail = "", repo?: { alias?: string; slug?: string }): string {
   const d = detail.toLowerCase();
   const perms = /not found|403|401|authentication|could not read|denied|permission|repository access/.test(d) || !d;
+  const own = repoTokens.source({ alias: repo?.alias, slug: repo?.slug ?? slug });
+  if (perms && own) {
+    return `I could not reach ${slug} with its own token (${own}), which is the only credential I use for it. Check that token still exists, has not expired and has the "repo" and "workflow" scopes, then replace the ${own} secret in the clear-ops repository (Settings, Secrets and variables, Actions) and re-run the latest deploy workflow. If instead you would rather the App or GH_TOKEN covered it, remove that secret and give them access to ${slug}.`;
+  }
   if (perms && githubAuth.mode() === "app") {
-    return `I could not reach ${slug} with the GitHub App, most likely because the App is not installed on it. On GitHub open Settings, Applications, Installed GitHub Apps, Configure on the App, and choose All repositories (or add ${slug}). Nothing needs changing in the code or the secrets.`;
+    return `I could not reach ${slug} with the GitHub App, most likely because the App is not installed on it. On GitHub open Settings, Applications, Installed GitHub Apps, Configure on the App, and choose All repositories (or add ${slug}). Nothing needs changing in the code or the secrets.${perRepoTokenFix(slug, repo?.alias)}`;
   }
   if (perms) {
-    return `I could not reach ${slug} with the GitHub token (GH_TOKEN), most likely because the token has no access to it. ${SETTINGS_PATH} Fine-grained tokens, open the token, under Repository access add ${slug} (or choose All repositories), and make sure Contents and Pull requests are Read and write and Workflows is Read and write (a classic token needs "repo" and "workflow"). Nothing needs changing in the code. If you changed the token, ${REPLACE_SECRET}`;
+    return `I could not reach ${slug} with the GitHub token (GH_TOKEN), most likely because the token has no access to it. ${SETTINGS_PATH} Fine-grained tokens, open the token, under Repository access add ${slug} (or choose All repositories), and make sure Contents and Pull requests are Read and write and Workflows is Read and write (a classic token needs "repo" and "workflow"). Nothing needs changing in the code. If you changed the token, ${REPLACE_SECRET}${perRepoTokenFix(slug, repo?.alias)}`;
   }
   return `I could not clone ${slug}: ${redact(detail).slice(0, 200)}. Ask me to try again in a few minutes.`;
 }
