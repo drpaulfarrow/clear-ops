@@ -1,6 +1,7 @@
 import { SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault } from "./vault.js";
-import { BROWSE_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
+import { BROWSE_KINDS, SEARCH_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
+import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { provider, runRoute } from "./llm.js";
@@ -895,9 +896,19 @@ export class JobRunner {
       costMeter = this.costWatch(cap.onAnthropic ? undefined : limits.realBudgetUsd, () => live.abort.abort());
       progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
       const shown = progress;
+      // Retrieval as a harness decision (src/retrieval.ts): before a search-carrying worker composes its
+      // answer, the service decides on the cheap tier whether a search is needed, runs it itself within a
+      // hard budget, and hands the results over as fenced evidence. A resumed run keeps what it already had.
+      let evidence = "";
+      if (SEARCH_KINDS.includes(job.kind) && !job.resumed) {
+        const outcome = await retrieve(job.brief, { note: (line) => shown.note(line) });
+        this.store.updateJob(id, { retrieval: outcome.record });
+        evidence = outcome.evidence;
+      }
+      const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {
-        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
-        systemPrompt: spec.prompt,
+        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
+        systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
         cwd: spec.cwd,
         // Only a kind that builds gets the npm development-mode settings: the service runs
