@@ -81,8 +81,18 @@ after(() => {
   server.close();
 });
 
-/** Every browser view the sign-in covers. The reports view joins it in src/reports.ts. */
-const views = () => [{ name: "the jobs board", url: `${BOARD_PATH}?t=${boardToken(store)}` }];
+/** The reports view's path. Its routes live in src/reports.ts; src/index.ts gates the path itself. */
+const REPORTS_PATH = "/reports";
+
+/**
+ * Every browser view the sign-in covers, with words that must never come back to a stranger. The
+ * reports view's routes arrive with src/reports.ts: until then its path is gated but 404s, so the
+ * signed-in half of its test lives in test/reports.test.ts.
+ */
+const views = () => [
+  { name: "the jobs board", url: `${BOARD_PATH}?t=${boardToken(store)}`, content: ["Workforce jobs", "Nothing running"] },
+  { name: "the reports view", url: `${REPORTS_PATH}?t=not-a-real-token`, content: ["Saved reports", "<h1>Reports</h1>"] },
+];
 
 /* ---------- The password itself ---------- */
 
@@ -261,8 +271,28 @@ test("an unsigned-in visit to a view gets the sign-in page and none of the conte
     assert.match(html, /<h1>Sign in<\/h1>/, `${view.name}: the sign-in page, not a 404`);
     assert.ok(!html.includes("Not found"), "not a 404");
     assert.ok(!html.includes("That link is not valid"), "and not the refusal page either");
-    assert.ok(!html.includes("Workforce jobs"), "and none of the page's content");
+    for (const content of view.content) assert.ok(!html.includes(content), `no part of ${view.name} comes back: ${content}`);
   }
+});
+
+test("every gated path is under the same gate, index and one item alike", async () => {
+  // The reports view's own routes are not in this branch yet (they land with src/reports.ts), but its
+  // path is gated all the same, so the page cannot be served without the sign-in the day it arrives.
+  for (const p of [`${REPORTS_PATH}?t=x`, `${REPORTS_PATH}/abc?t=x`, `${BOARD_PATH}?t=x`, `${BOARD_PATH}/anything`]) {
+    const res = await get(p);
+    assert.equal(res.status, 303, `${p} is not served to a stranger`);
+    assert.equal(res.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(p)}`);
+  }
+  // And what is not a browser view is not gated: the sign-in pages themselves, the one-time password
+  // page and the health check all answer a stranger rather than sending him round the sign-in.
+  for (const p of ["/health", "/sign-in", "/password"]) {
+    const res = await get(p);
+    assert.ok(!(res.headers.get("location") ?? "").startsWith(`${SIGN_IN_PATH}?next=`), `${p} must not be behind the gate`);
+  }
+  // Signed in, the reports path is not a route at all yet: the gate let the request through, so this is
+  // the service's own 404 and not a redirect to the sign-in page.
+  const signed = await signedCookie();
+  assert.equal((await get(`${REPORTS_PATH}?t=x`, signed)).status, 404);
 });
 
 test("signing in from a bookmarked link lands on the page he asked for, and the token still has to match", async () => {
@@ -281,9 +311,11 @@ test("signing in from a bookmarked link lands on the page he asked for, and the 
     assert.equal(r.status, 303);
     assert.match(r.headers.get("location") ?? "", new RegExp(`^${BOARD_PATH}\\?t=`), `${JSON.stringify(bad)} must not be followed`);
   }
-  // A gated page, with the token in the query, is kept as it was.
+  // A gated page, with the token in the query, is kept as it was, index and one item alike.
   const kept = `${BOARD_PATH}?t=${token}&format=json`;
   assert.equal((await post(SIGN_IN_PATH, { password: PASSWORD, next: kept })).headers.get("location"), kept);
+  const oneReport = `${REPORTS_PATH}/abc123?t=${token}`;
+  assert.equal((await post(SIGN_IN_PATH, { password: PASSWORD, next: oneReport })).headers.get("location"), oneReport);
 });
 
 test("an already signed-in visit to the sign-in page is sent on rather than asked again", async () => {

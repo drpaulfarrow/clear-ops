@@ -379,8 +379,15 @@ export function buildApp(deps: AppDeps) {
     noStore(res);
     res.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
   };
-  /** The pages the sign-in covers: the browser views, and nothing else the service serves. */
-  const gatedPaths = [BOARD_PATH];
+  /**
+   * The browser pages the sign-in covers: the jobs board, and the reports view at its own path. The
+   * reports path is written out here rather than taken from `src/reports.ts` (`REPORTS_PATH`, the same
+   * string) because that page is not in this branch: the gate is one place over the path, so the
+   * reports routes are behind it the moment they exist and no page can ever be served without it.
+   * Nothing else the service serves is behind it: no webhook, no callback and no health check.
+   */
+  const GATED_PATHS = ["/reports", BOARD_PATH];
+  const under = (path: string, base: string) => path === base || path.startsWith(`${base}/`);
   /**
    * Where a signed-in visitor may be sent: one of those pages, never anywhere else. A path that leaves
    * the service, doubles a slash, climbs with `..` or carries anything but the query's own characters
@@ -390,7 +397,7 @@ export function buildApp(deps: AppDeps) {
   const safeNext = (value: unknown): string | undefined => {
     if (typeof value !== "string" || value.length > 300 || !SAFE_NEXT.test(value) || value.includes("//") || value.includes("..")) return undefined;
     const path = value.split("?")[0];
-    return gatedPaths.some((p) => path === p || path.startsWith(`${p}/`)) ? value : undefined;
+    return GATED_PATHS.some((p) => under(path, p)) ? value : undefined;
   };
   /** Where a signed-in visit with nowhere to go lands. */
   const landing = () => `${BOARD_PATH}?t=${boardToken(deps.store)}`;
@@ -398,12 +405,21 @@ export function buildApp(deps: AppDeps) {
    * The gate itself: a visit without a session is sent to the sign-in page, carrying the address it
    * asked for, so a bookmarked link still opens the page he wanted once he has signed in. A wrong or
    * missing token is refused afterwards exactly as it was before.
+   *
+   * It is one middleware over the gated paths, registered before any of their routes, rather than a
+   * call at the top of each handler: a route added under those paths later cannot forget it, and the
+   * rule is the same for the whole page, index, one item and the board's JSON alike.
    */
   const signedIn = (req: express.Request, res: express.Response): boolean => {
     if (signIn.sessionValid(deps.store, req.headers.cookie)) return true;
     res.redirect(303, `${SIGN_IN_PATH}?next=${encodeURIComponent(req.originalUrl)}`);
     return false;
   };
+  app.use((req, res, next) => {
+    if (!GATED_PATHS.some((p) => under(req.path, p))) return next();
+    if (!signedIn(req, res)) return;
+    next();
+  });
   app.get(SIGN_IN_PATH, (req, res) => {
     signInHeaders(res);
     const next = safeNext(req.query.next);
@@ -415,6 +431,10 @@ export function buildApp(deps: AppDeps) {
     signInHeaders(res);
     const b = (req.body ?? {}) as Record<string, string>;
     const next = safeNext(b.next);
+    // The address attempts are counted against. The app does not trust the proxy in front of it
+    // (`trust proxy` is off), so this is the machine's own view of the caller and a forged
+    // X-Forwarded-For cannot dodge the limit or pin it on someone else. For a service with one user
+    // that means the limit is effectively per machine, which is exactly what is wanted here.
     const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
     if (!signIn.hasPassword(deps.store)) return res.status(400).type("html").send(noPasswordPage());
     // A short cool-off and a growing delay per address, never a lock-out: the /password link in chat
@@ -479,7 +499,6 @@ export function buildApp(deps: AppDeps) {
   };
   app.get(BOARD_PATH, (req, res) => {
     boardHeaders(res);
-    if (!signedIn(req, res)) return;
     const token = typeof req.query.t === "string" ? req.query.t : "";
     if (!boardTokenValid(deps.store, token)) return res.status(404).type("html").send(refusedPage());
     const board = boardData({ store: deps.store, queue: jobs, schedules: scheduler.upcoming() });
