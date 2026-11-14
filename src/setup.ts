@@ -385,6 +385,10 @@ export class PreparedCopies {
     const key = lockfileKey(fs.readFileSync(lockfile));
     const store = path.join(this.stores, storeName(repo, key));
     if (!this.fill(store)) {
+      // The size of the tree this would write, not a flat number, and checked here as well as under
+      // the lock so a refusal writes nothing at all, not even a lock directory.
+      if (!this.roomFor(this.neededMb())) this.pruneCache(`${key}.lock`);
+      if (!this.roomFor(this.neededMb())) return { status: "skipped", detail: this.noRoomDetail() };
       const outcome = await this.build(key, store, dir);
       if (outcome === "no-room") return { status: "skipped", detail: this.noRoomDetail() };
       if (outcome === "removed") {

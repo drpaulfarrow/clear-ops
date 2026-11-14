@@ -114,12 +114,12 @@ test("nothing is written when the volume has too little free space", async () =>
 test("the guard is the size of the tree, not a flat number", async () => {
   // 1000MB free, but a store needs about 900MB and the floor is 300MB. The old flat guard passed
   // here and the install then filled the volume this machine keeps its store, outputs and sessions on.
-  const root = tmp();
+  const root = path.join(tmp(), "setup");
   const flat = new PreparedCopies({ root, minFreeMb: 300, storeMb: 900, freeMb: () => 1_000, install: boom, link: boom });
   const refused = await flat.prepare(project(), "self");
   assert.equal(refused.status, "skipped");
   assert.match(refused.detail ?? "", /only 1000MB free .*needs about 900MB/);
-  assert.equal(fs.existsSync(path.join(root, "deps")), false, "nothing is written when the tree would not fit");
+  assert.equal(fs.existsSync(root), false, "nothing is written at all when the tree would not fit, not even a lock directory");
 
   // A store measured on this volume is what the next job's guard uses, not the estimate.
   const store = path.join(root, "deps", storeName("self", "0123456789abcdef"));
