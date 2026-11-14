@@ -8,6 +8,7 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { config } from "./config.js";
 import { BROWSE_SERVER, BROWSE_TOOLS, BrowseSession, browseServer, type BrowseDeps } from "./browse.js";
 import { OTP_NOTE } from "./otp.js";
+import { PAGE_MECHANICS_NOTE } from "./page-mechanics.js";
 import { SEARCH_SERVER, SEARCH_TOOLS, searchEngines, searchServer, type Fetcher } from "./search.js";
 import type { JobKind } from "./store.js";
 
@@ -44,6 +45,7 @@ export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: B
     allowed.push(...BROWSE_TOOLS);
     notes.push(
       "Browser: open, read, click, type, back and sign_in drive a real browser. Use it when WebFetch returns an empty or blocked page, or to use a site. You may fill forms and run searches on sites Paul lets agents act on, and sign_in signs in with his stored login (you never see the password). Paying, sending, posting, deleting and the like are refused everywhere: when a task needs one, stop and say exactly what you would do so Paul can decide.",
+      PAGE_MECHANICS_NOTE,
       OTP_NOTE,
     );
   }

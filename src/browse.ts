@@ -20,6 +20,7 @@ import { z } from "zod";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { config } from "./config.js";
 import { designIdentity, designerTemp, startEgressProxy, type EgressProxy } from "./design.js";
+import { asksForVerification, interruptionStep, verificationStep, type PageControl } from "./page-mechanics.js";
 import { codeTtlMs, type CodeRelay } from "./otp.js";
 import { CONSEQUENTIAL, FINAL_ORDER, checkoutStepOnly, neverReason, protectedOnUnlocked } from "./site-policy.js";
 import type { SignupPage } from "./signup.js";
@@ -33,6 +34,33 @@ export const ALLOWED_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 export const MAX_TEXT = 12_000;
 const MAX_ELEMENTS = 80;
 const NAV_TIMEOUT = 20_000;
+/** How many times one session clears an interruption (a cookie wall, a region chooser, an offer). */
+const MAX_INTERRUPTIONS = 8;
+/** How many times one session walks a two-step verification screen, so no site is ever hammered. */
+const MAX_VERIFICATION_CLICKS = 6;
+
+/** The field a site shows when it wants the code it has just sent. The service fills it, never an agent. */
+const CODE_INPUT_SEL = 'input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="totp" i], input[name*="code" i], input[id*="otp" i], input[id*="code" i]';
+
+/**
+ * Runs in the page: numbers the things a visitor could press and returns their own words, for the
+ * service's own decisions about a page's mechanics (src/page-mechanics.ts). Untrusted content: it is
+ * matched against fixed word lists and never followed, and it never reaches a model.
+ */
+const CONTROLS_JS = `function (max) {
+  function visible(el) {
+    var r = el.getBoundingClientRect();
+    var s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+  }
+  document.querySelectorAll("[data-clearops-ref]").forEach(function (e) { e.removeAttribute("data-clearops-ref"); });
+  var els = Array.prototype.slice.call(document.querySelectorAll("button, a[href], input[type=submit], input[type=button], input[type=radio], input[type=checkbox], label, [role=button], [role=link], [role=radio]")).filter(visible).slice(0, max);
+  return els.map(function (el, i) {
+    el.setAttribute("data-clearops-ref", String(i + 1));
+    var words = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || "").replace(/\\s+/g, " ").trim().slice(0, 120);
+    return { ref: i + 1, tag: el.tagName.toLowerCase(), words: words, checked: el.checked === true || el.getAttribute("aria-checked") === "true" };
+  });
+}`;
 
 /** Runs in the page: numbers what can be clicked or typed in, and returns the page's text. */
 const SNAPSHOT_JS = `function (maxText, maxEls) {
@@ -333,6 +361,9 @@ export class BrowseSession {
   private enteredCode?: string;
   /** Until when the page may write anywhere: only the seconds after an approved purchase's final click. */
   private purchaseUntil = 0;
+  /** How many interruptions and verification steps this session has cleared, so neither can run away. */
+  private interruptions = 0;
+  private verificationClicks = 0;
   readonly refused: string[] = [];
 
   constructor(private readonly deps: BrowseDeps = {}) {}
@@ -455,6 +486,7 @@ export class BrowseSession {
     const page = await this.ensure();
     const res = await page.goto(checkUrl(url), { waitUntil: "domcontentloaded" });
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
+    await this.settleInterruptions();
     if (res && res.status() >= 400) return `The page answered ${res.status()}.\n\n${await this.snapshot()}`;
     return this.snapshot();
   }
@@ -467,6 +499,7 @@ export class BrowseSession {
     await page.click(sel);
     await page.waitForLoadState("domcontentloaded").catch(() => undefined);
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
+    await this.settleInterruptions();
     return this.snapshot();
   }
 
@@ -486,6 +519,7 @@ export class BrowseSession {
       await page.press(sel, "Enter");
       await page.waitForLoadState("domcontentloaded").catch(() => undefined);
       await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
+      await this.settleInterruptions();
     }
     return this.snapshot();
   }
@@ -518,13 +552,14 @@ export class BrowseSession {
     const onSite = () => hostMatches(here(), entry!.domain) && (new URL(page.url()).protocol === "https:" || this.deps.insecureSignInForTests === true);
     const visible = (sel: string) => page.locator(`${sel} >> visible=true`).first();
     const userSel = 'input[autocomplete="username"], input[type="email"], input[name*="user" i], input[name*="email" i], input[name*="login" i], input[id*="user" i], input[id*="email" i]';
-    const otpSel = 'input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="totp" i], input[name*="code" i], input[id*="otp" i], input[id*="code" i]';
+    const otpSel = CODE_INPUT_SEL;
     const settle = async () => {
       await page.waitForLoadState("domcontentloaded").catch(() => undefined);
       await page.waitForLoadState("networkidle", { timeout: 6000 }).catch(() => undefined);
     };
     let filledPassword = false;
-    for (let step = 0; step < 5; step++) {
+    let sawVerification = false;
+    for (let step = 0; step < 8; step++) {
       if (!onSite()) throw new Error(`stopped: the page moved to ${here() || "an unknown address"}, which is not ${entry.domain} over https, so nothing more was filled`);
       const pw = visible('input[type="password"]');
       const otp = visible(otpSel);
@@ -537,7 +572,9 @@ export class BrowseSession {
         await settle();
         continue;
       }
-      if (filledPassword && (await otp.count())) {
+      // A code field is only filled when the page is asking to verify this sign-in: a shop's discount-code
+      // box is not one, and a code is never typed into it.
+      if ((await otp.count()) && (filledPassword || sawVerification || asksForVerification(await this.pageText()))) {
         if (entry.totp) {
           const generated = totp(entry.totp);
           // The vault holds the two-factor setup key: unchanged, the service makes the code itself and,
@@ -557,12 +594,22 @@ export class BrowseSession {
           await otp.fill(code);
           this.enteredCode = code;
         }
+        sawVerification = true;
         await otp.press("Enter");
         await settle();
         // A code page whose own button is the only way on (Enter does nothing there) gets that one button
         // pressed, and never a consequential one; then the field is wiped so the code is not left in the page.
         if (await otp.count()) await this.pressCodeButton(entry.domain);
         await this.clearCodeFields(otpSel);
+        continue;
+      }
+      // No password and no code field in front of us, after the password went in. On a two-step
+      // verification screen that asks where to send the code, or offers "didn't receive a code", this is
+      // the service's own work: it presses those, in the order a person would, so the workforce never
+      // hands the page back to Paul (src/page-mechanics.ts).
+      if ((filledPassword || sawVerification) && (await this.driveVerification(entry.domain, entry.totp !== undefined))) {
+        sawVerification = true;
+        await settle();
         continue;
       }
       const user = visible(userSel);
@@ -575,7 +622,9 @@ export class BrowseSession {
       }
       break;
     }
-    if (!filledPassword) throw new Error(`could not find ${entry.domain}'s login form; Paul can add its login page address to the vault entry`);
+    if (!filledPassword && !sawVerification) throw new Error(`could not find ${entry.domain}'s login form; Paul can add its login page address to the vault entry`);
+    await settle();
+    if (await this.verificationStuck()) throw new Error(`${entry.domain} is still asking to verify the sign-in (two-step verification) and I could not get past it, so nothing was signed in and nothing was changed`);
     if (!onSite()) throw new Error(`after signing in the page moved to ${here()}, not ${entry.domain}`);
     vault.markUsed(entry.domain);
     const state = await this.context!.storageState();
@@ -584,7 +633,11 @@ export class BrowseSession {
     return `Signed in.\n\n${await this.snapshot()}`;
   }
 
-  /** The page's visible text, for reading a code's own expiry off it. Never sent anywhere. */
+  /**
+   * The page's visible text, for reading a code's own expiry off it and for recognising what the page is
+   * asking for. Never sent anywhere. The script is called, not merely evaluated: Playwright hands a
+   * function-shaped string back as an unserialisable function, so an uncalled one silently reads nothing.
+   */
   private async pageText(): Promise<string> {
     const page = this.page;
     if (!page) return "";
@@ -657,6 +710,115 @@ export class BrowseSession {
     const page = this.page;
     if (!page) return;
     for (const el of await page.locator(sel).all().catch(() => [])) await el.fill("").catch(() => undefined);
+  }
+
+  /* ---------- the page's ordinary mechanics, decided in src/page-mechanics.ts ---------- */
+
+  /** The things a visitor could press, numbered the same way the worker's own tools number them. */
+  private async controls(): Promise<PageControl[]> {
+    const page = await this.ensure();
+    return (await page.evaluate(`(${CONTROLS_JS})(120)`)) as PageControl[];
+  }
+
+  /** Press one numbered control the service itself decided on, and let the page settle. */
+  private async clickControl(ref: number): Promise<void> {
+    const page = await this.ensure();
+    await page.click(`[data-clearops-ref="${Math.floor(ref)}"]`, { timeout: 4000 }).catch(() => undefined);
+    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
+  }
+
+  /** Whether the page is showing the field the code goes in. */
+  private async hasCodeField(): Promise<boolean> {
+    const page = this.page;
+    if (!page) return false;
+    return (await page.locator(`${CODE_INPUT_SEL} >> visible=true`).first().count().catch(() => 0)) > 0;
+  }
+
+  /**
+   * Clears what a page puts in front of a visitor before they can read it: a cookie or consent wall, a
+   * region chooser, an offer that covers the page. Only a plain accept, the control naming Paul's own
+   * region, or a plain dismissal is pressed, never anything consequential, at most twice a page and
+   * never on a page that is asking to verify a sign-in. The decision is src/page-mechanics.ts's; this
+   * only presses it. A click whose request would change something on a site where agents may only read
+   * is refused by the request guard below, exactly as before.
+   */
+  private async settleInterruptions(): Promise<void> {
+    const page = this.page;
+    if (!page || page.url() === "about:blank") return;
+    const done = new Set<string>();
+    for (let i = 0; i < 2 && this.interruptions < MAX_INTERRUPTIONS; i++) {
+      let text = "";
+      let items: PageControl[] = [];
+      try {
+        text = await this.pageText();
+        // Never while a sign-in is waiting to be verified: that page is driven by sign_in, not here.
+        if (asksForVerification(text)) return;
+        items = await this.controls();
+      } catch {
+        return;
+      }
+      const action = interruptionStep(items, text, done);
+      if (!action) return;
+      done.add(action.words.replace(/\s+/g, " ").trim().toLowerCase());
+      this.interruptions++;
+      await this.clickControl(action.ref);
+    }
+  }
+
+  /**
+   * Drives a two-step verification screen the way a person would, so the workforce never hands the page
+   * back to Paul: the site's own "didn't receive a code" path, the delivery route that actually reaches
+   * him (a text first, then WhatsApp, then a call; the authenticator app only when the vault holds that
+   * site's two-factor setup key, because that is the only way we can make the code ourselves), then the
+   * control that sends the code. Nothing here is consequential, nothing leaves the login's own site, and
+   * the page's words are matched against fixed lists and never followed. The one message that ever
+   * mentions a code is the service's own asking Paul for the code itself (src/otp.ts): it never asks him
+   * to choose a route or to work the page.
+   *
+   * True when something was pressed or a code field has appeared, so the caller reads the page again.
+   */
+  private async driveVerification(domain: string, totpHeld: boolean): Promise<boolean> {
+    const page = this.page;
+    if (!page) return false;
+    const onSite = () => hostMatches(new URL(page.url()).hostname, domain);
+    const done = new Set<string>();
+    let pressed = 0;
+    for (let i = 0; i < 4; i++) {
+      if (!onSite()) return pressed > 0;
+      if (await this.hasCodeField()) return true;
+      let text = "";
+      let items: PageControl[] = [];
+      try {
+        text = await this.pageText();
+        items = await this.controls();
+      } catch {
+        return pressed > 0;
+      }
+      const action = verificationStep(items, text, { totp: totpHeld, done });
+      if (!action || this.verificationClicks >= MAX_VERIFICATION_CLICKS) return pressed > 0;
+      this.verificationClicks++;
+      done.add(action.words.replace(/\s+/g, " ").trim().toLowerCase());
+      pressed++;
+      await this.clickControl(action.ref);
+    }
+    return pressed > 0;
+  }
+
+  /**
+   * The page is still asking for a code, or still offering where to send one, and no code was entered
+   * this run: the sign-in did not finish, and saying "Signed in" would be a lie. Nothing was changed.
+   */
+  private async verificationStuck(): Promise<boolean> {
+    const page = this.page;
+    if (!page || this.enteredCode) return false;
+    if (await this.hasCodeField()) return true;
+    try {
+      const text = await this.pageText();
+      return asksForVerification(text) && !!verificationStep(await this.controls(), text, {});
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -760,6 +922,7 @@ export class BrowseSession {
     const res = await page.goBack({ waitUntil: "commit" });
     if (!res && page.url() === "about:blank") throw new Error("there is no earlier page");
     await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await this.settleInterruptions();
     return this.snapshot();
   }
 
@@ -796,7 +959,7 @@ export function browseServer(session: BrowseSession) {
       tool("back", "Go back one page.", {}, () => wrap(() => session.back())()),
       tool(
         "sign_in",
-        "Sign in to the site you are on, or to the domain given, with Paul's login from the vault. The service fills the form itself: you never see or type the password. Only works for sites Paul stored a login for.",
+        "Sign in to the site you are on, or to the domain given, with Paul's login from the vault. The service fills the form itself: you never see or type the password, and it drives a two-step verification screen too (the site's own \"didn't receive a code\" path, the delivery route that reaches Paul, the button that sends the code). Call it again when a site asks you to verify a sign-in: never ask Paul to choose a delivery route or to work the page yourself. Only works for sites Paul stored a login for.",
         { domain: z.string().optional() },
         ({ domain }) => wrap(() => session.signIn(domain))(),
       ),
