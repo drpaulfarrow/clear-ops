@@ -15,7 +15,6 @@ import { EA_SERVER } from "./ea.js";
 import { repoRegistry } from "./repos.js";
 import { REPORT_RULE } from "./messages.js";
 import { classifyError, type RunFailure } from "./failures.js";
-import { setupWorkerEnv } from "./setup.js";
 
 export interface RunOptions {
   prompt: string;
@@ -30,6 +29,11 @@ export interface RunOptions {
   provider?: "anthropic";
   resume?: string;
   cwd?: string;
+  /**
+   * Extra environment variables for this run (the npm settings a kind that builds needs, src/jobs.ts).
+   * Merged over the worker's own sanitised environment, which it cannot widen.
+   */
+  env?: NodeJS.ProcessEnv;
   allowedTools: string[];
   disallowedTools?: string[];
   tools?: string[]; // restrict which built-in tools are even visible
@@ -68,7 +72,7 @@ export type AgentRunner = (o: RunOptions) => Promise<RunResult>;
 
 /** The worker environment: GitHub credentials, minus the raw OpenRouter variables in OpenRouter mode. */
 async function workerEnv(direct = false): Promise<NodeJS.ProcessEnv> {
-  const env = { ...(await workerGithubEnv()), ...setupWorkerEnv() };
+  const env = { ...(await workerGithubEnv()) };
   if (provider() === "openrouter") for (const k of LLM_STRIPPED) delete env[k];
   // Search keys are used by the service's own search tools only, never by a worker.
   for (const k of SEARCH_SECRETS) delete env[k];
@@ -117,6 +121,9 @@ export const sdkRunner: AgentRunner = async (o) => {
         ...(!direct && llmManagedSettings() ? { managedSettings: llmManagedSettings() } : {}),
         env: {
           ...(await workerEnv(direct)),
+          // Extra settings for this run only: the npm development-mode variables a kind that builds
+          // needs (src/jobs.ts), never the chief's or a read-only kind's environment.
+          ...(o.env ?? {}),
           ...(direct ? {} : llmEnv()),
           CLAUDE_CONFIG_DIR: path.join(config.dataDir, "claude"),
           CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
@@ -246,7 +253,7 @@ const UPDATE_BRANCH = `Bringing a pull request branch up to date with the defaul
  * already in the working copy (src/setup.ts), and the suite is what CI runs, so it runs once, at the
  * end, while the files you touched carry the iteration.
  */
-const BUILD_TEST_DISCIPLINE = `Machine and time: the dependencies this repository needs are already installed in your working copy, so do not run npm ci or npm install unless you change package.json or package-lock.json (then run npm ci once, from the shared cache). Node's test runner already runs test files in parallel, sized to this machine. While you iterate, run only the test files you touched, by passing them to the repository's own test command (in this workforce repository: node --import tsx --test test/<name>.test.ts), and typecheck with npm run build, which is quick. Run the whole suite once, when the change is ready. Never start two heavy builds or test runs at once: another job may be compiling on the same machine, and the two together are slower than one after the other.`;
+const BUILD_TEST_DISCIPLINE = `Machine and time: the dependencies this repository needs are already installed in your working copy, so do not run npm ci or npm install unless you change package.json or package-lock.json (then run npm ci once, from the shared cache). Do not edit anything inside node_modules: it is hard-linked to the install every other job on this machine reuses, so an edit in there is an edit to everybody's. Node's test runner already runs test files in parallel, sized to this machine. While you iterate, run only the test files you touched, by passing them to the repository's own test command (in this workforce repository: node --import tsx --test test/<name>.test.ts), and typecheck with npm run build, which is quick. Run the whole suite once, when the change is ready. Never start two heavy builds or test runs at once: another job may be compiling on the same machine, and the two together are slower than one after the other.`;
 
 /**
  * The machine-readable last lines of every maintainer report. The job runner reads them to close the
@@ -410,7 +417,7 @@ Rules: never force-push, never rewrite shared history, never commit secrets or .
 
 For each open pull request (gh pr list, newest first, or the one named in your brief):
 1. Fetch and check out the branch. Read the description, then the full diff against the default branch.
-2. Run npm run test:changed and npm run build. It runs the whole suite unless every file the branch changed is documentation (Markdown, text or something under docs/), in which case it prints what it saw and stops: documentation cannot change a source or test file, and CI has already run the full suite on the pull request, so check that with gh pr checks instead. It never skips silently; say in your report which of the two happened. Confirm CI is green on the pull request (gh pr checks). Red CI means not mergeable. ${BUILD_TEST_DISCIPLINE}
+2. Run npm run test:changed and npm run build. It runs the whole suite unless every file the branch changed is a documentation file (Markdown, plain text and the like, wherever it lives), in which case it prints what it saw and stops: documentation cannot change a source or test file, and CI has already run the full suite on the pull request, so check that with gh pr checks instead. It never skips silently; say in your report which of the two happened. Confirm CI is green on the pull request (gh pr checks). Red CI means not mergeable. ${BUILD_TEST_DISCIPLINE}
 3. Review for correctness, security (secrets, injection, unsafe shell, auth), tests that actually exercise the change, scope creep, and anything that weakens the invariants in CLAUDE.md. Be specific: file, line, what is wrong, what to do.
 4. If the only thing in the way is that the branch is behind the default branch and it merges cleanly, update it yourself with gh pr update-branch <number> (a merge, never --rebase), wait for CI to go green, then carry on. Nobody should have to click "Update branch".
 5. If it is mergeable: gh pr merge <number> --merge --delete-branch. If not: gh pr review <number> --request-changes with your comments, and do not merge. Your review is sent to an engineer automatically, who fixes it on the same branch, and you will review it again; so make each blocking comment specific enough to act on without asking.

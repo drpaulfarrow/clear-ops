@@ -23,7 +23,7 @@ import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
-import { preparedCopies, setupNote, type PreparedCopies } from "./setup.js";
+import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
 
 const exec = promisify(execFile);
 
@@ -643,7 +643,7 @@ export class JobRunner {
       // A coding job's working copy is given the dependencies another job already installed for this
       // lockfile (src/setup.ts), and is told exactly what it got. Anything that goes wrong there
       // leaves the worker to install for itself, as it did before.
-      const prepared = BUILDS(job.kind) && copied.cwd ? await this.setup.prepare(copied.cwd).catch(() => undefined) : undefined;
+      const prepared = BUILDS(job.kind) && copied.cwd ? await this.setup.prepare(copied.cwd, job.target).catch(() => undefined) : undefined;
       const deps = prepared && copied.cwd ? setupNote(prepared, copied.cwd) : "";
       const spec = deps ? { ...copied, prompt: `${copied.prompt}\n\n${deps}` } : copied;
       const perJob = spec.perJob?.(id) ?? {};
@@ -687,6 +687,9 @@ export class JobRunner {
         systemPrompt: spec.prompt,
         ...runRoute(job, spec.model),
         cwd: spec.cwd,
+        // Only a kind that builds gets the npm development-mode settings: the service runs
+        // NODE_ENV=production, which would leave typescript and tsx out of a worker's own install.
+        ...(BUILDS(job.kind) ? { env: workerBuildEnv(this.setup.npmCache()) } : {}),
         allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...web.allowed],
         disallowedTools: spec.disallowedTools,
         tools: spec.tools,
