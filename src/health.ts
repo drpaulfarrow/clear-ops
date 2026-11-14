@@ -11,7 +11,9 @@
  *
  * The outside half is probed lightly on a timer, never while a page is being rendered: one small
  * read-only request each to the model provider, to each search provider whose key is set, to GitHub
- * and, when Paul's Workspace is connected, to Google. Every request carries its credential in a
+ * and, when Paul's Workspace is connected, to Google. Each probe has its own cadence: the three cheap
+ * checks every five minutes, and the two metered search checks hourly, because unlike the others a
+ * search call is billed and must never crowd out the searches the jobs themselves need. Every request carries its credential in a
  * header, never in the URL, and no reply body is kept: only a short state and a phrase this file
  * wrote itself, so a key, an address or anything else personal can never reach a log or the page. A
  * probe that fails changes nothing about any job; it is a line on a page.
@@ -24,8 +26,19 @@ import { OPENROUTER_BASE_URL, provider } from "./llm.js";
 import { UPTIME_NOTE, type UptimeReport } from "./uptime.js";
 import type { Store } from "./store.js";
 
-/** How often the dependencies are probed. Light enough to be free, often enough to be current. */
+/** How often the cheap checks are run: the model provider, GitHub and Google Workspace. */
 export const PROBE_INTERVAL_MS = 5 * 60_000;
+/**
+ * How often the two search checks are run, on their own slower cadence.
+ *
+ * Both of them are metered, not pings: Brave bills per request ($5 per 1,000, with $5 of free credit a
+ * month) and Exa meters searches the same way. At the five minute cadence the cheap checks share they
+ * would each cost about 8,600 calls a month, roughly an order of magnitude more than the workforce's
+ * own searches, and on an account that stops at the free credit they would have the provider answer
+ * 429 to the jobs that really need a search. Hourly is 24 a day, well inside the free credit, and it
+ * still shows on the board within the hour when a search key stops working.
+ */
+export const SEARCH_PROBE_INTERVAL_MS = 60 * 60_000;
 /** How long one probe may take before it is called unanswered. */
 export const PROBE_TIMEOUT_MS = 5_000;
 
@@ -42,6 +55,12 @@ export interface HealthProbe {
   /** What Paul calls it on the page. */
   name: string;
   check: () => Promise<ProbeOutcome>;
+  /**
+   * How often this probe is run. Absent means the pass's own interval (`PROBE_INTERVAL_MS`). The two
+   * metered search checks set `SEARCH_PROBE_INTERVAL_MS`, so a line on the page never costs what a
+   * job's search costs.
+   */
+  intervalMs?: number;
 }
 
 /** The last result of one probe, as the page shows it. */
@@ -54,6 +73,7 @@ export interface ProbeResult {
 }
 
 export interface ProbesOptions {
+  /** The pass's cadence: the timer's period, and the interval for every probe that has none of its own. */
   intervalMs?: number;
   timeoutMs?: number;
   now?: () => number;
@@ -66,6 +86,7 @@ export interface ProbesOptions {
  */
 export class HealthProbes {
   private readonly results = new Map<string, ProbeResult>();
+  private readonly lastRun = new Map<string, number>();
   private readonly intervalMs: number;
   private readonly timeoutMs: number;
   private readonly now: () => number;
@@ -81,18 +102,50 @@ export class HealthProbes {
     for (const p of probes) this.results.set(p.name, { name: p.name, state: "waiting", detail: "not checked yet" });
   }
 
-  /** One pass over every probe, each one bounded, no probe able to throw or to hang a pass. */
-  async tick(): Promise<void> {
-    if (this.passing) return;
+  /** One probe's own cadence: its own interval where it has one, the pass's otherwise. */
+  private intervalFor(probe: HealthProbe): number {
+    return probe.intervalMs ?? this.intervalMs;
+  }
+
+  /** The probes whose own interval has come round at `at`, so a slow probe is left alone between times. */
+  private due(at: number): HealthProbe[] {
+    return this.probes.filter((probe) => {
+      const last = this.lastRun.get(probe.name);
+      return last === undefined || at - last >= this.intervalFor(probe);
+    });
+  }
+
+  /** One pass over the given probes, each one bounded, no probe able to throw or to hang the pass. */
+  private async run(probes: readonly HealthProbe[]): Promise<void> {
+    if (!probes.length || this.passing) return;
     this.passing = true;
     try {
-      for (const probe of this.probes) {
+      for (const probe of probes) {
         const outcome = await bounded(probe.check(), this.timeoutMs);
-        this.results.set(probe.name, { name: probe.name, state: outcome.state, detail: outcome.detail, checkedAt: new Date(this.now()).toISOString() });
+        const at = this.now();
+        this.lastRun.set(probe.name, at);
+        this.results.set(probe.name, { name: probe.name, state: outcome.state, detail: outcome.detail, checkedAt: new Date(at).toISOString() });
       }
     } finally {
       this.passing = false;
     }
+  }
+
+  /**
+   * One pass over every probe, whatever its own interval. This is what a test drives and what `start()`
+   * does once at boot, so the page has every line on it straight away.
+   */
+  async tick(): Promise<void> {
+    await this.run(this.probes);
+  }
+
+  /**
+   * What the timer does: one pass over the probes whose own interval has come round since they last
+   * ran, so the two metered search checks are not re-run on the cheap checks' cadence. `at` is
+   * injectable, so a test can drive a day of it without a timer.
+   */
+  async pulse(at: number = this.now()): Promise<void> {
+    await this.run(this.due(at));
   }
 
   /** The last result of every probe, in the order the probes were given. */
@@ -101,12 +154,13 @@ export class HealthProbes {
   }
 
   /**
-   * Probes now, then every interval. The timer is unref'd, so it never holds the process open on its
-   * own; the returned function clears it, which is what a test and a shutdown call.
+   * Probes now, then every interval, each probe at its own cadence. The timer is unref'd, so it never
+   * holds the process open on its own; the returned function clears it, which is what a test and a
+   * shutdown call.
    */
   start(): () => void {
     void this.tick();
-    const timer = setInterval(() => void this.tick(), this.intervalMs);
+    const timer = setInterval(() => void this.pulse(), this.intervalMs);
     timer.unref?.();
     return () => clearInterval(timer);
   }
@@ -206,12 +260,16 @@ function modelProbe(fetchImpl: typeof fetch, key: string, name: string, timeoutM
 export function defaultProbes(deps: ProbeDeps = {}): HealthProbe[] {
   const fetchImpl = deps.fetch ?? fetch;
   const timeoutMs = deps.timeoutMs ?? PROBE_TIMEOUT_MS;
-  const keys = deps.keys ?? { openrouter: config.openrouter.apiKey, anthropic: process.env.ANTHROPIC_API_KEY ?? "", brave: config.search.braveKey, exa: config.search.exaKey };
+  // Every key comes from `config`, the same place the models and the searches read it, so one place
+  // decides what is in force. `deps.keys` overrides it in a test.
+  const keys = deps.keys ?? { openrouter: config.openrouter.apiKey, anthropic: config.anthropic.apiKey, brave: config.search.braveKey, exa: config.search.exaKey };
   const probes: HealthProbe[] = [modelProbe(fetchImpl, provider() === "openrouter" ? keys.openrouter ?? "" : keys.anthropic ?? "", provider(), timeoutMs)];
   probes.push(
     keys.brave
       ? {
           name: "Brave search",
+          // Metered per request, so on its own slower cadence rather than the cheap checks'.
+          intervalMs: SEARCH_PROBE_INTERVAL_MS,
           check: () =>
             httpCheck(
               fetchImpl,
@@ -221,12 +279,14 @@ export function defaultProbes(deps: ProbeDeps = {}): HealthProbe[] {
               timeoutMs,
             ),
         }
-      : { name: "Brave search", check: async () => ({ state: "off", detail: "no Brave key, so web_search is off" }) },
+      : { name: "Brave search", intervalMs: SEARCH_PROBE_INTERVAL_MS, check: async () => ({ state: "off", detail: "no Brave key, so web_search is off" }) },
   );
   probes.push(
     keys.exa
       ? {
           name: "Exa search",
+          // Metered per search, the same as Brave.
+          intervalMs: SEARCH_PROBE_INTERVAL_MS,
           check: () =>
             httpCheck(
               fetchImpl,
@@ -236,7 +296,7 @@ export function defaultProbes(deps: ProbeDeps = {}): HealthProbe[] {
               timeoutMs,
             ),
         }
-      : { name: "Exa search", check: async () => ({ state: "off", detail: "no Exa key, so exa_search is off" }) },
+      : { name: "Exa search", intervalMs: SEARCH_PROBE_INTERVAL_MS, check: async () => ({ state: "off", detail: "no Exa key, so exa_search is off" }) },
   );
   probes.push({
     name: "GitHub",
@@ -374,7 +434,9 @@ export function boardUptime(report: UptimeReport, now: number): BoardUptime {
   const day = report.uptimePct24h !== undefined ? `Uptime ${report.uptimePct24h}% ${report.covers24h ? "of the last 24 hours" : `since records begin (${report.sinceWords})`}` : "Uptime for the last 24 hours is not known yet";
   const week = report.uptimePct7d !== undefined && report.covers7d ? `, ${report.uptimePct7d}% of the last 7 days` : "";
   const down = report.downtimeMinutes24h > 0 ? `; downtime ${length(report.downtimeMinutes24h * MINUTE)} in the last 24 hours` : "; no downtime in the last 24 hours";
-  const recent = report.gaps.map((g) => `${clock(g.to, now)} (${length(g.ms)})`).join(", ");
+  // Each gap is listed from when it started (`g.from`, the beat that should have followed the last one
+  // seen) to when the beats came back (`g.to`), so a gap never reads as starting when it ended.
+  const recent = report.gaps.map((g) => `started ${clock(g.from, now)}, back ${clock(g.to, now)} (${length(g.ms)})`).join(", ");
   const dayGaps = report.gaps24h;
   const gapsLine = recent
     ? `${dayGaps === 1 ? "1 gap" : `${dayGaps} gaps`} in the last 24 hours, ${report.gaps7d === dayGaps ? "the same in the last 7 days" : `${report.gaps7d} in the last 7 days`}. Most recent, newest first: ${recent}.`
@@ -413,10 +475,9 @@ export function boardHealth(source: HealthSource): BoardHealth {
   const waiting = checks.filter((c) => c.state === "waiting");
 
   const live: string[] = [];
-  if (source.uptime) {
-    const report = source.uptime.report();
-    live.push(report.lastRestartWords ? `Up ${report.lastRestartWords.replace(/ ago$/, "")} since the last restart` : "Up since it started");
-  }
+  // The report sorts the kept history, so it is built once per render and both lines are read off it.
+  const report = source.uptime?.report();
+  if (report) live.push(report.lastRestartWords ? `Up ${report.lastRestartWords.replace(/ ago$/, "")} since the last restart` : "Up since it started");
   live.push(
     active !== undefined
       ? `${active === 0 ? "no workers running" : active === 1 ? "1 worker running" : `${active} workers running`}`
@@ -450,7 +511,7 @@ export function boardHealth(source: HealthSource): BoardHealth {
     live: `${live.join(", ")}.`,
     checks,
     checksLine,
-    uptime: source.uptime ? boardUptime(source.uptime.report(), now) : boardUptime(emptyReport(), now),
+    uptime: boardUptime(report ?? emptyReport(), now),
   };
 }
 

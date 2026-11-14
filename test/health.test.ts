@@ -17,7 +17,8 @@ process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-health-"));
 
 const { Store } = await import("../src/store.js");
-const { HealthProbes, boardHealth, boardUptime, defaultProbes, PROBE_TIMEOUT_MS } = await import("../src/health.js");
+const { HealthProbes, boardHealth, boardUptime, defaultProbes, PROBE_INTERVAL_MS, PROBE_TIMEOUT_MS, SEARCH_PROBE_INTERVAL_MS } = await import("../src/health.js");
+const { config } = await import("../src/config.js");
 const { uptimeReport, UPTIME_NOTE } = await import("../src/uptime.js");
 const { boardData, renderBoard } = await import("../src/jobs-board.js");
 
@@ -199,6 +200,84 @@ test("a pass keeps the last result of every probe, waits until it has one, and s
   assert.equal(PROBE_TIMEOUT_MS, 5_000, "a probe is given five seconds before it is called unanswered");
 });
 
+test("the two metered search checks run hourly, and the cheap ones every five minutes", async () => {
+  // Each check says what its own cadence is, and only the two that are billed have a slower one.
+  const set = defaultProbes({ keys: { openrouter: KEY, brave: "brave-key", exa: "exa-key" }, githubToken: async () => "gh-token" });
+  const cadence = new Map(set.map((p) => [p.name, p.intervalMs]));
+  assert.equal(cadence.get("Brave search"), SEARCH_PROBE_INTERVAL_MS, "Brave bills per request");
+  assert.equal(cadence.get("Exa search"), SEARCH_PROBE_INTERVAL_MS, "Exa meters searches the same way");
+  for (const cheap of ["model provider", "GitHub", "Google Workspace"]) {
+    assert.equal(cadence.get(cheap), undefined, `${cheap} is a cheap read and keeps the pass's five minute cadence`);
+  }
+  assert.equal(PROBE_INTERVAL_MS, 5 * MIN);
+  assert.equal(SEARCH_PROBE_INTERVAL_MS, HOUR);
+  // 288 a day each at five minutes is what the slower cadence exists to avoid; hourly is 24.
+  assert.equal((24 * HOUR) / SEARCH_PROBE_INTERVAL_MS, 24);
+  assert.equal((24 * HOUR) / PROBE_INTERVAL_MS, 288);
+
+  // The timer honours it. A probe that counts its own runs is driven by a clock the test moves.
+  let clock = NOW;
+  const runs = new Map<string, number>();
+  const counted = (name: string, intervalMs?: number) => ({
+    name,
+    ...(intervalMs ? { intervalMs } : {}),
+    check: async () => {
+      runs.set(name, (runs.get(name) ?? 0) + 1);
+      return { state: "ok" as const, detail: "answered" };
+    },
+  });
+
+  // Not a pulse early, and run the moment the hour is up.
+  const slow = new HealthProbes([counted("Brave search", SEARCH_PROBE_INTERVAL_MS)], { now: () => clock, intervalMs: PROBE_INTERVAL_MS });
+  await slow.tick();
+  assert.equal(runs.get("Brave search"), 1, "the pass at boot probes everything once");
+  clock = NOW + HOUR - 1;
+  await slow.pulse();
+  assert.equal(runs.get("Brave search"), 1, "a minute short of the hour, it is left alone");
+  clock = NOW + HOUR;
+  await slow.pulse();
+  assert.equal(runs.get("Brave search"), 2, "and run when the hour is up");
+
+  // A day of five minute pulses: the cheap check answers on every one, the metered ones once an hour.
+  clock = NOW;
+  runs.clear();
+  const timed = new HealthProbes([counted("cheap"), counted("Brave search", SEARCH_PROBE_INTERVAL_MS), counted("Exa search", SEARCH_PROBE_INTERVAL_MS)], { now: () => clock, intervalMs: PROBE_INTERVAL_MS });
+  await timed.tick();
+  const pulses = (24 * HOUR) / PROBE_INTERVAL_MS;
+  for (let i = 0; i < pulses; i++) {
+    clock += PROBE_INTERVAL_MS;
+    await timed.pulse();
+  }
+  assert.equal(runs.get("cheap"), 1 + pulses, "the cheap check runs on every pulse");
+  assert.equal(runs.get("Brave search"), 25, "once at boot, then 24 times in the day");
+  assert.equal(runs.get("Exa search"), 25);
+  assert.equal(timed.snapshot().length, 3, "every probe still has a result to show");
+  assert.equal(timed.snapshot().find((p) => p.name === "cheap")!.checkedAt, new Date(clock).toISOString());
+});
+
+test("the probe keys come from config, the same place the models read them", async () => {
+  const before = { openrouter: config.openrouter.apiKey, anthropic: config.anthropic.apiKey };
+  const envBefore = process.env.ANTHROPIC_API_KEY;
+  try {
+    // An Anthropic key in config, a different one in the environment, and no OpenRouter key: the probe
+    // must use the one config holds, so one place decides which key is in force.
+    config.openrouter.apiKey = "";
+    config.anthropic.apiKey = "sk-ant-from-config";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-from-the-environment";
+    const net = fakeFetch(() => reply(200));
+    const model = defaultProbes({ fetch: net.impl }).find((p) => p.name === "model provider")!;
+    assert.deepEqual(await model.check(), { state: "ok", detail: "answered" });
+    assert.equal(net.calls[0]!.url, "https://api.anthropic.com/v1/models?limit=1");
+    assert.deepEqual(net.calls[0]!.init?.headers, { "x-api-key": "sk-ant-from-config", "anthropic-version": "2023-06-01" });
+    assert.ok(!JSON.stringify(net.calls[0]).includes("from-the-environment"), "the environment is not read around config");
+  } finally {
+    config.openrouter.apiKey = before.openrouter;
+    config.anthropic.apiKey = before.anthropic;
+    if (envBefore === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = envBefore;
+  }
+});
+
 /* ---------- What the page says ---------- */
 
 test("a healthy service says so in a sentence, with the counts, the checks and the uptime beside it", () => {
@@ -280,6 +359,24 @@ test("the block is built without touching a job, and the page stays readable whe
   assert.ok(!/<script|<link|<img|<iframe|@import|url\(/i.test(html), "nothing is fetched from anywhere");
 });
 
+test("a render builds the uptime report once and reads both of its lines off it", () => {
+  let reports = 0;
+  const beats = [NOW - 4 * HOUR, NOW - 3 * HOUR, NOW - 2 * HOUR, NOW - MIN];
+  const health = boardHealth({
+    store,
+    now: NOW,
+    uptime: {
+      report: () => {
+        reports += 1;
+        return uptimeReport({ beats, boots: [NOW - 3 * HOUR], now: NOW });
+      },
+    },
+  });
+  assert.equal(reports, 1, "the report sorts the kept history, so it is built once per render, not once per line");
+  assert.match(health.live, /^Up 3 h since the last restart/);
+  assert.match(health.uptime.headline, /^Uptime /);
+});
+
 test("the uptime half says what is measured, lists the recent gaps and never claims more than it knows", () => {
   const empty = boardUptime(uptimeReport({ beats: [], now: NOW }), NOW);
   assert.equal(empty.empty, true);
@@ -301,6 +398,15 @@ test("the uptime half says what is measured, lists the recent gaps and never cla
   assert.match(shown.headline, /^Uptime 97\.2% of the last 24 hours; downtime 40 min in the last 24 hours\.$/);
   assert.match(shown.gapsLine, /^2 gaps in the last 24 hours, the same in the last 7 days\. Most recent, newest first: /);
   assert.equal((shown.gapsLine.match(/\(20 min\)/g) ?? []).length, 2, "each gap is listed with how long it lasted");
+  // Each gap is listed from when it started to when the beats came back, not from its end alone. Both
+  // holes here fall inside one London day, so the clock is a plain "hh:mm" with no weekday.
+  const at = (ms: number) => new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
+  for (const h of holes) {
+    const said = `started ${at(h + MIN)}, back ${at(h + 21 * MIN)} (20 min)`;
+    assert.ok(shown.gapsLine.includes(said), `the gap that began at ${at(h)} reads "${said}": ${shown.gapsLine}`);
+  }
+  const [firstGap] = [...shown.gapsLine.matchAll(/started (\d\d:\d\d), back (\d\d:\d\d)/g)];
+  assert.ok(firstGap![1]! < firstGap![2]!, "a gap starts before it ends");
   assert.match(shown.restartLine, /started once in the last 24 hours/);
   assert.equal(shown.strip.filter((c) => c === "down").length, 2, "each gap shows in the day's strip");
 });

@@ -121,6 +121,14 @@ export const config = {
     },
     prices: process.env.OPENROUTER_PRICES ?? "",
   },
+  /**
+   * Anthropic, used when OPENROUTER_API_KEY is not set (src/llm.ts `provider()` picks the provider).
+   * Read here with the rest of the configuration rather than from the environment at each call, so one
+   * place decides what key is in force and the health probe and the models agree on it.
+   */
+  anthropic: {
+    apiKey: process.env.ANTHROPIC_API_KEY ?? "",
+  },
   /** Web search the service runs itself (src/search.ts); a tool appears only when its key is set. */
   search: {
     braveKey: process.env.BRAVE_API_KEY ?? "",
