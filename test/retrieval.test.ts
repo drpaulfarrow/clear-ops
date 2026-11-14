@@ -171,9 +171,10 @@ test("one source returned by two queries is listed once, not as two agreeing sou
     now: NOW,
   });
   assert.equal(outcome.record.searches.length, 2, "both queries ran");
-  const listed = outcome.evidence.match(/https:\/\/github\.com\/prebid\/Prebid\.js\/releases/g) ?? [];
-  assert.equal(listed.length, 1, "the shared URL appears once");
-  assert.match(outcome.evidence, /2\. Prebid\n   https:\/\/prebid\.org/, "the other result still follows");
+  // The results themselves, before the page text below them, list the shared URL once.
+  const listed = outcome.evidence.split(/\nPage /)[0];
+  assert.equal((listed.match(/https:\/\/github\.com\/prebid\/Prebid\.js\/releases/g) ?? []).length, 1, "the shared URL is listed once");
+  assert.match(listed, /2\. Prebid\n   https:\/\/prebid\.org/, "the other result still follows");
 });
 
 test("a search that fails is reported as a failure, never as a fact", async () => {
