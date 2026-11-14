@@ -91,10 +91,11 @@ export const config = {
     self: process.env.SELF_REPO || "drpaulfarrow/clear-ops",
     /**
      * More managed repositories: comma-separated `alias=owner/name` (optionally `|another name` Paul
-     * uses for it). Defaults to his personal site. Repositories the workforce creates are kept in the
-     * store, not here.
+     * uses for it). Defaults to his personal site (alias "site") and the second project he wants pull
+     * requests to (alias "doubleshift"). Repositories the workforce creates are kept in the store, not
+     * here.
      */
-    extra: process.env.MANAGED_REPOS || "site=drpaulfarrow/drpaulfarrowcom|drpaulfarrow.com",
+    extra: process.env.MANAGED_REPOS || "site=drpaulfarrow/drpaulfarrowcom|drpaulfarrow.com,doubleshift=shftd2-pre/app-doubleshift",
     /** The GitHub account new repositories are created under. */
     owner: process.env.REPO_OWNER || "drpaulfarrow",
   },

@@ -7,8 +7,9 @@ import type { Store } from "./store.js";
 /**
  * The repositories the workforce manages. "product" (Clear Exchange) and "self" (this workforce) are
  * always the first two and keep their own settings (PRODUCT_REPO, SELF_REPO, REPO_DIR, SELF_REPO_DIR).
- * More come from MANAGED_REPOS (default: Paul's personal site, alias "site") and from repositories the
- * workforce creates when Paul asks (kept in the store, loaded on boot). Every agent can read every
+ * More come from MANAGED_REPOS (default: Paul's personal site, alias "site", and app-doubleshift, alias
+ * "doubleshift") and from repositories the workforce creates when Paul asks (kept in the store, loaded on
+ * boot). Every agent can read every
  * managed repository; an engineering job writes to one.
  */
 export interface ManagedRepo {
@@ -182,7 +183,13 @@ export function explainCloneFailure(slug: string, detail = "", repo?: { alias?: 
     return `I could not reach ${slug} with its own token (${own}), which is the only credential I use for it. Check that token still exists, has not expired and has the "repo" and "workflow" scopes, then replace the ${own} secret in the clear-ops repository (Settings, Secrets and variables, Actions) and re-run the latest deploy workflow. If instead you would rather the App or GH_TOKEN covered it, remove that secret and give them access to ${slug}.`;
   }
   if (perms && githubAuth.mode() === "app") {
-    return `I could not reach ${slug} with the GitHub App, most likely because the App is not installed on it. On GitHub open Settings, Applications, Installed GitHub Apps, Configure on the App, and choose All repositories (or add ${slug}). Nothing needs changing in the code or the secrets.${perRepoTokenFix(slug, repo?.alias)}`;
+    const owner = slug.split("/")[0] ?? "";
+    // A repository in someone else's account (an organisation) needs the App installed there, not on Paul's own account.
+    const where =
+      owner && norm(owner) !== norm(config.repos.owner)
+        ? `It belongs to the ${owner} organisation, so the App has to be installed there: on GitHub open ${owner}'s Settings, GitHub Apps, Configure, and give the App access to this repository (or to all of ${owner}'s repositories).`
+        : `On GitHub open Settings, Applications, Installed GitHub Apps, Configure on the App, and choose All repositories (or add ${slug}).`;
+    return `I could not reach ${slug} with the GitHub App, most likely because the App is not installed on it. ${where} Nothing needs changing in the code or the secrets.${perRepoTokenFix(slug, repo?.alias)}`;
   }
   if (perms) {
     return `I could not reach ${slug} with the GitHub token (GH_TOKEN), most likely because the token has no access to it. ${SETTINGS_PATH} Fine-grained tokens, open the token, under Repository access add ${slug} (or choose All repositories), and make sure Contents and Pull requests are Read and write and Workflows is Read and write (a classic token needs "repo" and "workflow"). Nothing needs changing in the code. If you changed the token, ${REPLACE_SECRET}${perRepoTokenFix(slug, repo?.alias)}`;
