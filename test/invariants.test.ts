@@ -965,3 +965,23 @@ test("the retrieval record holds the decision, never Paul's mail, calendar or up
   // And the chief's own records are bounded, so the store cannot grow without limit.
   assert.match(src("store.ts"), /RETRIEVAL_TURNS_KEPT/, "the chief's retrieval records are bounded");
 });
+
+test("the web app inspector is signed out and read-only by construction", async () => {
+  const inspect = src("inspect.ts");
+  // No credential machinery: no vault, no saved cookies or sessions, no sign-in path at all.
+  assert.doesNotMatch(inspect, /savedCookies|storageState|VaultEntry|markUsed|\.signIn\(/, "the inspector never touches the sign-in browser's credentials");
+  assert.doesNotMatch(inspect, /mayAct|purchaseUntil/, "the inspector has no act-freely list and no purchase window");
+  // Every request goes through the egress proxy, and only reading methods ever leave the page.
+  assert.match(inspect, /startEgressProxy/, "the inspector's browser only reaches the network through the egress proxy");
+  assert.match(inspect, /if \(ALLOWED_METHODS\.has\(req\.method\(\)\.toUpperCase\(\)\)\) return route\.continue\(\)/, "only GET, HEAD and OPTIONS pass");
+  assert.match(inspect, /return route\.abort\("blockedbyclient"\)/, "anything else is refused");
+  // Token-like query and fragment values are masked before a captured address is kept.
+  assert.match(inspect, /export function redactUrl/, "addresses are redacted");
+  assert.match(inspect, /url: redactUrl\(res\.url\(\)\)/, "captured addresses pass through redactUrl");
+  // Its tools can read and observe only: no clicking, typing or signing in.
+  const { INSPECTOR_TOOLS } = await import("../src/inspect.js");
+  const names = INSPECTOR_TOOLS.map((t) => t.split("__").pop());
+  assert.deepEqual([...names].sort(), ["assets", "fetch_asset", "network", "open", "read"], "the inspector's tools");
+  // And it never sees a request's headers, cookies or body.
+  assert.doesNotMatch(inspect, /req\.headers|\.postData|request\.postData/, "headers and bodies are never read");
+});
