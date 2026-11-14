@@ -21,7 +21,7 @@ import type { Browser, BrowserContext, Page } from "playwright-core";
 import { config } from "./config.js";
 import { designIdentity, designerTemp, startEgressProxy, type EgressProxy } from "./design.js";
 import { codeTtlMs, type CodeRelay } from "./otp.js";
-import { CONSEQUENTIAL, FINAL_ORDER, checkoutStepOnly, neverReason } from "./site-policy.js";
+import { CONSEQUENTIAL, FINAL_ORDER, checkoutStepOnly, neverReason, protectedOnUnlocked } from "./site-policy.js";
 import type { SignupPage } from "./signup.js";
 import { hostMatches, totp, type VaultEntry } from "./vault.js";
 
@@ -350,6 +350,12 @@ export class BrowseSession {
     if (cookies.length) await this.context.addCookies(cookies as unknown as Parameters<BrowserContext["addCookies"]>[0]).catch(() => undefined);
     await this.context.route("**/*", (route) => {
       const req = route.request();
+      // On a site Paul unlocked to act as him, its settings, secrets, tokens and the like stay out of reach
+      // to every request, reading included (src/site-policy.ts PROTECTED_PATHS).
+      if (protectedOnUnlocked(req.url())) {
+        this.refused.push(`${req.method()} ${req.url()}`);
+        return route.abort("blockedbyclient");
+      }
       if (ALLOWED_METHODS.has(req.method().toUpperCase())) return route.continue();
       // Anything that can change something goes only to sites where agents may act.
       let host = "";
@@ -445,6 +451,7 @@ export class BrowseSession {
 
   async open(url: string): Promise<string> {
     this.count();
+    if (protectedOnUnlocked(url)) return "Refused: that page is a settings, security, secrets, billing or similar page on a site Paul lets you act on as him, and those stay out of reach. Report what you wanted to change there so Paul can do it himself.";
     const page = await this.ensure();
     const res = await page.goto(checkUrl(url), { waitUntil: "domcontentloaded" });
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);

@@ -10,6 +10,15 @@
  * work accounts, password managers, government identity and tax, and the infrastructure the workforce
  * itself runs on. A rule change in chat can only add to or trim the act-freely list; it cannot reach
  * those, and every change is confirmed back to Paul.
+ *
+ * One exception, Paul's call (14 Nov 2026, "I want this workforce to act as me on some sites of my
+ * choosing"): a site in an `unlockable` group (the infrastructure group, GitHub among it) can be
+ * unlocked by Paul's own chat message `act as me on <site>`, parsed by the service before any model
+ * (src/orchestrator.ts), never by the chief or a worker. On an unlocked site the workforce may store
+ * his login, sign in as him and act as him, except on the pages that would let it change its own
+ * guardrails or his account (`PROTECTED_PATHS`: settings, security, secrets, tokens, keys, billing,
+ * members, apps, branch rules, deleting and transferring), which stay refused to every request. The
+ * other groups (money, email, Microsoft, password managers, government) can never be unlocked.
  */
 
 /** A bare lowercase host for a domain or URL Paul or an agent gave: "https://www.Example.com/x" -> "example.com". */
@@ -28,7 +37,7 @@ export function onDomain(host: string, domain: string): boolean {
 }
 
 /** Never signed in to or acted on, whatever is said in chat. Each group says why. */
-export const NEVER_SITES: Array<{ why: string; domains: string[]; words?: RegExp }> = [
+export const NEVER_SITES: Array<{ why: string; domains: string[]; words?: RegExp; unlockable?: boolean }> = [
   {
     why: "banks, payments, investing and crypto are never automated",
     domains: [
@@ -56,18 +65,109 @@ export const NEVER_SITES: Array<{ why: string; domains: string[]; words?: RegExp
     domains: ["hmrc.gov.uk", "tax.service.gov.uk", "account.gov.uk", "sign-in.service.gov.uk", "access.service.gov.uk", "gateway.gov.uk", "irs.gov", "login.gov", "elster.de"],
   },
   {
-    why: "the workforce never signs in to the infrastructure it runs on",
+    why: "the workforce never signs in to the infrastructure it runs on unless you unlock the site yourself (act as me on <site>)",
+    unlockable: true,
     domains: ["github.com", "fly.io", "openrouter.ai", "anthropic.com", "claude.ai", "godaddy.com", "discord.com", "telegram.org", "aws.amazon.com", "cloudflare.com", "ovhcloud.com", "ovh.com", "brave.com", "exa.ai"],
   },
 ];
 
+/** Where the sites Paul unlocked with "act as me on <site>" are read from (the store, wired at boot). */
+let actAsMeSource: () => string[] = () => [];
+export function registerActAsMe(source: () => string[]): void {
+  actAsMeSource = source;
+}
+
+/** The sites Paul unlocked himself, safely: a broken source unlocks nothing. */
+export function actAsMeSites(): string[] {
+  try {
+    return actAsMeSource().map((d) => d.toLowerCase());
+  } catch {
+    return [];
+  }
+}
+
+/** The host is on a site Paul unlocked in an unlockable group. */
+export function unlockedForPaul(host: string): boolean {
+  const d = host.toLowerCase();
+  return actAsMeSites().some((u) => onDomain(d, u)) && NEVER_SITES.some((g) => g.unlockable && g.domains.some((n) => onDomain(d, n)));
+}
+
 /** Why a domain is off limits, or undefined when it is not. */
 export function neverReason(domain: string): string | undefined {
   const d = domain.toLowerCase();
+  const unlocked = actAsMeSites().filter((u) => onDomain(d, u));
   for (const g of NEVER_SITES) {
+    if (g.unlockable && unlocked.length) continue;
     if (g.domains.some((n) => onDomain(d, n))) return g.why;
     if (g.words?.test(d)) return g.why;
   }
+  return undefined;
+}
+
+/**
+ * Pages on an unlocked site that stay refused to every request, reading included: the places where a
+ * signed-in session could change the workforce's own guardrails or Paul's account rather than do work
+ * as him. GitHub's settings, secrets, tokens, branch rules, apps, members, billing and danger zone are
+ * all here, and the same words cover the other infrastructure sites.
+ */
+export const PROTECTED_PATHS =
+  /(^|\/)(settings|security|secrets|tokens|personal-access-tokens|keys|ssh|gpg|billing|payment|plan|members|collaborators|access|teams|people|installations|apps|applications|hooks|webhooks|rules|rulesets|branches|protection|environments|runners|admin|danger|delete|transfer|archive|sessions|password|two-factor|2fa|account|organizations\/new|api-keys|credits|deploy-keys)(\/|$)/i;
+
+/** A URL that is a protected page on a site Paul unlocked: refused, whatever the method. */
+export function protectedOnUnlocked(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!unlockedForPaul(u.hostname)) return false;
+  // GitHub's API spells the same places as /repos/<o>/<r>/<thing> and /user/<thing>: the same words apply.
+  return PROTECTED_PATHS.test(u.pathname);
+}
+
+/** Paul's own "act as me on <site>": only a site in an unlockable group, confirmed back in plain words. */
+export function unlockActAsMe(current: string[], input: string): { sites: string[]; text: string } {
+  let d: string;
+  try {
+    d = normaliseDomain(input);
+  } catch {
+    return { sites: current, text: `"${input}" is not a site name. Send: act as me on github.com` };
+  }
+  const group = NEVER_SITES.find((g) => g.domains.some((n) => onDomain(d, n)) || g.words?.test(d));
+  if (group && !group.unlockable) return { sites: current, text: `${d} stays off limits: ${group.why}. That one cannot be unlocked.` };
+  if (!group)
+    return {
+      sites: current,
+      text: `${d} is not blocked, so nothing to unlock. Add its login on the vault page (ask for the vault link) and agents will sign in and act there as you; paying, sending, posting and deleting still come to you.`,
+    };
+  const sites = [...new Set([...current, d])].sort();
+  return {
+    sites,
+    text: `Done: agents may now sign in to ${d} as you, with the login you add on the vault page (ask for the vault link if it is not there yet). They can do work there as you, but its settings, security, secrets, tokens, keys, billing, members, apps and branch rules stay out of reach, and paying, posting, publishing and deleting still come to you. Send "stop acting as me on ${d}" to undo it.`,
+  };
+}
+
+/** Paul's own "stop acting as me on <site>". */
+export function lockActAsMe(current: string[], input: string): { sites: string[]; text: string } {
+  let d: string;
+  try {
+    d = normaliseDomain(input);
+  } catch {
+    return { sites: current, text: `"${input}" is not a site name.` };
+  }
+  if (!current.includes(d)) return { sites: current, text: `${d} was not unlocked, so nothing changed.` };
+  return { sites: current.filter((x) => x !== d), text: `${d} is locked again: agents will not sign in there as you. Its login stays in the vault unused; say remove the login if you want it gone.` };
+}
+
+/** "act as me on <site>", "stop acting as me on <site>" or "act as me" (the list): whole message only. */
+export function parseActAsMeCommand(text: string): { verb: "unlock" | "lock" | "list"; site?: string } | undefined {
+  const t = text.trim();
+  let m = t.match(/^act as me on\s+(\S+)$/i);
+  if (m) return { verb: "unlock", site: m[1] };
+  m = t.match(/^stop acting as me on\s+(\S+)$/i);
+  if (m) return { verb: "lock", site: m[1] };
+  if (/^act as me\??$/i.test(t)) return { verb: "list" };
   return undefined;
 }
 

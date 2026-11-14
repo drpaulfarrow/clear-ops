@@ -1,7 +1,7 @@
 import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config, engineerSlotsLine } from "./config.js";
-import { SitePolicy, termsWarning } from "./site-policy.js";
+import { registerActAsMe, SitePolicy, termsWarning } from "./site-policy.js";
 import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError, cardVault, VAULT_CARD_PATH, VAULT_LINK_MINUTES } from "./vault.js";
 import type { Vault, CardVault } from "./vault.js";
 import { escapeHtml, field, htmlPage, expiredPage } from "./page-style.js";
@@ -437,6 +437,8 @@ if (isMain) {
   console.log(engineerSlotsLine());
   const store = new Store(config.dataDir);
   repoRegistry.load(store);
+  // The sites Paul unlocked himself with "act as me on <site>" (src/site-policy.ts).
+  registerActAsMe(() => store.settings().actAsMe ?? []);
   // With the GitHub App configured, keep its installation token fresh for git and gh during long jobs.
   startTokenRefresher();
   const repoProblems = await bootstrapRepos();
