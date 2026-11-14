@@ -11,10 +11,11 @@ Until you do this, nothing changes: the workforce keeps using the `GH_TOKEN` sec
 1. On GitHub, click your profile picture, then **Settings**, then **Developer settings** (bottom of the left menu), then **GitHub Apps**, then **New GitHub App**.
 2. Name it something like `clear-ops-workforce`. Homepage URL: `https://github.com/drpaulfarrow/clear-ops`. Untick **Webhook, Active** (we do not use webhooks).
 3. Under **Repository permissions** set: **Contents**: Read and write. **Pull requests**: Read and write. **Workflows**: Read and write. **Metadata**: Read-only (it is already on). **Issues**: Read and write, only if you want the workforce to use issues. Leave everything else as No access.
-4. Under **Where can this GitHub App be installed?** choose **Only on this account**. Click **Create GitHub App**.
+4. Under **Where can this GitHub App be installed?** choose **Only on this account**. Click **Create GitHub App**. (If you want the workforce to work on a repository that belongs to an organisation, install the App on that organisation as well, in step 7b: only an organisation owner can approve it.)
 5. On the App's page, copy the **App ID** (a number near the top). You will need it in step 9.
 6. Scroll to **Private keys** and click **Generate a private key**. A `.pem` file downloads. Keep it private: anyone with it can act as the App.
 7. In the left menu click **Install App**, then **Install** next to `drpaulfarrow`. Choose **All repositories** (not "Only select repositories"). This is what makes new repositories work automatically. Click **Install**.
+7b. For a repository in an organisation (for example the managed repository `doubleshift`, `shftd2-pre/app-doubleshift`): on the same **Install App** page choose **Install** next to the organisation, and give the App access to that repository (or to all of the organisation's repositories). An organisation owner has to approve it. Nothing in the workforce changes: the App reaches whatever it is installed on.
 8. Open the `clear-ops` repository on GitHub, then **Settings**, **Secrets and variables**, **Actions**, **New repository secret**.
 9. Add these secrets. GitHub does not allow secret names that start with `GITHUB_`, so these are named `GH_APP_...`; the deploy passes them on to the service. Open the `.pem` file in a text editor, copy everything including the `BEGIN` and `END` lines, and paste it as the value.
    - `GH_APP_ID`: the App ID from step 5.
@@ -34,5 +35,5 @@ Until you do this, nothing changes: the workforce keeps using the `GH_TOKEN` sec
 ## If something is wrong
 
 - `/status` says the App is failing: check `GH_APP_ID` and `GH_APP_PRIVATE_KEY` match the App, then re-run the deploy.
-- A repository is not reachable: GitHub, Settings, Applications, Installed GitHub Apps, Configure, and choose **All repositories**.
+- A repository is not reachable: GitHub, Settings, Applications, Installed GitHub Apps, Configure, and choose **All repositories**. If the repository belongs to an organisation, the App has to be installed on that organisation instead: open the organisation's Settings, GitHub Apps, Configure, and give the App access to the repository (an organisation owner approves). The chief's own message names the organisation when that is what is missing.
 - Creating a repository fails: that needs the classic `GH_TOKEN` (see the top of this page).
