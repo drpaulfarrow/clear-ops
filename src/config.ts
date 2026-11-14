@@ -126,6 +126,20 @@ export const config = {
     exaKey: process.env.EXA_API_KEY ?? "",
   },
   /**
+   * Retrieval as a harness decision (src/retrieval.ts, slice 5 of Paul's efficiency brief): before the
+   * chief or a search-carrying worker answers, the service decides on the cheapest model whether a
+   * search is needed, runs it itself within a hard budget, and hands the results over as fenced
+   * evidence. `RETRIEVAL=off` turns the whole step off; the model never chooses whether to retrieve.
+   */
+  retrieval: {
+    enabled: (process.env.RETRIEVAL ?? "on").toLowerCase() !== "off",
+    /** The decision step's model. Always the cheap tier: a strong alias, the designer's or the assistant's role is refused. */
+    model: process.env.RETRIEVAL_MODEL ?? "",
+    /** The hard budget the harness enforces itself, never something asked of the model. */
+    maxSearches: Math.floor(positive(process.env.RETRIEVAL_MAX_SEARCHES, 3)),
+    maxFetches: Math.floor(positive(process.env.RETRIEVAL_MAX_FETCHES, 2)),
+  },
+  /**
    * Voice notes: audio Paul sends in chat, transcribed by the service before the chief sees it
    * (src/transcribe.ts). One plain HTTPS call to an OpenAI-compatible /audio/transcriptions
    * endpoint, OpenRouter by default: its key is already set for the models, so transcription needs
