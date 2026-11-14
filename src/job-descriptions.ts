@@ -60,6 +60,14 @@ const KIND_LINES: Record<JobKind, string> = {
   prebid: "answers Prebid questions from primary sources, inventing nothing",
 };
 
+/**
+ * What Paul calls this kind of worker, in one word ("maintainer", not "main"). Exported for anything
+ * that names a kind outside a card, such as the per-kind figures on the board's health section.
+ */
+export function kindName(kind: JobKind | string): string {
+  return KIND_NAMES[kind as JobKind] ?? kind;
+}
+
 /** Paul's own name for a repository, so the card never shows an internal alias such as "self". */
 export function repoLabel(alias: string | undefined): string {
   if (!alias || alias === "product") return "Clear Exchange";

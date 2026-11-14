@@ -19,6 +19,9 @@ const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
 const { boardToken, boardTokenValid, boardData, renderBoard, BOARD_PATH, BOARD_REFRESH_SECONDS } = await import("../src/jobs-board.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
+const { boardHealth, HealthProbes } = await import("../src/health.js");
+const { boardEfficiency, NO_REAL_COST } = await import("../src/worker-stats.js");
+const { UptimeLog } = await import("../src/uptime.js");
 import type { AgentRunner } from "../src/agents.js";
 import type { JobRunner } from "../src/jobs.js";
 import type { Scheduler } from "../src/scheduler.js";
@@ -36,6 +39,9 @@ const at = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 const MIN = 60_000;
 
 let store: InstanceType<typeof Store>;
+let app: ReturnType<typeof buildApp>;
+let uptimeLog: UptimeLog;
+let healthProbes: HealthProbes;
 let scheduler: Scheduler;
 let queue: JobRunner;
 let server: import("node:http").Server;
@@ -51,6 +57,16 @@ let vagueJob: Job;
 
 before(async () => {
   store = new Store(process.env.DATA_DIR!);
+  // The board's health block, with the heartbeat file in the test's own directory and two probes
+  // that never touch the network: the wiring the entry point uses, without either timer leaking out.
+  uptimeLog = new UptimeLog({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-board-uptime-")) });
+  healthProbes = new HealthProbes(
+    [
+      { name: "model provider", check: async () => ({ state: "ok", detail: "answered" }) },
+      { name: "GitHub", check: async () => ({ state: "fail", detail: "did not answer" }) },
+    ],
+    { intervalMs: 60 * MIN },
+  );
   // A schedule made before boot, so the scheduler arms it and the board can show a next run.
   store.createSchedule({ cron: "0 7 * * *", timezone: "Europe/London", kind: "research", brief: "SECRET SCHEDULE BRIEF", requestedBy: PAUL, title: "Morning research" });
 
@@ -81,7 +97,8 @@ before(async () => {
   reviewJob = store.updateJob(job("maintain", "Review: Fix deploy", "Review the pull request the engineer just opened for this task, and any other open pull requests:\n\nFix the deploy.\n\nEngineer's report:\nSECRET REPORT TEXT", "self").id, { status: "running", startedAt: at(2 * MIN), lastActivityAt: at(1 * MIN), pr: "https://github.com/drpaulfarrow/clear-ops/pull/63" });
   vagueJob = store.updateJob(job("dns", "Domain check", "  ", "self").id, { status: "done", finishedAt: at(20 * MIN) });
 
-  const built = buildApp({ messenger, runner, store });
+  const built = buildApp({ messenger, runner, store, uptime: uptimeLog, probes: healthProbes });
+  app = built;
   scheduler = built.scheduler;
   queue = built.jobs;
   await new Promise<void>((r) => (server = built.app.listen(0, r)));
@@ -125,7 +142,7 @@ test("the page is served only with the token, is never cached, and has no way to
   const jsonRes = await fetch(`${base}${BOARD_PATH}?t=${token}&format=json`);
   assert.match(jsonRes.headers.get("content-type") ?? "", /application\/json/);
   const data = (await jsonRes.json()) as { running: unknown[]; queued: unknown[]; finished: unknown[]; scheduled: unknown[] };
-  assert.deepEqual(Object.keys(data).sort(), ["finished", "generatedAt", "paused", "queued", "running", "scheduled"]);
+  assert.deepEqual(Object.keys(data).sort(), ["efficiency", "finished", "generatedAt", "health", "paused", "queued", "running", "scheduled"]);
   assert.equal(data.running.length, 3);
   assert.equal(data.queued.length, 1);
   assert.equal(data.finished.length, 4);
@@ -223,6 +240,8 @@ test("only a running card carries the turning arc and the pulse, and nothing on 
     {
       generatedAt: new Date().toISOString(),
       paused: false,
+      health: boardHealth({ store, now: Date.now() }),
+      efficiency: boardEfficiency({ jobs: [], now: Date.now() }),
       running: [card("run0001", "Running card", "running")],
       queued: [card("queue001", "Queued card", "queued")],
       finished: [card("done0001", "Done card", "done"), card("fail0001", "Failed card", "failed")],
@@ -317,7 +336,15 @@ test("no token, pasted report, output, schedule brief, spend figure or personal 
     assert.ok(!json.includes(full), `the whole brief is in the JSON: ${j.id}`);
     assert.ok(!html.includes("NOT-ON-A-CARD"), "text past the cap reached the page");
   }
-  for (const word of ["cost", "spend", "budget", "$"]) assert.ok(!json.includes(word) && !html.includes(word), `a figure reached the board: ${word}`);
+  // Money: still no spend figure, no cap, no budget and no amount of money on the page or in the JSON,
+  // and still no per-kind cost figure here, because this store holds no real one. The word "cost"
+  // appears only in the one honest sentence saying exactly that (worker-stats.ts), so the ban on the
+  // word is replaced by a check of what it is doing there, and by the checks that matter more: no
+  // amount of money, no SDK estimate, no costUsd.
+  for (const word of ["spend", "budget", "$", "costUsd", "costSource"]) assert.ok(!json.includes(word) && !html.includes(word), `a figure reached the board: ${word}`);
+  assert.ok(!/\$\s?\d/.test(html) && !/\$\s?\d/.test(json), "a money amount reached the board");
+  assert.ok(!json.includes('"cost"'), "a per-kind cost figure reached the JSON");
+  assert.ok(json.includes(NO_REAL_COST) && html.includes("no real figure is stored for these jobs"), "the board says plainly that no real figure is stored");
   assert.ok(!json.includes(boardToken(store)), "the token is not in the JSON");
 });
 
@@ -327,4 +354,33 @@ test("the board reads no spend, holds no cost field, and reads no brief except t
   assert.ok(!/costUsd/.test(src), "the board must not carry a cost");
   assert.ok(!/"summary"|\.summary/.test(src), "the board must not show a job's report message");
   assert.ok(!/\.brief/.test(src), "every brief the board shows is cleaned, redacted and capped in src/job-descriptions.ts");
+});
+
+test("the entry point's health wiring: the heartbeat and the checks reach the board, and both stop", async () => {
+  assert.equal(typeof app.startHealth, "function", "the running service starts them and a test never has to");
+  const stop = app.startHealth();
+  try {
+    // A start and a heartbeat are written at once, so a restart always leaves a mark to measure from.
+    const lines = fs.readFileSync(uptimeLog.path(), "utf8").trim().split("\n");
+    assert.ok(lines.length >= 2, "the boot marker and the first beat");
+    assert.ok(lines.some((l) => l.includes('"b":true')), "the start is recorded apart from the beats");
+    await healthProbes.tick();
+    const token = boardToken(store);
+    const data = (await (await fetch(`${base}${BOARD_PATH}?t=${token}&format=json`)).json()) as {
+      health: { level: string; headline: string; checks: Array<{ name: string; state: string }>; uptime: { empty: boolean; strip: unknown[] } };
+      efficiency: { windows: Array<{ label: string; kinds: unknown[] }> };
+    };
+    assert.equal(data.health.checks.find((c) => c.name === "GitHub")!.state, "fail");
+    assert.equal(data.health.level, "warn");
+    assert.match(data.health.headline, /GitHub did not answer/);
+    assert.equal(data.health.uptime.empty, false, "the beats written by this process are the uptime figure");
+    assert.equal(data.health.uptime.strip.length, 48);
+    assert.equal(data.efficiency.windows.length, 2);
+    const html = await (await fetch(`${base}${BOARD_PATH}?t=${token}`)).text();
+    assert.match(html, /Health and uptime/);
+    assert.match(html, /GitHub<\/span>: did not answer/, "a failing check is one honest line");
+    assert.match(html, /the service last started|The service last started/i);
+  } finally {
+    stop();
+  }
 });

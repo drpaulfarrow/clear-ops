@@ -19,7 +19,7 @@ import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
 import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoCredentialLine, repoProblemsMessage } from "./bootstrap.js";
-import { startTokenRefresher } from "./github-auth.js";
+import { githubAuth, startTokenRefresher } from "./github-auth.js";
 import { repoRegistry } from "./repos.js";
 import { REPO_SERVER, repoServer } from "./repo-tools.js";
 import type { AgentRunner } from "./agents.js";
@@ -42,6 +42,8 @@ import { GmailCodeReader, type CodeMailbox } from "./mail-code.js";
 import { VoiceBridge } from "./voice-bridge.js";
 import { BOARD_PATH, boardData, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
+import { UptimeLog } from "./uptime.js";
+import { defaultProbes, HealthProbes } from "./health.js";
 import fs from "node:fs";
 
 export interface AppDeps {
@@ -69,6 +71,10 @@ export interface AppDeps {
   vault?: Vault;
   /** The card vault, for the same reason. */
   cardVault?: CardVault;
+  /** The board's heartbeat log. Built from the data directory by default; a test injects one. */
+  uptime?: UptimeLog;
+  /** The board's dependency checks. Built from config by default; a test injects fakes. */
+  probes?: HealthProbes;
 }
 
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
@@ -200,6 +206,23 @@ export function buildApp(deps: AppDeps) {
   // Cleo, the voice brain: hands spoken requests to the chief as if typed in the voice channel's chat.
   const voice = new VoiceBrain({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address }), tap });
   const holdWatcher = new HoldWatcher(deps.store, googleApi, deps.messenger);
+  // The board's health block (src/health.ts): one heartbeat a minute and a light probe of everything
+  // the workforce depends on, every five. Neither touches a job: the probes are one small read-only
+  // request each, and the page only ever reads the last pass. Both are started by the entry point, so
+  // tests never open a file or reach the network, and the timers are unref'd.
+  const uptime = deps.uptime ?? new UptimeLog({ dir: config.dataDir });
+  const probes = deps.probes ?? new HealthProbes(defaultProbes({ githubToken: () => githubAuth.token() }));
+  // The start is recorded here rather than above, so a process that only builds the app (a test)
+  // leaves no mark: a heartbeat file is written by a running service, and by nothing else.
+  const startHealth = () => {
+    uptime.boot();
+    const stopBeat = uptime.start();
+    const stopProbes = probes.start();
+    return () => {
+      stopBeat();
+      stopProbes();
+    };
+  };
 
   /**
    * The assistant's background checks, run by the service itself (no model): stale follow-ups are
@@ -375,7 +398,18 @@ export function buildApp(deps: AppDeps) {
     boardHeaders(res);
     const token = typeof req.query.t === "string" ? req.query.t : "";
     if (!boardTokenValid(deps.store, token)) return res.status(404).type("html").send(refusedPage());
-    const board = boardData({ store: deps.store, queue: jobs, schedules: scheduler.upcoming() });
+    // The health block and the per-kind figures are read from what the service already knows: the
+    // heartbeats this process writes, the last probe pass, the queue's own counts and the runner's
+    // own view of whether a job's worker is alive. Nothing here waits for a request or a probe.
+    const board = boardData({
+      store: deps.store,
+      queue: jobs,
+      schedules: scheduler.upcoming(),
+      uptime,
+      probes,
+      activeWorkers: () => jobs.activeCount(),
+      liveness: (id) => jobs.liveness(id),
+    });
     if (req.query.format === "json") return res.type("application/json").send(JSON.stringify(board));
     res.type("html").send(renderBoard(board, token));
   });
@@ -424,7 +458,7 @@ export function buildApp(deps: AppDeps) {
     res.type("html").send(renderReportPage(report.entry, report.markdown ?? "", token));
   });
 
-  return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, voice };
+  return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, startHealth, voice };
 }
 
 // Entry point when run directly
@@ -462,8 +496,11 @@ if (isMain) {
     if (to) void messenger.send(to, text).catch(() => undefined);
   };
   const outputs = new OutputsPublisher(store, { onProblem: notifyPaul });
-  const { app, orchestrator, jobs, startEaTimers, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs });
+  const { app, orchestrator, jobs, startEaTimers, startHealth, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs });
   startEaTimers();
+  // The board's own timers: one heartbeat a minute and the dependency checks every five. Both are
+  // read-only and unref'd, so neither holds the process open nor waits on anything.
+  startHealth();
   app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
 
   if (config.channels.includes("telegram")) {
