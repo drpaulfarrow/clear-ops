@@ -6,7 +6,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 | Ask for | Worker | What you get |
 |---|---|---|
-| Research, "go deep on..." | researcher | A sourced brief (long and structured if you ask for depth) |
+| Research, "go deep on...", "how does \<site\> work?" | researcher | A sourced brief (long and structured if you ask for depth), or a read-only, signed-out look at how a public web app is built: what it loads, what its frontend calls and what its delivered code says. It never signs in and never probes endpoints the page did not call |
 | Posts, emails, specs in your voice | writer | A draft |
 | "Engineer: build X" | engineer | A pull request with tests; the maintainer reviews and merges it, and review fixes loop on their own (three rounds) |
 | Runs after every engineer job (you do not ask for it) | maintainer | Runs the tests and CI, reads the diff, then merges or requests changes. It never edits code |

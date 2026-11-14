@@ -7,6 +7,7 @@
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { config } from "./config.js";
 import { BROWSE_SERVER, BROWSE_TOOLS, BrowseSession, browseServer, type BrowseDeps } from "./browse.js";
+import { INSPECTOR_SERVER, INSPECTOR_TOOLS, InspectionSession, inspectorServer, type InspectDeps } from "./inspect.js";
 import { OTP_NOTE } from "./otp.js";
 import { PAGE_MECHANICS_NOTE } from "./page-mechanics.js";
 import { SEARCH_SERVER, SEARCH_TOOLS, searchEngines, searchServer, type Fetcher } from "./search.js";
@@ -25,11 +26,12 @@ export interface WebTools {
   session?: BrowseSession;
 }
 
-export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: BrowseDeps } = {}): WebTools {
+export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: BrowseDeps; inspect?: InspectDeps } = {}): WebTools {
   const servers: Record<string, McpServerConfig> = {};
   const allowed: string[] = [];
   const notes: string[] = [];
   let session: BrowseSession | undefined;
+  let inspector: InspectionSession | undefined;
   const engines = searchEngines();
   if (SEARCH_KINDS.includes(kind) && engines.length) {
     servers[SEARCH_SERVER] = searchServer(deps.fetcher);
@@ -48,6 +50,15 @@ export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: B
       PAGE_MECHANICS_NOTE,
       OTP_NOTE,
     );
+    // The inspector (src/inspect.ts) is a second, always-signed-out browser for "how does this web app
+    // work": it never carries Paul's logins, cookies or saved sessions, so it can only ever see what a
+    // logged-out visitor sees, and it has no way to click, type, submit a form or change anything.
+    inspector = new InspectionSession(deps.inspect);
+    servers[INSPECTOR_SERVER] = inspectorServer(inspector);
+    allowed.push(...INSPECTOR_TOOLS);
+    notes.push(
+      "Inspector: open, read, network, assets and fetch_asset explain how a public web app is built: what it loads, what its frontend calls and what its delivered code says. This browser is always signed out - no logins, cookies or saved sessions - and cannot click, type, submit a form or change anything, so it only ever sees what any visitor sees. Use it for 'how does <site> work'. It lists the requests the page itself made; never call an endpoint the page did not call, and never use it on someone's account or private data.",
+    );
   }
   return {
     servers,
@@ -55,6 +66,7 @@ export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: B
     note: notes.length ? `\n\nWeb tools:\n${notes.join("\n")}` : "",
     close: async () => {
       await session?.close();
+      await inspector?.close();
     },
     ...(session ? { session } : {}),
   };

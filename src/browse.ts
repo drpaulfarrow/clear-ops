@@ -274,7 +274,7 @@ export const CODE_FIELD = /otp|one-?time|passcode|verification|two-?step/i;
  * Starts Chromium as the designer with DevTools on a loopback port and connects Playwright to it. The
  * process is ours (spawned with the designer's uid), so Playwright never launches anything as root.
  */
-async function launchChromium(proxy: string): Promise<{ browser: Browser; stop: () => Promise<void> }> {
+export async function launchChromium(proxy: string): Promise<{ browser: Browser; stop: () => Promise<void> }> {
   const { chromium } = await import("playwright-core");
   const who = await designIdentity();
   const profile = designerTemp("clear-browse-", who);
