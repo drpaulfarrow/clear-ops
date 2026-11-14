@@ -81,8 +81,8 @@ after(() => {
   server.close();
 });
 
-/** The reports view's path, taken from the module that serves it, as src/index.ts's gate does. */
-const { REPORTS_PATH } = await import("../src/reports.js");
+/** The reports view's path and token, taken from the module that serves it, as src/index.ts's gate does. */
+const { REPORTS_PATH, reportsToken } = await import("../src/reports.js");
 
 /**
  * Every browser view the sign-in covers, with words that must never come back to a stranger. Both
@@ -276,23 +276,43 @@ test("an unsigned-in visit to a view gets the sign-in page and none of the conte
 });
 
 test("every gated path is under the same gate, index and one item alike", async () => {
-  // The reports view's own routes are not in this branch yet (they land with src/reports.ts), but its
-  // path is gated all the same, so the page cannot be served without the sign-in the day it arrives.
+  // Both views' routes are in main now (src/reports.ts and src/jobs-board.ts), each at its own path taken
+  // from the module that serves it; the gate covers the index and one item with the same rule.
   for (const p of [`${REPORTS_PATH}?t=x`, `${REPORTS_PATH}/abc?t=x`, `${BOARD_PATH}?t=x`, `${BOARD_PATH}/anything`]) {
     const res = await get(p);
     assert.equal(res.status, 303, `${p} is not served to a stranger`);
     assert.equal(res.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(p)}`);
   }
   // And what is not a browser view is not gated: the sign-in pages themselves, the one-time password
-  // page and the health check all answer a stranger rather than sending him round the sign-in.
-  for (const p of ["/health", "/sign-in", "/password"]) {
+  // page, the health check and a path that merely starts with a gated one (`/jobshere` is not `/jobs`)
+  // all answer a stranger rather than sending him round the sign-in.
+  for (const p of ["/health", "/sign-in", "/password", "/jobshere", `${BOARD_PATH}x`]) {
     const res = await get(p);
     assert.ok(!(res.headers.get("location") ?? "").startsWith(`${SIGN_IN_PATH}?next=`), `${p} must not be behind the gate`);
   }
-  // Signed in, the reports path is not a route at all yet: the gate let the request through, so this is
-  // the service's own 404 and not a redirect to the sign-in page.
+  // Signed in, the gate lets the request through and the route decides: a wrong token is the service's
+  // own 404, not a redirect to the sign-in page.
   const signed = await signedCookie();
   assert.equal((await get(`${REPORTS_PATH}?t=x`, signed)).status, 404);
+});
+
+test("a gated path is gated whatever its case, because the routes answer any case", async () => {
+  // Express matches route paths case-insensitively (`case sensitive routing` is off), so `GET /Jobs`
+  // reaches the board's route. The gate has to match the same way or the token in a forwarded link is
+  // enough on its own. This is the bypass the maintainer reproduced: `/Jobs?t=<token>` served the board.
+  const token = boardToken(store);
+  for (const p of [`/Jobs?t=${token}`, `/JOBS?t=${token}`, `/jObS?format=json&t=${token}`, `/Reports?t=x`, `/REPORTS`, `${REPORTS_PATH.toUpperCase()}/abc?t=x`]) {
+    const res = await get(p);
+    assert.equal(res.status, 303, `${p} is not served to a stranger`);
+    assert.equal(res.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(p)}`, `${p}: sent to the sign-in page`);
+  }
+  // Signed in, the same differently-cased path does serve the page (the route is case-insensitive), which
+  // is exactly why the gate above must be too; the sign-in still has to run first for a stranger.
+  const signed = await signedCookie();
+  assert.equal((await get(`/Jobs?t=${token}`, signed)).status, 200, "signed in, the board answers /Jobs");
+  assert.match(await text(await get(`/Jobs?t=${token}`, signed)), /Workforce jobs/);
+  assert.equal((await get(`/JOBS?t=${token}`, signed)).status, 200, "and /JOBS");
+  assert.equal((await get(`/reports?t=${reportsToken(store)}`, signed)).status, 200, "and the reports index");
 });
 
 test("signing in from a bookmarked link lands on the page he asked for, and the token still has to match", async () => {
@@ -310,6 +330,15 @@ test("signing in from a bookmarked link lands on the page he asked for, and the 
     const r = await post(SIGN_IN_PATH, { password: PASSWORD, next: bad });
     assert.equal(r.status, 303);
     assert.match(r.headers.get("location") ?? "", new RegExp(`^${BOARD_PATH}\\?t=`), `${JSON.stringify(bad)} must not be followed`);
+  }
+  // A climb hidden in percent-encoding: a browser resolves `%2e%2e` as a dot segment, so `/jobs/%2e%2e/...`
+  // would leave the page even though the literal `..` check passes. Each must land on the plain board, not
+  // on the crafted path.
+  const home = `${BOARD_PATH}?t=${token}`;
+  for (const bad of ["/jobs/%2e%2e/%2e%2e/evil", "/jobs/%2E%2E/x", `${REPORTS_PATH}/%2e%2e/%2e%2e/evil`, "/jobs/%2e%2e%2f%2e%2e%2fevil", "/jobs/%5c..%5cx"]) {
+    const r = await post(SIGN_IN_PATH, { password: PASSWORD, next: bad });
+    assert.equal(r.status, 303);
+    assert.equal(r.headers.get("location"), home, `${JSON.stringify(bad)} must not be followed`);
   }
   // A gated page, with the token in the query, is kept as it was, index and one item alike.
   const kept = `${BOARD_PATH}?t=${token}&format=json`;

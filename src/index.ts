@@ -388,17 +388,41 @@ export function buildApp(deps: AppDeps) {
    * Nothing else the service serves is behind it: no webhook, no callback and no health check.
    */
   const GATED_PATHS = [REPORTS_PATH, BOARD_PATH];
-  const under = (path: string, base: string) => path === base || path.startsWith(`${base}/`);
+  /**
+   * Whether a request path is one of those pages, matched the way Express matches the routes it guards:
+   * case-insensitively (`case sensitive routing` is off, so `app.get(BOARD_PATH, ...)` also answers
+   * `/Jobs` and `/JOBS`) and by whole segment, so `/jobshere` is not swept in. Comparing case-sensitively
+   * here would let `GET /Jobs?t=<token>` serve the board with no session at all, and the token is in the
+   * link, which is the whole reason the password exists.
+   */
+  const under = (path: string, base: string) => {
+    const p = path.toLowerCase();
+    const b = base.toLowerCase();
+    return p === b || p.startsWith(`${b}/`);
+  };
   /**
    * Where a signed-in visitor may be sent: one of those pages, never anywhere else. A path that leaves
    * the service, doubles a slash, climbs with `..` or carries anything but the query's own characters
-   * is ignored, so the sign-in page cannot be used to send him somewhere else.
+   * is ignored, so the sign-in page cannot be used to send him somewhere else. Percent-encoding is
+   * checked as well: a browser resolves `%2e%2e` as a dot segment, so the decoded path is tested again
+   * (see below) rather than trusting the literal `..` check alone.
    */
   const SAFE_NEXT = /^\/[A-Za-z0-9._~/?&=%-]*$/;
   const safeNext = (value: unknown): string | undefined => {
     if (typeof value !== "string" || value.length > 300 || !SAFE_NEXT.test(value) || value.includes("//") || value.includes("..")) return undefined;
     const path = value.split("?")[0];
-    return GATED_PATHS.some((p) => under(path, p)) ? value : undefined;
+    if (!GATED_PATHS.some((p) => under(path, p))) return undefined;
+    // The encoded form of a climb (`/jobs/%2e%2e/%2e%2e/evil`) passes the literal `..` check above but
+    // resolves in the browser to `/evil`, so decode (best effort) and require the decoded path to be a
+    // plain gated path too: no climb, no doubled slash, no backslash and no whitespace.
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      return undefined;
+    }
+    if (decoded.includes("..") || decoded.includes("//") || /[\\\s]/.test(decoded)) return undefined;
+    return GATED_PATHS.some((p) => under(decoded, p)) ? value : undefined;
   };
   /** Where a signed-in visit with nowhere to go lands. */
   const landing = () => `${BOARD_PATH}?t=${boardToken(deps.store)}`;
