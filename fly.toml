@@ -18,6 +18,11 @@ primary_region = "lhr"
   WORKER_MODEL = "haiku"
   ENGINEER_MODEL = "haiku"
   DESIGN_MODEL = "haiku"
+  # The Agent SDK's own per-run guard, measured with its rounded-up estimate (about fifty times what
+  # OpenRouter really charges). It is not a bill and never a job's cap: it only stops a run that has
+  # gone badly wrong. A job's own cap, when one is set (JOB_BUDGET_USD and friends), counts the
+  # provider's real money instead, call by call.
+  SDK_RUNAWAY_BUDGET_USD = "1000"
   # Engineering jobs per repository that may run at once (four shared cores), each in its own working
   # copy. Change the number to run more or fewer; above 8 it is refused and the rest queue as usual.
   ENGINEER_SLOTS = "4"

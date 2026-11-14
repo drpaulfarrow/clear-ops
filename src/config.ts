@@ -280,11 +280,24 @@ export const config = {
     ttlHours: positive(process.env.SIGNUP_TTL_HOURS, 6),
     dailyCap: positive(process.env.SIGNUP_DAILY_CAP, 3),
   },
-  /** Per-run money limits are off by default (Paul's call, 13 Nov 2026); set the variable to bring one back. Turn and runtime limits still stop a runaway run. */
+  /**
+   * A job's own cap, counted in the provider's money (src/realcost.ts: the sum of what OpenRouter
+   * charged for that job's calls, read call by call). Off unless set (Paul's call, 13 Nov 2026), and
+   * never counted from the Agent SDK's estimate, so a job is never stopped while it has really spent
+   * pennies. It is enforced by the service during the run; the SDK guard below is a separate thing.
+   */
   jobBudgetUsd: optionalUsd(process.env.JOB_BUDGET_USD),
+  /** The same cap for engineer, create_agent and maintain jobs, in the provider's money. Off unless set. */
   engineerBudgetUsd: optionalUsd(process.env.ENGINEER_BUDGET_USD),
-  /** Spend cap per deep research job (start_job with depth "deep", or a brief that asks for deep research). */
+  /** Spend cap per deep research job, in the provider's money. Off unless set. */
   deepResearchBudgetUsd: optionalUsd(process.env.DEEP_RESEARCH_BUDGET_USD),
+  /**
+   * The Agent SDK's own per-run guard, measured with its rounded-up estimate (src/llm.ts), which on
+   * OpenRouter runs around fifty times the real charge. It is not a bill and never a job's cap: it is
+   * deliberately far above any ordinary run's estimate, so it stops only a run that has gone badly
+   * wrong, and every run is also bounded by its turn limit and by JOB_MAX_RUNTIME_MINUTES.
+   */
+  sdkRunawayBudgetUsd: positive(process.env.SDK_RUNAWAY_BUDGET_USD, 1000),
   /** Minutes a running job may show no activity from its worker before it is stopped as stalled. */
   /** The most the workforce spends in one London day; past it, new jobs wait. Off (undefined) unless DAILY_BUDGET_USD is set: Paul's call, 13 Nov 2026. */
   dailyBudgetUsd: optionalUsd(process.env.DAILY_BUDGET_USD),

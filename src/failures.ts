@@ -4,23 +4,46 @@ import type { Messenger } from "./whatsapp.js";
 import { shortText } from "./messages.js";
 import { jobLabel, jobRef } from "./titles.js";
 import { creditUrl, keyName, providerName } from "./llm.js";
+import { usdAmount } from "./realcost.js";
 
 /**
  * Why a worker run produced no real work. "credit" and "auth" are account-wide: every further run
  * fails the same way until Paul fixes it, so the engineering queues are held (HOLD_KINDS).
- * "error" is anything else that threw (a crash, a failed deploy wait). The last three are jobs the
- * service stopped (STOP_KINDS): "stalled" when its worker showed no activity for too long, "timeout"
- * when it ran past the maximum runtime, "cancelled" when Paul cancelled it.
+ * "error" is anything else that threw (a crash, a failed deploy wait). "budget" is a run stopped for
+ * money, at the job's own cap or at the SDK's runaway guard; it carries the figures that say which
+ * (BudgetStop). The last three are jobs the service stopped (STOP_KINDS): "stalled" when its worker
+ * showed no activity for too long, "timeout" when it ran past the maximum runtime, "cancelled" when
+ * Paul cancelled it.
  */
-export type FailureKind = "credit" | "auth" | "rate_limit" | "overloaded" | "api" | "empty" | "error" | "stalled" | "timeout" | "cancelled";
+export type FailureKind = "credit" | "auth" | "rate_limit" | "overloaded" | "api" | "empty" | "error" | "budget" | "stalled" | "timeout" | "cancelled";
 
 /** Jobs the service stopped rather than ones that failed on their own; their work is kept for a retry. */
 export const STOP_KINDS: FailureKind[] = ["stalled", "timeout", "cancelled"];
+
+/**
+ * The figures behind a run stopped for money, so the message says what it really spent, what the cap
+ * was and which measure was used. The Agent SDK's estimate is never quoted as a bill: it appears only
+ * as the measure that actually stopped the run, and there it is named as an internal estimate.
+ */
+export interface BudgetStop {
+  /** What the provider really charged, when its own per-call figures could be read. */
+  spentUsd?: number;
+  /** Model calls the provider could not price, so `spentUsd` is a lower bound. */
+  unreadable?: number;
+  /** The cap that stopped the run, in the money its measure is counted in. */
+  capUsd: number;
+  /** Which measure stopped it: the provider's own figures, Anthropic's list price, or the SDK's estimate. */
+  measure: "provider" | "anthropic" | "estimate";
+  /** True when the limit that stopped it was the SDK's own runaway guard rather than a cap Paul set. */
+  guard?: boolean;
+}
 
 export interface RunFailure {
   kind: FailureKind;
   /** The raw error text, for the saved output and job_status. */
   detail: string;
+  /** Present for a run stopped for money: the honest figures behind it. */
+  budget?: BudgetStop;
 }
 
 /** Failures that will hit every run until Paul acts: hold the queues rather than burn through them. */
@@ -103,7 +126,7 @@ export function failureFromError(err: unknown): RunFailure {
 }
 
 /** Why it failed, in plain words, to follow "because". */
-export function failureReason(f: Pick<RunFailure, "kind" | "detail">): string {
+export function failureReason(f: Pick<RunFailure, "kind" | "detail"> & { budget?: BudgetStop }): string {
   switch (f.kind) {
     case "credit":
       return `the ${providerName()} account is out of credit`;
@@ -115,6 +138,8 @@ export function failureReason(f: Pick<RunFailure, "kind" | "detail">): string {
       return `the ${providerName()} API was overloaded and the retries ran out`;
     case "empty":
       return "the agent came back with nothing";
+    case "budget":
+      return budgetReason(f.budget);
     case "api":
       return `the ${providerName()} API returned an error (${shortText(f.detail, 120)})`;
     case "stalled":
@@ -126,6 +151,34 @@ export function failureReason(f: Pick<RunFailure, "kind" | "detail">): string {
     default:
       return `it hit an error (${shortText(f.detail, 120)})`;
   }
+}
+
+/**
+ * A run stopped for money, in one plain sentence: what it really spent, what the cap was and which
+ * measure was used. When the provider's own figure could not be read, that is said rather than the
+ * Agent SDK's estimate being quoted as if it were the bill.
+ */
+export function budgetReason(b: BudgetStop | undefined): string {
+  if (!b) return "it was stopped for budget";
+  const cap = `$${usdAmount(b.capUsd)}`;
+  const spent = b.spentUsd !== undefined ? `$${usdAmount(b.spentUsd)}` : undefined;
+  const short = b.unreadable ? ` (a lower bound: ${b.unreadable} of its calls could not be priced)` : "";
+  if (b.measure === "estimate") {
+    // The SDK's guard on OpenRouter: priced from the rounded-up estimate, which is not a bill.
+    return spent
+      ? `it was stopped by the SDK's own runaway guard of ${cap}, an internal estimate and not a bill, by which time OpenRouter had really charged ${spent}`
+      : `it was stopped by the SDK's own runaway guard of ${cap}, an internal estimate and not a bill, and OpenRouter's figure for it could not be read`;
+  }
+  if (b.guard) {
+    // The same guard on Anthropic, where the SDK's list price is what is billed, so the figure is real.
+    return spent
+      ? `it was stopped by the SDK's own runaway guard of ${cap}, priced at Anthropic's own list price, by which time it had really spent ${spent}`
+      : `it was stopped by the SDK's own runaway guard of ${cap}, priced at Anthropic's own list price, and the real figure could not be read, so there is no amount to quote`;
+  }
+  const measure = b.measure === "anthropic" ? "Anthropic's own list price" : "OpenRouter's own figures";
+  return spent
+    ? `it was stopped for budget with ${measure} at ${spent} against the ${cap} cap for this kind${short}`
+    : `it was stopped for budget at the ${cap} cap for this kind, and the real figure could not be read, so there is no amount to quote`;
 }
 
 /** A few words for /jobs: "failed: out of Anthropic credit". */
@@ -143,6 +196,8 @@ export function failureLabel(kind: FailureKind | undefined): string {
       return "no output";
     case "api":
       return "API error";
+    case "budget":
+      return "stopped for budget";
     case "stalled":
       return "stalled, stopped";
     case "timeout":
