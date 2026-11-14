@@ -17,12 +17,13 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-board-")
 
 const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
-const { boardToken, boardTokenValid, boardData, renderBoard, BOARD_PATH } = await import("../src/jobs-board.js");
+const { boardToken, boardTokenValid, boardData, renderBoard, BOARD_PATH, BOARD_REFRESH_SECONDS } = await import("../src/jobs-board.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner } from "../src/agents.js";
 import type { JobRunner } from "../src/jobs.js";
 import type { Scheduler } from "../src/scheduler.js";
 import type { Job } from "../src/store.js";
+import type { BoardJob } from "../src/jobs-board.js";
 
 /** The board reads the store, so the runner must never be called. It fails the test loudly if it is. */
 const runner: AgentRunner = async () => {
@@ -205,6 +206,72 @@ test("a running card shows what the worker is doing this minute, and a card with
       assert.match(j.kindLabel, / on the .+ repo: .+/, `${j.id} does not explain its kind`);
     }
   }
+});
+
+test("only a running card carries the turning arc and the pulse, and nothing on the page can shift or fetch", () => {
+  // One card of each kind, so each card's own markup can be looked at on its own.
+  const card = (id: string, title: string, status: BoardJob["status"]): BoardJob => ({
+    id,
+    title,
+    kind: "engineer",
+    kindLabel: "engineer on the workforce repo: writes the change on a branch and opens a pull request",
+    repository: "self",
+    status,
+    description: "Do the thing.",
+  });
+  const html = renderBoard(
+    {
+      generatedAt: new Date().toISOString(),
+      paused: false,
+      running: [card("run0001", "Running card", "running")],
+      queued: [card("queue001", "Queued card", "queued")],
+      finished: [card("done0001", "Done card", "done"), card("fail0001", "Failed card", "failed")],
+      scheduled: [],
+    },
+    "token",
+  );
+  // Each card is its own block: the page puts them out back to back, so the split is exact.
+  const cards = html.split('<div class="job">').slice(1);
+  assert.equal(cards.length, 4);
+  const isArc = (c: string) => c.includes('class="arc"');
+  assert.equal(cards.filter(isArc).length, 1, "exactly one card turns");
+  assert.match(cards.find(isArc)!, /Running card/);
+  assert.match(cards.find(isArc)!, /<span class="badge run"><span class="arc" aria-hidden="true"><\/span>running<\/span>/);
+  for (const c of cards.filter((c) => !isArc(c))) {
+    assert.ok(!c.includes("arc"), `${c.slice(0, 40)} is not running but carries the arc`);
+    assert.ok(!c.includes("animation"), "a card that is not running animates nothing");
+    assert.ok(!/class="badge run"/.test(c), "only a running card wears the running badge");
+  }
+  // The arc is decoration: a screen reader is given the word running, not the ring.
+  assert.match(html, /aria-hidden="true"/);
+
+  // The style block itself: no script, no fetch, no filter or blur, and nothing animated but transform
+  // and opacity, so the animation stays cheap and cannot move anything on the card.
+  const style = html.match(/<style>([\s\S]*)<\/style>/)![1];
+  assert.ok(!/<script/i.test(html) && !/<link|<img|<iframe/i.test(html), "no script and nothing fetched");
+  assert.ok(!/@import|url\(/i.test(style), "the stylesheet fetches nothing either");
+  assert.ok(!/filter|blur|box-shadow|transition/i.test(style), "nothing expensive is animated");
+  const frames = [...style.matchAll(/@keyframes\s+([\w-]+)\s*\{([\s\S]*?)\}\s*\}/g)];
+  assert.equal(frames.length, 2, "a spin and a pulse, no more");
+  assert.deepEqual(frames.map((m) => m[1]).sort(), ["board-pulse", "board-spin"]);
+  for (const [, name, body] of frames) {
+    const props = [...new Set([...body.matchAll(/([\w-]+)\s*:/g)].map((m) => m[1]))];
+    assert.deepEqual(props, [name === "board-spin" ? "transform" : "opacity"], `${name} animates something other than transform and opacity`);
+  }
+  // The reload is every ten seconds, so each duration divides it exactly and the restart lands on the
+  // same phase, invisibly. A duration that did not divide it would show a jump every ten seconds.
+  const duration = (name: string) => {
+    const m = style.match(new RegExp(`${name} ([0-9.]+)s`));
+    assert.ok(m, `${name} has no duration`);
+    return Number(m![1]);
+  };
+  for (const name of ["board-spin", "board-pulse"]) {
+    const seconds = duration(name);
+    assert.ok(seconds > 0 && seconds < BOARD_REFRESH_SECONDS, `${name} is not a short repeat`);
+    assert.equal(BOARD_REFRESH_SECONDS / seconds, Math.round(BOARD_REFRESH_SECONDS / seconds), `${name} does not divide the ${BOARD_REFRESH_SECONDS}s refresh`);
+  }
+  // With reduced motion asked for, the running card is still, and still says it is running.
+  assert.match(style, /@media \(prefers-reduced-motion:reduce\)\{\.badge\.run,\.arc\{animation:none\}\}/);
 });
 
 test("a schedule with a next run shows it in London time, soonest first", () => {

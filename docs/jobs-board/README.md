@@ -21,3 +21,15 @@ Regenerating them needs a checkout with its dependencies installed and Chromium:
    `src/jobs-board.ts` taken from the default branch (`git show origin/main:src/jobs-board.ts`).
 
 Nothing on the board is written for the picture: both images come from the real renderer.
+
+## A running card, animating
+
+`running-card.png` is the same page at the same phone width with three jobs running, rendered the same
+offline way, after the running card was given a small turning arc and a soft pulse on its badge. Both
+are CSS only, on `transform` and `opacity` alone, so nothing on the card moves and no filter, blur or
+fetch is involved. The arc turns once every 1.25 seconds and the badge pulses every 2.5 seconds: each
+divides the page's ten second refresh exactly (eight turns and four pulses), so the reload restarts
+both on the same phase and the seam is invisible. With `prefers-reduced-motion: reduce` both are still
+and the badge simply reads "running". `test/jobs-board.test.ts` holds all of that: one card per status
+is rendered, only the running one carries the arc, no keyframe animates anything but transform or
+opacity, each duration divides the refresh, and the reduced-motion rule is present.
