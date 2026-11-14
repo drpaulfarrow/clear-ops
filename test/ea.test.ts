@@ -522,7 +522,7 @@ test("an ea job gets the google tools with its permits; other kinds get neither"
   assert.ok(!ra.tools!.includes("create_draft"));
   assert.match(rb.prompt, /may change: drafts/);
   assert.ok(rb.tools!.includes("create_draft") && !rb.tools!.includes("place_hold"));
-  assert.deepEqual(rc.servers, ["browser"], "research gets only the read-only browser (no search keys here), never google");
+  assert.deepEqual(rc.servers, ["browser", "inspector"], "research gets only the read-only browser and the signed-out inspector (no search keys here), never google");
   assert.ok(!ra.servers.includes("browser") && !ra.servers.includes("search"), "the assistant never gets the web tools");
   assert.equal(lockKeyOf("ea"), undefined, "the assistant never takes an engineering lock");
 });
