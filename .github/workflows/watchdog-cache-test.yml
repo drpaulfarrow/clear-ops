@@ -1,0 +1,72 @@
+# TEMPORARY verification for the watchdog's alert-state storage. Proves the workflow's
+# GITHUB_TOKEN (actions: write) can save, restore across runs, and delete an Actions cache
+# entry - the three operations the watchdog relies on. Uses synthetic content only: no
+# health checks, no Discord posts, no Fly calls. Deleted after verification.
+name: watchdog-cache-test
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: 'Test phase'
+        required: true
+        type: choice
+        options:
+          - save
+          - verify
+          - clear
+          - verify-cleared
+
+permissions:
+  actions: write
+
+jobs:
+  cache-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore the test state
+        id: state
+        uses: actions/cache/restore@v4
+        with:
+          path: .watchdog-cache-test
+          key: watchdog-cache-test
+          lookup-only: true
+
+      - name: Write the marker
+        if: github.event.inputs.phase == 'save'
+        run: |
+          echo "cache-hit on entry: ${{ steps.state.outputs.cache-hit }}"
+          date -u > .watchdog-cache-test
+          echo "marker written"
+
+      - name: Save the test state
+        if: github.event.inputs.phase == 'save'
+        uses: actions/cache/save@v4
+        with:
+          path: .watchdog-cache-test
+          key: watchdog-cache-test
+
+      - name: Verify the marker persisted across runs
+        if: github.event.inputs.phase == 'verify'
+        run: |
+          hit="${{ steps.state.outputs.cache-hit }}"
+          echo "cache-hit: $hit"
+          if [ "$hit" != "true" ]; then echo "FAIL: marker did not persist across runs"; exit 1; fi
+          echo "marker content: $(cat .watchdog-cache-test)"
+          echo "PASS: cross-run save+restore confirmed"
+
+      - name: Delete the test state
+        if: github.event.inputs.phase == 'clear'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "cache-hit on entry: ${{ steps.state.outputs.cache-hit }}"
+          gh api -X DELETE "repos/${{ github.repository }}/actions/caches?key=watchdog-cache-test"
+          echo "delete call succeeded"
+
+      - name: Verify the marker is gone
+        if: github.event.inputs.phase == 'verify-cleared'
+        run: |
+          hit="${{ steps.state.outputs.cache-hit }}"
+          echo "cache-hit: $hit"
+          if [ "$hit" = "true" ]; then echo "FAIL: cache entry still present after delete"; exit 1; fi
+          echo "PASS: delete confirmed"
