@@ -1,6 +1,6 @@
 import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { assertProductionConfig, bookingLink, config } from "./config.js";
+import { assertProductionConfig, bookingLink, config, engineerSlotsLine } from "./config.js";
 import { SitePolicy, termsWarning } from "./site-policy.js";
 import { hostMatches, safeVaultDomains, vault, VAULT_ADD_PATH, VaultError, cardVault, VAULT_CARD_PATH, VAULT_LINK_MINUTES } from "./vault.js";
 import type { Vault, CardVault } from "./vault.js";
@@ -379,6 +379,8 @@ if (isMain) {
   assertProductionConfig();
   console.log(modelLine());
   console.log(spendLine());
+  // How much engineering work runs at once, in the log, so the machine's limit is visible rather than discovered.
+  console.log(engineerSlotsLine());
   const store = new Store(config.dataDir);
   repoRegistry.load(store);
   // With the GitHub App configured, keep its installation token fresh for git and gh during long jobs.
