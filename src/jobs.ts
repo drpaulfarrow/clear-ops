@@ -4,6 +4,7 @@ import { BROWSE_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { provider, runRoute } from "./llm.js";
+import type { OtpRelay } from "./otp.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,7 +25,7 @@ import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
-import { buildTitle, deriveTitle, designRoundTitle, fixTitle, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
+import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
 
 const exec = promisify(execFile);
@@ -213,6 +214,11 @@ export class JobRunner {
   /** The purchase approval gate (src/purchase.ts), for jobs holding the purchase permit. */
   private readonly purchase?: PurchaseGate;
   /**
+   * The one-time code relay (src/otp.ts): a browsing job's sign-in that asks for a code gets it from the
+   * service, which reads the site's email or asks Paul in chat, and never from the worker.
+   */
+  private readonly otp?: OtpRelay;
+  /**
    * Where the spend figure comes from (src/spend.ts): the provider's own usage where it can be read,
    * and the SDK's estimate only as the internal stand-in the daily cap falls back to. Only the
    * provider's figure is ever shown; `spendDisplay` is the one way it reaches a message.
@@ -238,13 +244,26 @@ export class JobRunner {
     private readonly run: AgentRunner,
     /** Extra tool servers for a job (the executive assistant's Google tools). Built per job so permits apply. */
     private readonly toolsFor: (job: Job) => Record<string, McpServerConfig> | undefined = () => undefined,
-    opts: { waitForDeploy?: DeployWait; onOutput?: (job: Job) => void; failureNotices?: FailureNotifierOptions; liveness?: LivenessOptions; purchase?: PurchaseGate; slots?: number; spend?: SpendMeter; progress?: JobProgressOptions; costWatch?: CostWatchFactory; setup?: PreparedCopies } = {},
+    opts: {
+      waitForDeploy?: DeployWait;
+      onOutput?: (job: Job) => void;
+      failureNotices?: FailureNotifierOptions;
+      liveness?: LivenessOptions;
+      purchase?: PurchaseGate;
+      otp?: OtpRelay;
+      slots?: number;
+      spend?: SpendMeter;
+      progress?: JobProgressOptions;
+      costWatch?: CostWatchFactory;
+      setup?: PreparedCopies;
+    } = {},
   ) {
     this.costWatch = opts.costWatch ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop }));
     this.progressOpts = opts.progress ?? {};
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
     this.onOutput = opts.onOutput;
     this.purchase = opts.purchase;
+    this.otp = opts.otp;
     this.spend = opts.spend ?? storeMeter(store);
     this.setup = opts.setup ?? preparedCopies;
     this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
@@ -795,7 +814,12 @@ export class JobRunner {
       // The cv and advisor workers' own save tools, from their specs alone (toolsFor gives them nothing else).
       const cvTools = job.kind === "cv" || job.kind === "advisor" ? perJob.mcpServers : undefined;
       // The service's own search and read-only browser, for research-type kinds only (src/web-tools.ts).
-      web = webToolsFor(job.kind, { browse: { policy: new SitePolicy(this.store, safeVaultDomains), vault, ...(job.permits?.includes("purchase") ? { purchasing: true } : {}) } });
+      // The one-time code relay is bound to this job: a code request carries its id and its conversation,
+      // and a run the system started (a scheduled run) is refused a code outright (src/otp.ts).
+      const codes = this.otp?.forJob({ id, replyTo: job.replyTo, scheduled: isScheduledRun(job.brief) });
+      web = webToolsFor(job.kind, {
+        browse: { policy: new SitePolicy(this.store, safeVaultDomains), vault, ...(codes ? { otp: codes } : {}), ...(job.permits?.includes("purchase") ? { purchasing: true } : {}) },
+      });
       const notes = this.store.notes();
       const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
@@ -983,8 +1007,10 @@ export class JobRunner {
       await progress?.finish().catch(() => undefined);
       // No more per-call price reads for a job that has ended, however it ended.
       costMeter?.stop();
-      // The job's browser, if it opened one, goes with it.
+      // The job's browser, if it opened one, goes with it, and so does any wait for a one-time code: a
+      // reply that arrives afterwards settles nothing.
       await web?.close().catch(() => undefined);
+      this.otp?.dropJob(id);
       // A worker that would not let go after a stop was already finished without it; nothing more here.
       const mine = this.live.get(id) === live;
       if (mine) {

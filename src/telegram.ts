@@ -44,6 +44,8 @@ export interface TelegramFile {
 export interface TelegramInbound {
   from: string; // "tg:<chat id>"
   text: string;
+  /** The message's id, so it can be deleted again (a one-time code Paul sent is tidied away). */
+  messageId: string;
   /** Present only when the message carries files. */
   files?: TelegramFile[];
 }
@@ -71,8 +73,8 @@ export function parseUpdates(updates: Update[]): TelegramInbound[] {
     if (!m || m.chat.type !== "private") continue;
     const files = filesOf(m);
     const text = m.text ?? m.caption ?? "";
-    if (files.length) out.push({ from: tgId(m.chat.id), text, files });
-    else if (text) out.push({ from: tgId(m.chat.id), text });
+    if (files.length) out.push({ from: tgId(m.chat.id), text, messageId: String(m.message_id), files });
+    else if (text) out.push({ from: tgId(m.chat.id), text, messageId: String(m.message_id) });
   }
   return out;
 }
@@ -133,6 +135,11 @@ export class TelegramMessenger implements Messenger {
 
   async remove(to: string, handle: string): Promise<void> {
     await call("deleteMessage", { chat_id: chatId(to), message_id: Number(handle) });
+  }
+
+  /** Paul's own message, deleted after the service has taken a one-time code out of it. */
+  async deleteInbound(to: string, messageId: string): Promise<void> {
+    await call("deleteMessage", { chat_id: chatId(to), message_id: Number(messageId) });
   }
 
   /** A photo with a caption (Telegram caps captions at 1024 characters). */
@@ -199,7 +206,8 @@ export class TelegramPoller {
         for (const u of data.result ?? []) {
           this.offset = u.update_id + 1;
           for (const m of parseUpdates([u])) {
-            if (this.isAllowed(m.from)) void this.handle(m.from, m.text, m.files ? { attachments: m.files.map((f) => telegramAttachment(f)) } : {});
+            // Files ride in the same call, inside the allowlist check: an unlisted sender is never fetched for.
+            if (this.isAllowed(m.from)) void this.handle(m.from, m.text, m.files ? { attachments: m.files.map((f) => telegramAttachment(f)), messageId: m.messageId } : { messageId: m.messageId });
             else if (!this.hinted.has(m.from)) {
               // Tell the sender their id once, so the operator can allowlist it. Nothing else leaks.
               this.hinted.add(m.from);

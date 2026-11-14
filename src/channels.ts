@@ -44,6 +44,11 @@ export class RouterMessenger implements Messenger {
     else await m.edit?.(to, handle, "Done.");
   }
 
+  /** Tidying away one of Paul's own messages: only the channel that can delete it does anything. */
+  async deleteInbound(to: string, messageId: string): Promise<void> {
+    await this.pick(to).deleteInbound?.(to, messageId);
+  }
+
   /** Images go where the channel carries them; elsewhere the caption is sent as text so nothing is lost. */
   async sendImage(to: string, file: string, caption: string): Promise<void> {
     const m = this.pick(to);

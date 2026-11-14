@@ -203,7 +203,7 @@ test("Telegram: private text messages are parsed, allowlisted ids reach the chie
     { update_id: 2, message: { message_id: 2, text: "group noise", chat: { id: -100, type: "supergroup" } } },
     { update_id: 3, message: { message_id: 3, chat: { id: 99887766, type: "private" } } },
   ];
-  assert.deepEqual(parseUpdates(updates as any), [{ from: "tg:99887766", text: "hello" }]);
+  assert.deepEqual(parseUpdates(updates as any), [{ from: "tg:99887766", text: "hello", messageId: "1" }], "the message's own id rides along, so a one-time code Paul sends can be tidied away");
   assert.equal(isAllowed(tgId(99887766)), true);
   assert.equal(isAllowed(tgId(1)), false);
 

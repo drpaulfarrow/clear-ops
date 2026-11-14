@@ -171,6 +171,20 @@ export const config = {
   purchase: {
     waitMinutes: Math.min(positive(process.env.PURCHASE_WAIT_MINUTES, 20), 25),
   },
+  /**
+   * One-time codes (src/otp.ts): the code a site sends, which the service reads from Paul's mailbox or
+   * asks him for in chat, and types into the page itself. Never shown to a model and never stored.
+   */
+  otp: {
+    /** Minutes a request waits for Paul's own "code <id> <the code>"; the job waits with it. */
+    waitMinutes: Math.min(positive(process.env.OTP_WAIT_MINUTES, 10), 15),
+    /** How long the mailbox is watched for the site's own email before Paul is asked instead. */
+    mailWaitMs: positive(process.env.OTP_MAIL_WAIT_SECONDS, 40) * 1000,
+    /** Requests one job may make in a rolling hour. */
+    maxPerJob: positive(process.env.OTP_MAX_PER_JOB, 3),
+    /** The least gap between two requests for the same site, in seconds. */
+    minGapSeconds: positive(process.env.OTP_MIN_GAP_SECONDS, 20),
+  },
   /** The browsing tools (src/browse.ts): on unless BROWSE=off; actions per job. */
   browse: {
     enabled: (process.env.BROWSE ?? "on").toLowerCase() !== "off",

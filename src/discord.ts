@@ -84,6 +84,16 @@ export class DiscordMessenger implements Messenger {
     await msg?.delete();
   }
 
+  /**
+   * Paul's own message, deleted after the service took a one-time code out of it. Best effort: if the
+   * bot may not manage that message, or it is too old for Discord to delete, his message stays.
+   */
+  async deleteInbound(to: string, messageId: string): Promise<void> {
+    const target = (await this.resolve(to)) as unknown as { messages?: { fetch(id: string): Promise<{ delete(): Promise<unknown> }> } };
+    const msg = await target.messages?.fetch(messageId);
+    await msg?.delete();
+  }
+
   /** Discord shows "is typing…" for about ten seconds per call. */
   async typing(to: string): Promise<boolean> {
     if (to.startsWith(DC_USER)) {
