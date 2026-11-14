@@ -57,6 +57,9 @@ test("markup, links and query strings are stripped from a brief, never rendered 
   }
   assert.ok(text.includes("clear-exchange.fly.dev"), "a link keeps its host, so the words still make sense");
   assert.ok(text.includes("the notes"), "a link keeps its words and drops its address");
+  // Markup a brief happens to carry as text goes; a comparison in ordinary words stays.
+  const html = describeBrief("<p>Make the header <strong>bold</strong> on every page.</p> See <https://example.com/a?token=SECRET-TAG> and keep the timeout under < 50 ms.");
+  assert.equal(html.description, "Make the header bold on every page. See example.com and keep the timeout under < 50 ms.");
 });
 
 test("a token or a secret in a brief is redacted with the service's own redaction", () => {

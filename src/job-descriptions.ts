@@ -102,9 +102,12 @@ function plainLine(line: string): string {
     .replace(/^\s*#{1,6}\s*/, "")
     .replace(/^\s*(?:[-*+•‣◦]|\d{1,2}[.)])\s+/, "")
     .replace(/^\s*>\s?/, "")
-    // [words](url) keeps the words; a bare URL becomes its host.
+    // [words](url) keeps the words; <url> and a bare url become their host, so no query string rides along.
     .replace(/!?\[([^\]]*)\]\(([^)\s]+)\)/g, (_, words: string, url: string) => words.trim() || hostOf(url) || "")
+    .replace(/<(https?:\/\/[^\s>]+)>/g, (_, url: string) => hostOf(url) ?? "")
     .replace(/https?:\/\/[^\s<>()]+/g, (url) => hostOf(url) ?? "")
+    // A well-formed tag goes; "under < 50 ms" and "a < b" are left alone, since neither is a tag.
+    .replace(/<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?\/?>/gi, " ")
     .replace(/\*\*|__|`/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -148,10 +151,11 @@ export interface BriefDescription {
 }
 
 /**
- * A job's brief as a short plain description. Redacted first (the service's own redaction), then the
- * machine sections of a generated brief are dropped, then the markup and the link targets are stripped,
- * then it is capped: whole sentences up to DESCRIPTION_MAX_CHARS for the card, and the rest of the same
- * text up to DETAIL_MAX_CHARS for the expand control. Nothing is ever invented or paraphrased by a model.
+ * A job's brief as a short plain description. Redaction comes last, over text already stripped, so the
+ * "***" it leaves is not mistaken for markdown emphasis: the machine sections of a generated brief are
+ * dropped, the markup and the link targets come off, then the service's own redaction runs, then the
+ * text is capped at whole sentences up to DESCRIPTION_MAX_CHARS for the card, with the rest, up to
+ * DETAIL_MAX_CHARS, for the expand control. Nothing is ever invented or paraphrased by a model.
  */
 export function describeBrief(brief: string): BriefDescription {
   const kept: string[] = [];
