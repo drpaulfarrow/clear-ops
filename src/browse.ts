@@ -588,7 +588,7 @@ export class BrowseSession {
   private async pageText(): Promise<string> {
     const page = this.page;
     if (!page) return "";
-    return String(await page.evaluate(OTP_TEXT_JS).catch(() => ""));
+    return String(await page.evaluate(`(${OTP_TEXT_JS})()`).catch(() => ""));
   }
 
   /**
