@@ -154,10 +154,13 @@ export class Orchestrator {
     if (buyCmd && this.purchase) return this.messenger.send(from, this.purchase.decide(buyCmd.id, buyCmd.verb, sender) || "Only Paul can decide a purchase.");
     // A one-time code a site sent him, for a sign-in that is waiting: "code <id> <the code>", the whole
     // message, taken from his own account and handed straight to the page. It never reaches the chief or
-    // any worker, and his own message is tidied away where the channel allows it (src/otp.ts). A bare
-    // number is only read as a code while something is actually waiting for one.
+    // any worker, and his own message is tidied away where the channel allows it (src/otp.ts).
+    // Every code-shaped message is taken off the chief's path whether or not something is waiting: a code
+    // that arrives after its request expired, or with nothing waiting at all, must not reach a model. When
+    // nothing is waiting the relay itself says so. A code always carries a digit, so a sentence that merely
+    // uses the word ("code review") still goes to the chief.
     const codeCmd = parseCodeCommand(trimmed);
-    if (codeCmd && this.otp && (codeCmd.id || this.otp.pending().length)) {
+    if (codeCmd && this.otp) {
       const decided = this.otp.redeem({ ...(codeCmd.id ? { id: codeCmd.id } : {}), code: codeCmd.code, by: sender });
       if (decided.accepted && messageId) await this.messenger.deleteInbound?.(from, messageId).catch(() => undefined);
       return this.messenger.send(from, decided.text);

@@ -74,14 +74,19 @@ interface Waiter {
  * Paul's own reply with a code. Whole-message matches only (`code <id> <the code>`, `code <the code>`, or
  * a bare number), parsed by the orchestrator after the allowlist check and before any model, so a code he
  * sends never reaches the chief. Anything else falls through to the chief as usual.
+ *
+ * The code token must carry a digit, because a real code always does (a site sends digits, or letters and
+ * digits together) and because ordinary English must not be swallowed into the relay: "code review" is a
+ * message for the chief, not a code. That also stops a word being typed into a page's code field.
  */
 export function parseCodeCommand(text: string): { id?: string; code: string } | undefined {
   const t = text.trim().replace(/[.!]+$/, "").replace(/\s+/g, " ");
   const labelled = t.match(/^(?:the\s+)?(?:code|otp|passcode|one[- ]?time(?: code)?|verification code|sign[- ]?in code|security code)\s*(?:is|:|=)?\s*(?:for\s+)?(?:([a-f0-9]{6})\s+)?([A-Za-z0-9]{4,10})$/i);
-  if (labelled) return { ...(labelled[1] ? { id: labelled[1].toLowerCase() } : {}), code: labelled[2] };
-  // Just the number he was sent. The orchestrator accepts this only when exactly one request is waiting.
+  if (labelled && /\d/.test(labelled[2]!)) return { ...(labelled[1] ? { id: labelled[1].toLowerCase() } : {}), code: labelled[2]! };
+  // Just the number he was sent. The orchestrator reads it as a code whatever is waiting, so a code that
+  // arrives after its request has expired or settled is still never handed to the chief.
   const bare = t.match(/^(\d{4,8})$/);
-  return bare ? { code: bare[1] } : undefined;
+  return bare ? { code: bare[1]! } : undefined;
 }
 
 /**

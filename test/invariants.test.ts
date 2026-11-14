@@ -814,6 +814,13 @@ test("a one-time code is handled ONLY by the service relay: never a model, never
   const chiefAt = orch.indexOf("return this.askChief(");
   assert.ok(allowAt > -1 && codeAt > allowAt && chiefAt > codeAt, "code <id> <the code> is matched after the allowlist and before any model");
   assert.match(orch, /this\.otp\.redeem\(\{[\s\S]{0,160}by: sender \}\)/, "only the allowlisted sender's own message settles a code");
+  // Every code-shaped message is taken off the chief's path whether or not anything is waiting: a code that
+  // arrives after its request expired, or with nothing waiting at all, must never reach a model. So the
+  // intercept never consults what is waiting, and a code must carry a digit so a word is never read as one.
+  const codeGuard = orch.slice(codeAt, orch.indexOf("const out = parseOutboundCommand(trimmed);"));
+  assert.match(codeGuard, /if \(codeCmd && this\.otp\) \{/, "a code-shaped message is intercepted whatever is waiting");
+  assert.doesNotMatch(codeGuard, /pending\(\)/, "the intercept never depends on what is waiting");
+  assert.match(relay, /if \(labelled && \/\\d\/\.test\(labelled\[2\]!\)\)/, "a code token must carry a digit, so a word is never read as a code");
   assert.equal([...orch.matchAll(/deleteInbound/g)].length, 1, "only a code message is ever tidied away");
   assert.match(orch, /decided\.accepted && messageId\)[\s\S]{0,80}deleteInbound/, "his message goes only once the code was accepted");
   // One job, one conversation, one site: the relay is bound to the job, and a scheduled run is refused it.

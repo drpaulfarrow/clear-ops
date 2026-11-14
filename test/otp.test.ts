@@ -15,6 +15,10 @@ process.env.VAULT_KEY = "test-vault-key-that-is-long-enough";
 
 const { OtpRelay, OtpError, parseCodeCommand, siteLabel, codeTtlMs } = await import("../src/otp.js");
 const { extractCode, senderDomain, GmailCodeReader } = await import("../src/mail-code.js");
+const { Store } = await import("../src/store.js");
+const { Orchestrator } = await import("../src/orchestrator.js");
+const { JobRunner } = await import("../src/jobs.js");
+const { Scheduler } = await import("../src/scheduler.js");
 
 const PAUL = "tg:99887766";
 const logFile = () => path.join(process.env.DATA_DIR!, "otp", "actions.log");
@@ -219,10 +223,17 @@ test("Paul's reply is recognised in the forms he is likely to send", () => {
   assert.deepEqual(parseCodeCommand("the code is 123456"), { code: "123456" });
   assert.deepEqual(parseCodeCommand("code 4829"), { code: "4829" });
   assert.deepEqual(parseCodeCommand("837291"), { code: "837291" });
+  assert.deepEqual(parseCodeCommand("verification code 887766"), { code: "887766" });
   // The id on its own is read as a code-shaped token; the relay then says it is the id, not the code.
   assert.deepEqual(parseCodeCommand("code 16d5d3"), { code: "16d5d3" });
   assert.equal(parseCodeCommand("start a research job"), undefined);
   assert.equal(parseCodeCommand("code 12"), undefined);
+  // A code always carries a digit, so ordinary English is not swallowed into the relay: a word must never
+  // be read as a code and then typed into a page's code field.
+  assert.equal(parseCodeCommand("code review"), undefined);
+  assert.equal(parseCodeCommand("the code review is done"), undefined);
+  assert.equal(parseCodeCommand("verification code abcdef"), undefined);
+  assert.deepEqual(parseCodeCommand("code 3fa9c1"), { code: "3fa9c1" }, "letters and digits together are still a code");
 });
 
 test("the site, and how long the page's own code lasts, are read from what Paul sees", () => {
@@ -254,4 +265,94 @@ test("the page's own shorter lifetime is honoured, so a code is not waited on pa
   assert.ok(Date.now() - started < 5_000, "the wait ended with the page's own 60ms, not the relay's ten seconds");
   assert.match(sent[1] ?? "", /No code came for Amazon UK/);
   assert.equal(gate.pending().length, 0);
+});
+
+/* ---------- in the orchestrator: taken off the chief's path, whatever is waiting ---------- */
+
+/** The orchestrator over a relay, with a runner that records every prompt the chief is given. */
+function chat(gate: OtpRelay) {
+  const sent: Array<{ to: string; text: string }> = [];
+  const deleted: string[] = [];
+  const m = {
+    send: async (to: string, text: string) => void sent.push({ to, text }),
+    deleteInbound: async (_to: string, id: string) => void deleted.push(id),
+  } as never;
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-otp-store-")));
+  const prompts: string[] = [];
+  const runner = (async (o: { prompt: string }) => (prompts.push(o.prompt), { text: "chief reply", sessionId: "sess-1" })) as never;
+  const jobs = new JobRunner(store, m, runner);
+  const orch = new Orchestrator(store, m, jobs, new Scheduler(store, jobs), runner, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, gate);
+  return { orch, sent, deleted, prompts, store };
+}
+
+test("with nothing waiting, a code Paul sends still never reaches the chief", async () => {
+  const r = relay();
+  const { orch, sent, prompts, store } = chat(r.gate);
+  for (const msg of ["the code is 123456", "123456", "otp 918273", "verification code 887766"]) {
+    sent.length = 0;
+    await orch.handle(PAUL, msg, { replyTo: PAUL, messageId: "m1" });
+    assert.equal(prompts.length, 0, `"${msg}" must not reach the chief`);
+    assert.equal(store.getSession(PAUL), undefined, "and nothing of it is kept in the conversation store");
+    assert.match(sent.at(-1)!.text, /Nothing is waiting for a code just now/, msg);
+    assert.ok(!sent.some((s) => /\d{6}/.test(s.text)), "the code is never echoed back to him");
+  }
+  // The same message after a request has settled or expired: still nothing for the chief to see.
+  const waiting = r.gate.forJob({ id: "job1", replyTo: PAUL }).code({ domain: "amazon.co.uk" });
+  await sentOne(r.sent);
+  r.gate.dropJob("job1");
+  assert.equal(await waiting, undefined);
+  sent.length = 0;
+  await orch.handle(PAUL, "code 482913", { replyTo: PAUL });
+  assert.equal(prompts.length, 0, "a code for a request that has gone is still not the chief's");
+  assert.equal(store.getSession(PAUL), undefined);
+});
+
+test("a sentence that merely uses the word 'code' still reaches the chief", async () => {
+  const { gate } = relay();
+  const { orch, sent, prompts } = chat(gate);
+  await orch.handle(PAUL, "code review", { replyTo: PAUL });
+  assert.equal(prompts.length, 1, "'code review' is a message for the chief");
+  assert.match(prompts[0]!, /code review/);
+  assert.equal(sent.at(-1)!.text, "chief reply");
+});
+
+test("a word is never typed into a waiting page as if it were the code", async () => {
+  const r = relay({ ttlMs: 5_000 });
+  const { orch, sent, prompts } = chat(r.gate);
+  const waiting = r.gate.forJob({ id: "job1", replyTo: PAUL }).code({ domain: "amazon.co.uk" });
+  const id = (await sentOne(r.sent)).match(/code ([a-f0-9]{6})/)![1]!;
+  await orch.handle(PAUL, "code review", { replyTo: PAUL });
+  assert.equal(prompts.length, 1, "the chief still gets it, with a code waiting");
+  assert.equal(r.gate.pending().length, 1, "the request is untouched");
+  await orch.handle(PAUL, `code ${id} 482913`, { replyTo: PAUL, messageId: "m7" });
+  assert.equal(await waiting, "482913");
+  assert.equal(prompts.length, 1, "the code itself never reached the chief");
+  assert.match(sent.at(-1)!.text, /Putting that into Amazon UK now/);
+});
+
+test("his own message is tidied away once the code was accepted, and only then", async () => {
+  const r = relay();
+  const { orch, sent, deleted, prompts } = chat(r.gate);
+  const waiting = r.gate.forJob({ id: "job1", replyTo: PAUL }).code({ domain: "amazon.co.uk" });
+  const id = (await sentOne(r.sent)).match(/code ([a-f0-9]{6})/)![1]!;
+  await orch.handle(PAUL, "code ffffff 111111", { replyTo: PAUL, messageId: "m1" });
+  assert.equal(deleted.length, 0, "nothing settled, so nothing of his is deleted");
+  assert.match(sent.at(-1)!.text, /finished or has expired/);
+  await orch.handle(PAUL, `code ${id} 246810`, { replyTo: PAUL, messageId: "m2" });
+  assert.deepEqual(deleted, ["m2"]);
+  assert.equal(await waiting, "246810");
+  assert.equal(prompts.length, 0, "no code ever reaches the chief");
+  assert.ok(!sent.some((s) => s.text.includes("246810")), "and none is echoed back");
+});
+
+test("only an allowlisted account settles one, in the orchestrator as in the relay", async () => {
+  const r = relay();
+  const { orch, prompts } = chat(r.gate);
+  const waiting = r.gate.forJob({ id: "job1", replyTo: PAUL }).code({ domain: "amazon.co.uk" });
+  const id = (await sentOne(r.sent)).match(/code ([a-f0-9]{6})/)![1]!;
+  await orch.handle("tg:10000000", `code ${id} 135790`, { replyTo: "tg:10000000" });
+  assert.equal(r.gate.pending().length, 1, "a stranger settles nothing");
+  assert.equal(prompts.length, 0, "and a stranger is not answered either");
+  await orch.handle(PAUL, `code ${id} 135790`, { replyTo: PAUL });
+  assert.equal(await waiting, "135790");
 });
