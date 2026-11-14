@@ -6,6 +6,7 @@ import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type Pu
 import { runRoute } from "./llm.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { bookingLink, config } from "./config.js";
@@ -55,6 +56,8 @@ interface LiveRun {
   persistedAt: number;
   /** Waiting for the product's deploy before a design round looks: not working yet, so never stalled. */
   waiting: boolean;
+  /** Waiting for a working copy of its own (another job is in the checkout): not working, so never stalled. */
+  waitingForCopy: boolean;
   /** The run returned and the job is being reported: too late to stop it. */
   finishing: boolean;
   stop?: StopReason;
@@ -75,7 +78,60 @@ export interface LivenessOptions {
   now?: () => number;
   /** Keeps a stopped engineering job's work (default: stash it in its checkout). Tests inject a fake. */
   saveWork?: (job: Job, why: StopReason["kind"]) => Promise<SavedWork | undefined>;
+  /** How often a job that could not be given a copy of its own looks again for a free checkout. Default 10 seconds. */
+  copyWaitMs?: number;
 }
+
+/**
+ * The machine's load, as one line for the log, when an engineering job starts. The kernel's own 1-minute
+ * average spread over the cores: at or above one runnable task per core the machine is fully spoken for.
+ * Nothing here delays, slows or queues a job: a busy machine is visible in the log rather than discovered
+ * later, and the work goes ahead exactly as it would have (no throttle ever hides behind this).
+ */
+export function loadNote(load = os.loadavg()[0], cores = os.cpus().length, perCore = 1): string | undefined {
+  if (!Number.isFinite(load) || !Number.isFinite(cores) || cores < 1 || load < perCore * cores) return undefined;
+  return `heavy load ${load.toFixed(1)} on ${cores} cores`;
+}
+
+/** What the machine has left to give: how much of it is spoken for, in bytes. */
+export interface Memory {
+  total: number;
+  /** Memory another process could have without the kernel swapping or killing something, where known. */
+  available: number;
+}
+
+/**
+ * The machine's memory as the kernel sees it: MemAvailable from /proc/meminfo where it exists, else
+ * whatever Node can say. This is the tighter limit than the cores when several jobs build and test at
+ * once (four typechecks and their test runs measured 3.6GB of a 4GB machine), so it is worth naming.
+ */
+export function readMemory(): Memory {
+  const total = os.totalmem();
+  try {
+    const info = fs.readFileSync("/proc/meminfo", "utf8");
+    const available = /^MemAvailable:\s+(\d+) kB/m.exec(info);
+    if (available) return { total, available: Number(available[1]) * 1024 };
+  } catch {
+    // Not Linux, or no /proc: fall back to what Node reports.
+  }
+  return { total, available: os.freemem() };
+}
+
+/**
+ * One line for the log when the machine is nearly out of memory, so four jobs at once is seen in the log
+ * rather than discovered as an out-of-memory restart. Like loadNote it only describes: nothing waits,
+ * slows or queues because of it.
+ */
+export function memoryNote(memory: Memory = readMemory(), nearlyFull = 0.12): string | undefined {
+  const { total, available } = memory;
+  if (!Number.isFinite(total) || !Number.isFinite(available) || total <= 0 || available < 0) return undefined;
+  if (available > nearlyFull * total) return undefined;
+  const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)}GB`;
+  return `memory nearly full, ${gb(available)} of ${gb(total)} free`;
+}
+
+/** How long a job waits before looking again for a working copy of its own (tests shorten it). */
+const COPY_WAIT_MS = 10_000;
 
 /** What the chief and Paul see when they ask whether a job is actually alive. */
 export interface Liveness {
@@ -115,6 +171,7 @@ export class JobRunner {
   private readonly maxRuntimeMs: number;
   private readonly graceMs: number;
   private readonly now: () => number;
+  private readonly copyWaitMs: number;
   private readonly saveWork: (job: Job, why: StopReason["kind"]) => Promise<SavedWork | undefined>;
   /** Which job holds each repository's engineering lock in this process. */
   /** The jobs holding each repository's slots (at most `slots` each), by repository. */
@@ -137,9 +194,9 @@ export class JobRunner {
   private readonly spend: SpendMeter;
   /** The running commentary in each job's thread (src/status.ts JobProgress). */
   private readonly progressOpts: JobProgressOptions;
-  /** How many workers are running right now (not waiting for a deploy): what the deploy waits on. */
+  /** How many workers are running right now (not waiting for a deploy or a working copy): what the deploy waits on. */
   activeCount(): number {
-    return [...this.live.values()].filter((l) => !l.waiting && !l.stop).length;
+    return [...this.live.values()].filter((l) => !l.waiting && !l.waitingForCopy && !l.stop).length;
   }
 
   constructor(
@@ -161,6 +218,7 @@ export class JobRunner {
     this.maxRuntimeMs = l.maxRuntimeMs ?? config.jobMaxRuntimeMinutes * MINUTE;
     this.graceMs = l.graceMs ?? 30_000;
     this.now = l.now ?? Date.now;
+    this.copyWaitMs = l.copyWaitMs ?? COPY_WAIT_MS;
     this.saveWork = l.saveWork ?? defaultSaveWork;
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
@@ -450,6 +508,42 @@ export class JobRunner {
     let lane = own;
     if (used.has(lane)) for (lane = 0; used.has(lane); lane++);
     if (lane !== (this.store.getJob(id)?.lane ?? 0)) this.store.updateJob(id, { lane: lane || undefined });
+    // A busy or nearly full machine is worth a log line: four cores and 4GB, several test runs and
+    // typechecks at once. It is only ever a line. Nothing here waits, slows or holds back a job with a slot.
+    const state = [loadNote(), memoryNote()].filter(Boolean).join(", ");
+    if (state) console.log(`${state}: starting ${jobRef(this.store.getJob(id), id)} anyway.`);
+  }
+
+  /**
+   * True when another job on this repository is working in its checkout rather than a copy of its own,
+   * so this job has nowhere private to go (its own copy could not be made) and must wait for it.
+   */
+  private checkoutTaken(key: JobTarget, except: string): boolean {
+    return (this.holders.get(key) ?? []).some((id) => id !== except && !this.store.getJob(id)?.lane);
+  }
+
+  /**
+   * Waits until this job can have the checkout to itself, then claims it: its own copy of the repository
+   * could not be made (git refused, or there is no room), and two jobs in one working copy would corrupt
+   * each other's work, so the job waits rather than shares one. It keeps its slot while it waits, like a
+   * design round waiting for a deploy, and looks again every `copyWaitMs`. False: the job went away first.
+   */
+  private async claimCheckout(job: Job, key: JobTarget): Promise<boolean> {
+    const free = () => !this.checkoutTaken(key, job.id);
+    // Claiming the checkout as lane 0, so the next job on this repository is given a lane of its own.
+    if (free()) {
+      this.store.updateJob(job.id, { lane: undefined });
+      return true;
+    }
+    console.warn(`${jobLabel(job)} could not be given a working copy of its own: it waits for ${workerSpec(job.kind, job.target).cwd} rather than share it.`);
+    for (;;) {
+      if (free()) {
+        this.store.updateJob(job.id, { lane: undefined });
+        return true;
+      }
+      if (this.live.get(job.id)?.stop || !this.running.has(job.id)) return false;
+      await new Promise((r) => setTimeout(r, this.copyWaitMs));
+    }
   }
 
   private free(key: JobTarget, id: string): void {
@@ -611,7 +705,7 @@ export class JobRunner {
     const now = this.now();
     let settle = () => {};
     const settled = new Promise<void>((r) => (settle = r));
-    const live: LiveRun = { abort: new AbortController(), startedAt: now, lastActivity: now, persistedAt: now, waiting: !!job.awaitDeploy, finishing: false, settled, settle };
+    const live: LiveRun = { abort: new AbortController(), startedAt: now, lastActivity: now, persistedAt: now, waiting: !!job.awaitDeploy, waitingForCopy: false, finishing: false, settled, settle };
     this.live.set(id, live);
     this.running.add(id);
     const at = new Date(now).toISOString();
@@ -631,7 +725,22 @@ export class JobRunner {
       if (live.stop) throw new Error("stopped");
       const base = workerSpec(job.kind, job.target);
       // An engineering job running beside another on the same repository works in its own copy of it.
-      const lane = lockKey(job) && job.lane && base.cwd ? await ensureLane(base.cwd, job.lane) : undefined;
+      const key = lockKey(job);
+      const lane = key && job.lane && base.cwd ? await ensureLane(base.cwd, job.lane) : undefined;
+      // Its own copy could not be made, and the checkout is another job's working copy: this job waits,
+      // holding its slot, rather than write to the same files. It starts as soon as the checkout is free.
+      if (key && lane !== undefined && lane === base.cwd && hasGitDir(lane)) {
+        live.waitingForCopy = true;
+        const mine = await this.claimCheckout(job, key);
+        live.waitingForCopy = false;
+        if (!mine) {
+          // Stopped while it waited: the stop path records it (recordStop is idempotent).
+          if (live.stop) throw new Error("stopped");
+          return;
+        }
+        live.startedAt = live.lastActivity = live.persistedAt = this.now();
+        this.store.updateJob(id, { startedAt: new Date(live.startedAt).toISOString(), lastActivityAt: new Date(live.startedAt).toISOString() });
+      }
       const spec = lane && base.cwd ? { ...base, cwd: lane, prompt: `${base.prompt}\n\n${laneNote(base.cwd, lane)}` } : base;
       const perJob = spec.perJob?.(id) ?? {};
       // Engineers building a design spec may read the designer's assets.
@@ -890,7 +999,7 @@ export class JobRunner {
       await this.refreshSpend().catch(() => undefined);
       const now = this.now();
       for (const [id, live] of [...this.live]) {
-        if (live.stop || live.waiting || live.finishing) continue;
+        if (live.stop || live.waiting || live.waitingForCopy || live.finishing) continue;
         const idle = now - live.lastActivity;
         const ran = now - live.startedAt;
         if (idle >= this.stallMs) {
@@ -962,6 +1071,7 @@ export class JobRunner {
       const ran = now - live.startedAt;
       const info = { ...base, lastActivityAt: new Date(live.lastActivity).toISOString(), idleMinutes: minutes(idle), runningMinutes: minutes(ran) };
       if (live.waiting) return { ...info, alive: true, waitingForDeploy: true, summary: `${label} is alive, waiting for the product deploy before it starts.` };
+      if (live.waitingForCopy) return { ...info, alive: true, waitingForDeploy: false, summary: `${label} is alive, waiting for a working copy of its own in ${workerSpec(job.kind, job.target).cwd} before it starts (another job is in that checkout).` };
       if (live.stop) return { ...info, alive: false, summary: `${label} is being stopped (${failureLabel(live.stop.kind)}).` };
       const alive = idle < this.stallMs;
       const last = idle < MINUTE ? "under a minute ago" : `${plural(minutes(idle), "minute")} ago`;
@@ -1005,7 +1115,7 @@ export class JobRunner {
     if (this.live.has(id)) await this.stop(id, reason);
     else {
       // Marked running, but no worker here: nothing to stop, so record it and free its place.
-      const orphan: LiveRun = { abort: new AbortController(), startedAt: 0, lastActivity: 0, persistedAt: 0, waiting: false, finishing: false, stop: reason, settled: Promise.resolve(), settle: () => {} };
+      const orphan: LiveRun = { abort: new AbortController(), startedAt: 0, lastActivity: 0, persistedAt: 0, waiting: false, waitingForCopy: false, finishing: false, stop: reason, settled: Promise.resolve(), settle: () => {} };
       await this.recordStop(job, orphan);
       if (key && this.holds(key, id)) await this.release(job);
       else if (key && !this.full(key)) await this.startNext(key, id);
@@ -1327,19 +1437,45 @@ export function laneDir(checkout: string, lane: number): string {
   return `${checkout.replace(/\/+$/, "")}.lane${lane}`;
 }
 
+/** True when there is a clone here: a directory with `.git` in it (a file, in a worktree, not a directory). */
+export function hasGitDir(dir: string): boolean {
+  return fs.existsSync(path.join(dir, ".git"));
+}
+
+/**
+ * One working copy's set-up at a time per checkout. `git worktree add`, `git fetch` and `git worktree
+ * prune` all write git state inside the same repository, and jobs starting together used to run them at
+ * once, which git refuses when it cannot take a lock. Chained per checkout, so they run in turn; the
+ * chain never rejects (each caller sees its own error) and the entry goes once the queue drains.
+ */
+const laneSetups = new Map<string, Promise<unknown>>();
+
+export function serialiseLaneSetup<T>(checkout: string, work: () => Promise<T>): Promise<T> {
+  const previous = laneSetups.get(checkout) ?? Promise.resolve();
+  const mine = previous.then(work, work);
+  const tail = mine.then(() => undefined, () => undefined);
+  laneSetups.set(checkout, tail);
+  void tail.then(() => {
+    if (laneSetups.get(checkout) === tail) laneSetups.delete(checkout);
+  });
+  return mine;
+}
+
 /**
  * Makes sure lane n's working copy exists and, when it is clean, sits on the latest default branch, so a
  * second engineer starts from what is deployed, exactly as the checkout does (src/bootstrap.ts). Work an
- * earlier job left there (a resumed job) is kept. Falls back to the checkout itself if git cannot make one.
+ * earlier job left there (a resumed job) is kept. Set-up is serialised per checkout, and tried twice a
+ * second apart, before it gives up and hands back the checkout itself: the caller (JobRunner) then makes
+ * that job wait rather than let it write into a copy another job is using.
  */
 export async function ensureLane(checkout: string, lane: number): Promise<string> {
   const dir = laneDir(checkout, lane);
   const git = (cwd: string, ...args: string[]) => exec("git", ["-C", cwd, ...args], { timeout: 120_000 }).then((r) => r.stdout.trim());
-  try {
+  const make = async (): Promise<string> => {
     await git(checkout, "fetch", "--quiet", "origin").catch(() => undefined);
     const head = await git(checkout, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").catch(() => "origin/main");
     const target = head.startsWith("origin/") ? head : "origin/main";
-    if (!fs.existsSync(path.join(dir, ".git"))) {
+    if (!hasGitDir(dir)) {
       await git(checkout, "worktree", "prune").catch(() => undefined);
       await git(checkout, "worktree", "add", "--detach", dir, target);
       return dir;
@@ -1347,10 +1483,21 @@ export async function ensureLane(checkout: string, lane: number): Promise<string
     const dirty = await git(dir, "status", "--porcelain");
     if (!dirty) await git(dir, "checkout", "--quiet", "--detach", target).catch(() => undefined);
     return dir;
-  } catch (err) {
-    console.warn(`lane ${lane} for ${checkout}: ${err instanceof Error ? err.message : err}; using the checkout itself`);
-    return checkout;
-  }
+  };
+  return serialiseLaneSetup(checkout, async () => {
+    try {
+      return await make();
+    } catch (first) {
+      await new Promise((r) => setTimeout(r, 1_000));
+      try {
+        return await make();
+      } catch (err) {
+        const why = err instanceof Error ? err.message : err;
+        console.warn(`lane ${lane} for ${checkout}: ${why}; using the checkout itself`);
+        return checkout;
+      }
+    }
+  });
 }
 
 /** What an engineer in a second working copy is told. */
