@@ -2,8 +2,9 @@
  * The jobs board: one read-only page Paul bookmarks on his phone instead of typing /jobs in chat.
  * No network and no model: the fake runner is never invoked, because the board only reads what is
  * already in the store. The tests cover the token (accepted and refused), the shape it returns, that
- * a brief, an output or a spend figure cannot leak, and that a running, a queued and a finished job
- * each render.
+ * every card says in plain English what its job is (from the job's own brief) and what kind of worker
+ * it is, that a token, a pasted report, an output, a schedule brief or a spend figure cannot leak, and
+ * that a running, a queued and a finished job each render.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -44,6 +45,8 @@ let queuedJob: Job;
 let doneJob: Job;
 let failedJob: Job;
 let eaJob: Job;
+let reviewJob: Job;
+let vagueJob: Job;
 
 before(async () => {
   store = new Store(process.env.DATA_DIR!);
@@ -53,14 +56,29 @@ before(async () => {
   const job = (kind: Job["kind"], title: string, brief: string, target: Job["target"] = "product") =>
     store.createJob(kind, brief, PAUL, target, undefined, { title });
 
-  holderJob = store.updateJob(job("engineer", "Web UI restyle", "SECRET BRIEF beta", "self").id, { status: "running", startedAt: at(30 * MIN), lastActivityAt: at(1 * MIN) });
-  runningJob = store.updateJob(job("engineer", "Fix deploy", "SECRET BRIEF alpha", "self").id, { status: "running", startedAt: at(12 * MIN), lastActivityAt: at(2 * MIN) });
-  queuedJob = store.updateJob(job("engineer", "Add CI job", "SECRET BRIEF gamma", "self").id, { waitingFor: holderJob.id, queuePos: 1 });
-  doneJob = store.updateJob(job("research", "TollBit research", "SECRET BRIEF delta").id, { status: "done", finishedAt: at(5 * MIN) });
+  // The briefs are what each card describes the job from, so they read like real ones. "SECRET" marks
+  // the text that must never reach the page: a token in a brief, and a report pasted into a brief.
+  holderJob = store.updateJob(job("engineer", "Web UI restyle", "Restyle the web interface in the house style, keeping the fixed file list and the security headers.", "self").id, { status: "running", startedAt: at(30 * MIN), lastActivityAt: at(1 * MIN) });
+  runningJob = store.updateJob(job("engineer", "Fix deploy", "Fix the deploy: read the environment variable the workflow never set. The token in the log was ghp_AAAABBBBCCCCDDDDEEEE1111222233334444.", "self").id, { status: "running", startedAt: at(12 * MIN), lastActivityAt: at(2 * MIN) });
+  queuedJob = store.updateJob(
+    job(
+      "engineer",
+      "Add CI job",
+      // Long on purpose: past the cap on a card, so the card carries the first part and the expand
+      // control the rest, and the tail of it reaches neither.
+      `Add a CI job that runs the whole test suite on every pull request and reports a red check to the maintainer, so a merge is never taken on a broken branch. The workflow file itself is covered by a test that reads it back. ${"Keep the existing deploy job untouched and make sure the new job does not run twice on a push to a branch. Say which secrets the workflow needs and which of them Paul still has to add. ".repeat(6)}NOT-ON-A-CARD.`,
+      "self",
+    ).id,
+    { waitingFor: holderJob.id, queuePos: 1 },
+  );
+  doneJob = store.updateJob(job("research", "TollBit research", "Research TollBit's buyer-side moves this month and say whether they are building an exchange.").id, { status: "done", finishedAt: at(5 * MIN) });
   store.writeOutput(doneJob.id, "SECRET OUTPUT beta: what the research found");
-  failedJob = store.updateJob(job("engineer", "Broken build", "SECRET BRIEF epsilon").id, { status: "failed", failure: "stalled", finishedAt: at(10 * MIN), pr: "https://github.com/drpaulfarrow/clear-exchange/pull/61" });
-  eaJob = store.updateJob(job("ea", "Inbox triage", "SECRET BRIEF zeta").id, { status: "done", finishedAt: at(3 * MIN) });
+  failedJob = store.updateJob(job("engineer", "Broken build", "Fix the broken build on main after the last merge.").id, { status: "failed", failure: "stalled", finishedAt: at(10 * MIN), pr: "https://github.com/drpaulfarrow/clear-exchange/pull/61" });
+  eaJob = store.updateJob(job("ea", "Inbox triage", "Go through today's inbox and say what needs Paul.").id, { status: "done", finishedAt: at(3 * MIN) });
   store.writeOutput(eaJob.id, "mail from jo@example.com SECRET MAIL");
+  // A review brief carries the engineer's report pasted into it; a card must never show any of it.
+  reviewJob = store.updateJob(job("maintain", "Review: Fix deploy", "Review the pull request the engineer just opened for this task, and any other open pull requests:\n\nFix the deploy.\n\nEngineer's report:\nSECRET REPORT TEXT", "self").id, { status: "running", startedAt: at(2 * MIN), lastActivityAt: at(1 * MIN), pr: "https://github.com/drpaulfarrow/clear-ops/pull/63" });
+  vagueJob = store.updateJob(job("dns", "Domain check", "  ", "self").id, { status: "done", finishedAt: at(20 * MIN) });
 
   const built = buildApp({ messenger, runner, store });
   scheduler = built.scheduler;
@@ -107,34 +125,46 @@ test("the page is served only with the token, is never cached, and has no way to
   assert.match(jsonRes.headers.get("content-type") ?? "", /application\/json/);
   const data = (await jsonRes.json()) as { running: unknown[]; queued: unknown[]; finished: unknown[]; scheduled: unknown[] };
   assert.deepEqual(Object.keys(data).sort(), ["finished", "generatedAt", "paused", "queued", "running", "scheduled"]);
-  assert.equal(data.running.length, 2);
+  assert.equal(data.running.length, 3);
   assert.equal(data.queued.length, 1);
-  assert.equal(data.finished.length, 3);
+  assert.equal(data.finished.length, 4);
   assert.equal(data.scheduled.length, 1);
+  // The page is still one read-only document: no script, nothing fetched from anywhere, and the only
+  // expand control is plain HTML, so nothing loads when Paul taps it.
+  assert.ok(!/<script/i.test(html), "no script on the page");
+  assert.ok(!/<link|<img|<iframe|@import|url\(/i.test(html), "nothing is fetched from anywhere");
+  assert.match(html, /<details><summary>More of the brief<\/summary>/, "longer detail sits behind an expand control");
 });
 
 test("a running, a queued and a finished job each render, with their timings and queue", () => {
   const board = boardData({ store, queue, schedules: scheduler.upcoming() });
-  assert.equal(board.running.length, 2);
+  assert.equal(board.running.length, 3);
   const running = board.running.find((j) => j.id === runningJob.id)!;
   assert.equal(running.title, "Fix deploy");
   assert.equal(running.kind, "engineer");
-  assert.equal(running.kindLabel, "engineer, workforce");
+  assert.equal(running.kindLabel, "engineer on the workforce repo: writes the change on a branch and opens a pull request");
   assert.equal(running.repository, "self");
   assert.equal(running.runningFor, "12 min");
   assert.equal(running.lastActive, "2 min ago");
+  // Running: what it is doing, read off its own brief.
+  assert.match(running.description!, /^Fix the deploy: read the environment variable the workflow never set\./);
 
   const queued = board.queued.find((j) => j.id === queuedJob.id)!;
   assert.deepEqual(queued.waitingBehind, { title: "Web UI restyle", id: holderJob.id });
   assert.equal(queued.repository, "self");
   assert.equal(queued.queuePosition, 1);
+  // Queued: what it will do, and the existing line saying what it waits behind.
+  assert.match(queued.description!, /^Add a CI job that runs the whole test suite on every pull request/);
+  assert.match(queued.more!, /^Keep the existing deploy job untouched/, "the rest of the brief sits behind the expand control");
 
   const done = board.finished.find((j) => j.id === doneJob.id)!;
-  assert.equal(done.kindLabel, "research, product");
+  assert.equal(done.kindLabel, "researcher on the Clear Exchange repo: researches on the web and writes a sourced brief");
   assert.equal(done.outcome, "done");
   assert.equal(done.finishedAgo, "5 min ago");
+  assert.equal(done.produced, "Wrote a report; the report is linked below.");
   const failed = board.finished.find((j) => j.id === failedJob.id)!;
   assert.match(failed.outcome!, /^failed: /);
+  assert.equal(failed.produced, undefined, "a failed job produced nothing to show");
 
   assert.equal(board.scheduled.length, 1);
   assert.equal(board.scheduled[0].title, "Morning research");
@@ -145,12 +175,36 @@ test("a running, a queued and a finished job each render, with their timings and
   const html = renderBoard(board, "token");
   assert.match(html, /next /, "the next run is shown");
   assert.match(html, /Fix deploy/);
-  assert.match(html, /engineer, workforce/);
+  assert.match(html, /engineer on the workforce repo: writes the change on a branch and opens a pull request/);
   assert.match(html, /#1 in the queue/);
   assert.match(html, /Web UI restyle/);
   assert.match(html, /TollBit research/);
   assert.match(html, /waiting behind/);
   assert.match(html, /Morning research/);
+  assert.match(html, /Opened the pull request|Wrote a report|Reviewed/, "a finished card says what it produced");
+});
+
+test("a running card shows what the worker is doing this minute, and a card with nothing to say says so", () => {
+  const step = "Editing jobs-board.ts";
+  const withStep = boardData({ store, queue: { isHeld: () => false, queuePosition: () => 1, latestStep: () => step } });
+  const running = withStep.running.find((j) => j.id === runningJob.id)!;
+  assert.equal(running.now, step);
+  assert.match(renderBoard(withStep, "token"), /Now: Editing jobs-board\.ts/);
+  // Nothing is running in this process's runner, so no card claims to know a step.
+  assert.equal(boardData({ store, queue }).running.find((j) => j.id === runningJob.id)!.now, undefined);
+  assert.ok(!renderBoard(boardData({ store, queue }), "token").includes("Now:"));
+
+  const vague = boardData({ store, queue }).finished.find((j) => j.id === vagueJob.id)!;
+  assert.equal(vague.description, undefined);
+  assert.match(vague.descriptionUnavailable!, /brief is empty or unreadable/);
+  assert.match(renderBoard(boardData({ store, queue }), "token"), /No description: this job&#39;s brief is empty or unreadable\./);
+  // Every card carries either a description or that honest note, and a kind line explaining itself.
+  for (const group of [boardData({ store, queue }).running, boardData({ store, queue }).queued, boardData({ store, queue }).finished]) {
+    for (const j of group) {
+      assert.ok(j.description || j.descriptionUnavailable, `${j.id} says nothing about what it is`);
+      assert.match(j.kindLabel, / on the .+ repo: .+/, `${j.id} does not explain its kind`);
+    }
+  }
 });
 
 test("a schedule with a next run shows it in London time, soonest first", () => {
@@ -169,28 +223,41 @@ test("a saved output and a pull request are linked where they already exist, nev
   assert.deepEqual(failed.links, [{ what: "pull request", url: "https://github.com/drpaulfarrow/clear-exchange/pull/61" }]);
   const ea = board.finished.find((j) => j.id === eaJob.id)!;
   assert.equal(ea.links, undefined, "assistant outputs are never copied to the repository, so never linked");
+  // The assistant's card still says what it did, from the job's own record, without reading its output.
+  assert.equal(ea.produced, "Worked over your mail and calendar; the report is in your chat.");
   const html = renderBoard(board, "token");
-  // Two links only: the assistant job's output is never read, so nothing of Paul's mail is pointed at.
-  assert.equal((html.match(/href="https:\/\/github\.com\//g) ?? []).length, 2);
+  // Three links only: the assistant job's output is never read, so nothing of Paul's mail is pointed at.
+  assert.equal((html.match(/href="https:\/\/github\.com\//g) ?? []).length, 3);
   assert.match(html, /saved output/);
   assert.match(html, /pull request/);
 });
 
-test("no brief, output, schedule brief, spend figure or personal text can leak into the page or its JSON", () => {
+test("no token, pasted report, output, schedule brief, spend figure or personal text can leak into the page or its JSON", () => {
   const board = boardData({ store, queue });
   const html = renderBoard(board, boardToken(store));
   const json = JSON.stringify(board);
-  for (const text of ["SECRET BRIEF alpha", "SECRET BRIEF beta", "SECRET BRIEF gamma", "SECRET BRIEF delta", "SECRET BRIEF epsilon", "SECRET BRIEF zeta", "SECRET SCHEDULE BRIEF", "SECRET OUTPUT beta", "SECRET MAIL", "jo@example.com"]) {
+  for (const text of ["SECRET", "ghp_AAAABBBBCCCCDDDDEEEE1111222233334444", "Engineer's report", "SECRET OUTPUT beta", "SECRET MAIL", "jo@example.com"]) {
     assert.ok(!html.includes(text), `the page leaked: ${text}`);
     assert.ok(!json.includes(text), `the JSON leaked: ${text}`);
+  }
+  // A card's description is read off the brief and capped, so a brief too long to be a card is never
+  // on the page whole, and the text past the cap is not there at all.
+  for (const j of [...board.running, ...board.queued, ...board.finished]) {
+    assert.ok(!("brief" in j), "a brief reached the JSON");
+    const full = store.getJob(j.id)!.brief;
+    if (full.length <= 240) continue;
+    assert.ok(!html.includes(full), `the whole brief is on the page: ${j.id}`);
+    assert.ok(!json.includes(full), `the whole brief is in the JSON: ${j.id}`);
+    assert.ok(!html.includes("NOT-ON-A-CARD"), "text past the cap reached the page");
   }
   for (const word of ["cost", "spend", "budget", "$"]) assert.ok(!json.includes(word) && !html.includes(word), `a figure reached the board: ${word}`);
   assert.ok(!json.includes(boardToken(store)), "the token is not in the JSON");
 });
 
-test("the board reads no spend and holds no cost field at all", () => {
+test("the board reads no spend, holds no cost field, and reads no brief except through src/job-descriptions.ts", () => {
   const src = fs.readFileSync(new URL("../src/jobs-board.ts", import.meta.url), "utf8");
   assert.ok(!/spend\.js/.test(src), "the board must not read src/spend.ts");
   assert.ok(!/costUsd/.test(src), "the board must not carry a cost");
-  assert.ok(!/\.brief/.test(src), "the board must not read a job's brief");
+  assert.ok(!/"summary"|\.summary/.test(src), "the board must not show a job's report message");
+  assert.ok(!/\.brief/.test(src), "every brief the board shows is cleaned, redacted and capped in src/job-descriptions.ts");
 });
