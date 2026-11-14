@@ -32,6 +32,7 @@ import { config } from "./config.js";
 import { classify } from "./output-folders.js";
 import { londonYmd } from "./london.js";
 import { jobTitle } from "./titles.js";
+import { SIGN_OUT_PATH } from "./sign-in.js";
 import type { Job, Store } from "./store.js";
 
 export const REPORTS_PATH = "/reports";
@@ -424,7 +425,7 @@ export function renderReportsIndex(entries: ReportEntry[], token: string): strin
     .join("");
   const body =
     `<main><h1>Saved reports</h1>` +
-    `<p class="note">Every saved job output, newest first. Read only; the pages carry no script and fetch nothing.</p>` +
+    `<p class="note">Every saved job output, newest first. Read only; the pages carry no script and fetch nothing. <a href="${SIGN_OUT_PATH}">Sign out</a>.</p>` +
     (rows || `<p class="empty">Nothing saved yet.</p>`) +
     `</main>`;
   return document_("Saved reports", body, `${REPORTS_REFRESH_SECONDS}; url=${REPORTS_PATH}?t=${escapeHtml(token)}`);
@@ -432,7 +433,7 @@ export function renderReportsIndex(entries: ReportEntry[], token: string): strin
 
 /** One report: the Markdown as HTML, with a way back to the index without retyping anything. */
 export function renderReportPage(entry: ReportEntry, markdown: string, token: string): string {
-  const crumb = `<p class="crumb"><a href="${REPORTS_PATH}?t=${escapeHtml(token)}">&larr; All reports</a></p>`;
+  const crumb = `<p class="crumb"><a href="${REPORTS_PATH}?t=${escapeHtml(token)}">&larr; All reports</a> &middot; <a href="${SIGN_OUT_PATH}">Sign out</a></p>`;
   const body =
     `<main>${crumb}<h1>${escapeHtml(entry.title)}</h1>` +
     `<p class="meta">${escapeHtml(entry.kind)} &middot; ${escapeHtml(entry.date)} &middot; <span class="id">${escapeHtml(entry.id)}</span></p>` +

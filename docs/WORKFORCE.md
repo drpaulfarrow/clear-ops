@@ -6,7 +6,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 | Ask for | Worker | What you get |
 |---|---|---|
-| Research, "go deep on..." | researcher | A sourced brief (long and structured if you ask for depth) |
+| Research, "go deep on...", "how does \<site\> work?" | researcher | A sourced brief (long and structured if you ask for depth), or a read-only, signed-out look at how a public web app is built: what it loads, what its frontend calls and what its delivered code says. It never signs in and never probes endpoints the page did not call |
 | Posts, emails, specs in your voice | writer | A draft |
 | "Engineer: build X" | engineer | A pull request with tests; the maintainer reviews and merges it, and review fixes loop on their own (three rounds) |
 | Runs after every engineer job (you do not ask for it) | maintainer | Runs the tests and CI, reads the diff, then merges or requests changes. It never edits code |
@@ -34,7 +34,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 ## Commands
 
-`/jobs` `/board` (a link to the read-only jobs board page) `/reports` (a link to your saved reports, every finished job's output as a page you can read on your phone) `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared), `buy cancel <id>` and `code <id> <the code>` (the code a site sent you, put into the sign-in page that is waiting for it). Each approval command is for one item, you send it yourself, and it expires.
+`/jobs` `/board` (a link to the read-only jobs board page, behind your password) `/reports` (a link to your saved reports, every finished job's output as a page you can read on your phone, behind your password) `/password` (a private one-time link to set or change the password that opens the browser pages; type it there, never in chat, and setting it signs out every device) `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared), `buy cancel <id>` and `code <id> <the code>` (the code a site sent you, put into the sign-in page that is waiting for it). Each approval command is for one item, you send it yourself, and it expires.
 
 ## Things only you do
 

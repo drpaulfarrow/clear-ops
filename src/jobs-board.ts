@@ -19,10 +19,13 @@
  *
  * The page changes nothing: the only route is a GET, and nothing here writes to a job, a queue or a
  * schedule. The link carries a long-lived token the service minted itself and keeps in the store
- * (/board prints it in chat); it is never logged.
+ * (/board prints it in chat); it is never logged. Since 14 Nov 2026 the token alone is not enough:
+ * the page also sits behind the service's sign-in (src/sign-in.ts), so an unsigned-in visit is sent to
+ * the sign-in page first. The only thing the page adds is one link to sign out.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "./config.js";
+import { SIGN_OUT_PATH } from "./sign-in.js";
 import { lockKey, type JobRunner } from "./jobs.js";
 import { classify, EXCLUDED_KINDS } from "./output-folders.js";
 import { entryFor } from "./publish-outputs.js";
@@ -453,7 +456,7 @@ export function renderBoard(board: Board, token: string): string {
   const refresh = `${BOARD_REFRESH_SECONDS}; url=${BOARD_PATH}?t=${escapeHtml(token)}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="${refresh}"><title>Workforce jobs</title><style>${STYLE}</style></head><body>
 <h1>Workforce jobs</h1>
-<p class="note">Read only, refreshes every ${BOARD_REFRESH_SECONDS} seconds. Updated ${escapeHtml(clock)} London.</p>
+<p class="note">Read only, refreshes every ${BOARD_REFRESH_SECONDS} seconds. Updated ${escapeHtml(clock)} London. <a href="${SIGN_OUT_PATH}">Sign out</a>.</p>
 ${paused}
 ${healthBlock(board.health)}
 ${efficiencyBlock(board.efficiency)}

@@ -125,7 +125,7 @@ test("delegation starts a job and the worker reports back", async () => {
   assert.equal(job.status, "done");
   assert.ok(store.readOutput(job.id)?.startsWith(`worker(${config.models.worker})`));
   const workerCall = calls.find((c) => c.systemPrompt.includes("research analyst"))!;
-  assert.deepEqual(workerCall.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__browser__open", "mcp__browser__read", "mcp__browser__click", "mcp__browser__type", "mcp__browser__back", "mcp__browser__sign_in"]);
+  assert.deepEqual(workerCall.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__browser__open", "mcp__browser__read", "mcp__browser__click", "mcp__browser__type", "mcp__browser__back", "mcp__browser__sign_in", "mcp__inspector__open", "mcp__inspector__read", "mcp__inspector__network", "mcp__inspector__assets", "mcp__inspector__fetch_asset"]);
   assert.ok(workerCall.systemPrompt.includes("Clean room rule"));
 });
 
