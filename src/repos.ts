@@ -6,8 +6,9 @@ import type { Store } from "./store.js";
 /**
  * The repositories the workforce manages. "product" (Clear Exchange) and "self" (this workforce) are
  * always the first two and keep their own settings (PRODUCT_REPO, SELF_REPO, REPO_DIR, SELF_REPO_DIR).
- * More come from MANAGED_REPOS (default: Paul's personal site, alias "site") and from repositories the
- * workforce creates when Paul asks (kept in the store, loaded on boot). Every agent can read every
+ * More come from MANAGED_REPOS (default: Paul's personal site, alias "site", and app-doubleshift, alias
+ * "doubleshift") and from repositories the workforce creates when Paul asks (kept in the store, loaded on
+ * boot). Every agent can read every
  * managed repository; an engineering job writes to one.
  */
 export interface ManagedRepo {
