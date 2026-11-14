@@ -3,9 +3,11 @@
 # 3 failed checks in a row it posts to a Discord webhook (DISCORD_WEBHOOK_URL secret) and
 # restarts the app's Fly machines through the existing FLY_API_TOKEN. It posts again once the
 # health check passes. A failed check fails the run, which is how the streak below is counted.
-# An Actions cache entry remembers that an episode was alerted: exactly one alert per episode,
-# a hiccup in one run can only delay an alert (never suppress it), and if that state ever gets
-# stuck the episode is still escalated at 1, 2 and 3 hours down.
+# An Actions cache entry remembers that an episode was alerted: exactly one alert and one
+# restart attempt per episode, and a hiccup in one run can only delay an alert, never suppress
+# it. (If GitHub were to evict that small cache entry mid-episode, one repeat alert/restart
+# could occur; the entry is read every 5 minutes while down, so time-based eviction cannot
+# happen during an episode.)
 name: watchdog
 on:
   schedule:
@@ -77,17 +79,15 @@ jobs:
           path: .watchdog-alerted
           key: watchdog-alerted
 
-      # Escalation: if the alert state is somehow stuck (cleared recovery failed), a new episode
-      # still raises the alarm once it has been down for 1, 2 or 3 hours.
       - name: Set up flyctl
-        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && (steps.alertstate.outputs.cache-hit != 'true' || steps.streak.outputs.previous_failures == '12' || steps.streak.outputs.previous_failures == '24' || steps.streak.outputs.previous_failures == '36')
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.alertstate.outputs.cache-hit != 'true'
         # Never let a setup hiccup suppress the alert below: GitHub implicitly ANDs every step's
         # if with success(), so without continue-on-error a failed install would skip the alert.
         continue-on-error: true
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Alert in Discord and restart the Fly machines
-        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && (steps.alertstate.outputs.cache-hit != 'true' || steps.streak.outputs.previous_failures == '12' || steps.streak.outputs.previous_failures == '24' || steps.streak.outputs.previous_failures == '36')
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.alertstate.outputs.cache-hit != 'true'
         continue-on-error: true
         run: |
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
