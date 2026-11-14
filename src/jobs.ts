@@ -1,7 +1,7 @@
 import { SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault } from "./vault.js";
 import { BROWSE_KINDS, SEARCH_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
-import { describeRetrieval, EVIDENCE_RULE, retrieve } from "./retrieval.js";
+import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { provider, runRoute } from "./llm.js";
@@ -868,11 +868,9 @@ export class JobRunner {
       // hard budget, and hands the results over as fenced evidence. A resumed run keeps what it already had.
       let evidence = "";
       if (SEARCH_KINDS.includes(job.kind) && !job.resumed) {
-        shown.note("Checking whether this needs a search");
-        const outcome = await retrieve(job.brief);
+        const outcome = await retrieve(job.brief, { note: (line) => shown.note(line) });
         this.store.updateJob(id, { retrieval: outcome.record });
         evidence = outcome.evidence;
-        if (outcome.record.searches.length) shown.note(describeRetrieval(outcome.record.decision));
       }
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {

@@ -30,7 +30,7 @@ import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
 import { creditUrl, keyName, modelNote, providerName } from "./llm.js";
 import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
-import { describeRetrieval, EVIDENCE_RULE, retrieve } from "./retrieval.js";
+import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { normaliseDomain, SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault, cardVault } from "./vault.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
@@ -270,11 +270,10 @@ export class Orchestrator {
       const base = context ? `${context}\n\n${prompt}` : prompt;
       // Retrieval as a harness decision (src/retrieval.ts): before the chief composes its reply, the
       // service decides on the cheap tier whether a search is needed and runs it itself, so a search is
-      // never left to whether the model thinks of it. The decision is kept with the turn.
-      status.update("Checking whether this needs a search…");
-      const outcome = await retrieve(prompt);
+      // never left to whether the model thinks of it. The decision is kept with the turn, and the
+      // status line says what it is doing as it does it.
+      const outcome = await retrieve(prompt, { note: (line) => status.update(line) });
       this.store.recordRetrievalTurn(outcome.record);
-      if (outcome.record.searches.length) status.update(describeRetrieval(outcome.record.decision));
       const asked = outcome.evidence ? `${outcome.evidence}\n\n${base}` : base;
       const result = await this.run({
         prompt: asked,

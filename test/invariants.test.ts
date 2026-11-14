@@ -887,10 +887,11 @@ test("retrieval is a harness decision, budgeted in code and never run on a stron
   assert.match(r, /could not check whether a web search was needed/, "a failed decision step is said plainly");
 
   // The chief and every search-carrying worker run it before the answer is composed, and it is stored with the turn or job.
-  assert.match(orch, /const outcome = await retrieve\(prompt\)/, "the chief's turn runs the decision first");
+  assert.match(orch, /const outcome = await retrieve\(prompt, \{ note: \(line\) => status\.update\(line\) \}\)/, "the chief's turn runs the decision first");
   assert.match(orch, /this\.store\.recordRetrievalTurn\(outcome\.record\)/, "the chief's decision is stored with the turn");
   assert.match(orch, /EVIDENCE_RULE/, "the chief carries the evidence rule");
-  assert.match(jobs, /if \(SEARCH_KINDS\.includes\(job\.kind\) && !job\.resumed\) \{[\s\S]{0,240}await retrieve\(job\.brief\)/, "every search-carrying worker runs the decision first");
+  assert.match(jobs, /if \(SEARCH_KINDS\.includes\(job\.kind\) && !job\.resumed\) \{[\s\S]{0,240}await retrieve\(job\.brief, \{ note: \(line\) => shown\.note\(line\) \}\)/, "every search-carrying worker runs the decision first");
+  assert.match(r, /deps\.note\?\.\("Checking whether this needs a search…"\)/, "the decision says what it is doing while it is made");
   assert.match(jobs, /this\.store\.updateJob\(id, \{ retrieval: outcome\.record \}\)/, "a worker's decision is stored with the job");
   assert.match(jobs, /systemPrompt: SEARCH_KINDS\.includes\(job\.kind\) \? `\$\{spec\.prompt\}\\n\\n\$\{EVIDENCE_RULE\}` : spec\.prompt/, "the evidence rule is in every search-carrying worker's prompt");
   // Kinds that never search are left exactly as they were.

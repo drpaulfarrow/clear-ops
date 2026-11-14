@@ -104,6 +104,8 @@ export interface RetrieveDeps {
   fetchPage?: (url: string) => Promise<string>;
   /** The HTTP client the decision call and page fetches use. Tests inject a fake. */
   fetcher?: Fetcher;
+  /** One short plain line as the decision is made, for the founder's status display. Never a command. */
+  note?: (line: string) => void;
   now?: () => Date;
 }
 
@@ -400,8 +402,10 @@ export async function retrieve(request: string, deps: RetrieveDeps = {}): Promis
   if (local) {
     decision = { needsRetrieval: false, engine: "none", queries: [], reason: `not needed: ${local}`, source: "rule" };
   } else {
-    const note = retrievalModelNote();
-    if (note) refusals.push(note);
+    const refused = retrievalModelNote();
+    if (refused) refusals.push(refused);
+    // Audible while it happens: a turn a code rule settles says nothing at all.
+    deps.note?.("Checking whether this needs a search…");
     try {
       decision = await (deps.decide ?? ((r: string) => modelDecide(r, deps.fetcher ?? (fetch as unknown as Fetcher))))(request);
     } catch (err) {
@@ -422,6 +426,7 @@ export async function retrieve(request: string, deps: RetrieveDeps = {}): Promis
   }
 
   const search = deps.search ?? defaultSearch;
+  deps.note?.(describeRetrieval(decision));
   // Two queries for the same subject often return the same page: one source is listed once, so the
   // evidence never reads as two sources agreeing with each other.
   const add = (list: SearchResult[]) => {

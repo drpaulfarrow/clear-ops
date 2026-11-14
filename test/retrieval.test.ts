@@ -31,6 +31,9 @@ function withKeys() {
 
 const result = (title: string, url: string, snippet = "snippet") => ({ title, url, snippet });
 
+/** No test here touches the network: a page fetch is canned wherever the test is not about fetching. */
+const noFetch = async (url: string) => `canned page text for ${url}`;
+
 /**
  * The fixture set: a request, the canned reply the decision step would give, and what the harness
  * should do with it. No network, so the parse, the local rules and the policy are what is tested.
@@ -72,6 +75,7 @@ test("the decision step retrieves only when the answer needs outside facts", asy
         return R.parseDecision(f.reply);
       },
       search: async () => [result("Source", "https://example.test/a")],
+      fetchPage: noFetch,
       now: NOW,
     });
     assert.equal(outcome.record.decision.needsRetrieval, f.expect, `${f.name}: needsRetrieval`);
@@ -113,6 +117,7 @@ test("the harness budget refuses the fourth search, and says so in the record", 
       ran += 1;
       return [result(`r${ran}`, `https://example.test/${ran}`)];
     },
+    fetchPage: noFetch,
     now: NOW,
   });
   assert.equal(outcome.record.searches.length, config.retrieval.maxSearches, "only the budget's worth of searches ran");
@@ -130,6 +135,7 @@ test("the second engine is tried once when the first finds nothing", async () =>
       seen.push(engine);
       return engine === "exa" ? [result("Prebid 11.50", "https://github.com/prebid/Prebid.js/releases")] : [];
     },
+    fetchPage: noFetch,
     now: NOW,
   });
   assert.deepEqual(seen, ["brave", "exa"], "the other engine runs exactly once");
@@ -161,6 +167,7 @@ test("one source returned by two queries is listed once, not as two agreeing sou
       source: "model",
     }),
     search: async () => [result("Prebid releases", "https://github.com/prebid/Prebid.js/releases"), result("Prebid", "https://prebid.org")],
+    fetchPage: noFetch,
     now: NOW,
   });
   assert.equal(outcome.record.searches.length, 2, "both queries ran");
@@ -242,6 +249,7 @@ test("the engine override is recorded when the model's proposal differs from the
   const outcome = await R.retrieve("What is the latest Prebid.js release?", {
     decide: async () => ({ needsRetrieval: true, engine: "exa", queries: ["latest Prebid.js release"], reason: "x", source: "model" }),
     search: async () => [result("Prebid", "https://prebid.org")],
+    fetchPage: noFetch,
     now: NOW,
   });
   assert.ok(outcome.record.refusals.some((r) => /engine policy/.test(r)));
@@ -300,6 +308,7 @@ test("the record holds the decision, never the request text", async () => {
   const outcome = await R.retrieve(`${secret} what is the latest Prebid.js version?`, {
     decide: async () => ({ needsRetrieval: true, engine: "brave", queries: ["Prebid.js latest version"], reason: "versions change", source: "model" }),
     search: async () => [result("Prebid", "https://prebid.org")],
+    fetchPage: noFetch,
     now: NOW,
   });
   const json = JSON.stringify(outcome.record);
@@ -334,6 +343,32 @@ test("with retrieval off, or no engine configured, nothing is searched and it sa
   const b = await R.retrieve("What is the latest Prebid.js release?", { now: NOW });
   assert.equal(b.record.decision.needsRetrieval, false);
   assert.match(b.record.decision.reason, /no search engine is configured/);
+});
+
+test("the decision is audible while it is made, and silent when a rule settles it", async () => {
+  withKeys();
+  const said: string[] = [];
+  await R.retrieve("What is the latest Prebid.js release?", {
+    decide: async () => ({ needsRetrieval: true, engine: "brave", queries: ["Prebid.js latest release"], reason: "a release changes", source: "model" }),
+    search: async () => [result("Prebid", "https://prebid.org")],
+    fetchPage: noFetch,
+    note: (line) => said.push(line),
+    now: NOW,
+  });
+  assert.deepEqual(said, ["Checking whether this needs a search…", "Searching the web: Prebid.js latest release"]);
+
+  // A turn a code rule settles says nothing at all: nothing is being decided or searched.
+  const quiet: string[] = [];
+  await R.retrieve("/jobs", { note: (line) => quiet.push(line), now: NOW });
+  assert.deepEqual(quiet, []);
+  // Nor does a turn the model decides needs no search.
+  const nothing: string[] = [];
+  await R.retrieve("What is 12 times 12?", {
+    decide: async () => ({ needsRetrieval: false, engine: "none", queries: [], reason: "arithmetic", source: "model" }),
+    note: (line) => nothing.push(line),
+    now: NOW,
+  });
+  assert.deepEqual(nothing, ["Checking whether this needs a search…"]);
 });
 
 test("the decision is stored with the turn, bounded, and with the job", async () => {
