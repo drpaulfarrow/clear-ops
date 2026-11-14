@@ -34,6 +34,21 @@ const LABEL_BODY = String.raw`(?:\*\*|__)?(?:outcome|summary|tl;?dr|what changed
 const LABEL = new RegExp(`^${LABEL_BODY}`, "i");
 
 /**
+ * Adds a line to the end of a worker's report without touching the short message it sends: the line
+ * goes just before the `<message_to_paul>` block, or at the end when there is none. An empty line
+ * leaves the answer exactly as it was. Used for the one plain line saying which GitHub credential
+ * reached the job's repository (src/repo-tokens.ts, src/jobs.ts).
+ */
+export function addToReport(text: string, line: string): string {
+  const note = line.trim();
+  if (!note) return text;
+  const open = text.lastIndexOf(MESSAGE_OPEN);
+  if (open < 0) return `${text.trimEnd()}\n\n${note}`;
+  const head = text.slice(0, open).trimEnd();
+  return head ? `${head}\n\n${note}\n\n${text.slice(open)}` : `${note}\n\n${text.slice(open)}`;
+}
+
+/**
  * Separates a worker's final answer into the full report (saved as the job output; verdict lines
  * included) and the message for Paul. Without a message block, the message is derived from the report.
  */

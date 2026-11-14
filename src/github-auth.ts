@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
+import { perRepoTokenFix, repoTokens } from "./repo-tokens.js";
 
 /**
  * How the workforce authenticates to GitHub.
@@ -220,10 +221,12 @@ export class GithubAuth {
   }
 
   /**
-   * Which auth is active and which of the given repositories it can reach. Checks each with a cheap
-   * GET /repos/{slug}. Never returns or logs a secret.
+   * Which auth is active and which of the given repositories it can reach. A repository with its own
+   * token (`DOUBLESHIFT_TOKEN`, src/repo-tokens.ts) is checked with that token, since it is the only
+   * credential used for it; every other repository uses the App or GH_TOKEN. Each is checked with a
+   * cheap GET /repos/{slug}. Never returns or logs a secret.
    */
-  async health(slugs: string[]): Promise<AuthHealth> {
+  async health(repos: Array<string | { slug: string; alias?: string }>): Promise<AuthHealth> {
     const mode = this.mode();
     const out: AuthHealth = { mode, createRepos: this.hasCreateToken(), repos: [] };
     if (mode === "app") {
@@ -233,19 +236,27 @@ export class GithubAuth {
         out.appError = err instanceof AppAuthError ? err.plain : "The GitHub App could not sign in.";
       }
     }
-    const token = out.appError ? this.pat : await this.token();
+    const global = out.appError ? this.pat : await this.token();
     const effective: AuthMode = out.appError ? (this.pat ? "token" : "none") : mode;
     out.effective = effective;
-    for (const slug of slugs) {
+    for (const entry of repos) {
+      const { slug, alias } = typeof entry === "string" ? { slug: entry, alias: undefined } : entry;
+      const own = repoTokens.source({ alias, slug });
+      const token = repoTokens.get({ alias, slug }) ?? global;
       if (!token) {
-        out.repos.push({ slug, reachable: false, detail: "no credentials" });
+        out.repos.push({ slug, reachable: false, detail: "no credentials", credential: own ? `its own token (${own})` : undefined });
         continue;
       }
       try {
         const r = await this.api(`/repos/${slug}`, { bearer: token });
-        out.repos.push({ slug, reachable: r.status === 200, detail: r.status === 200 ? undefined : r.status === 404 || r.status === 403 ? "no access" : `error ${r.status}` });
+        out.repos.push({
+          slug,
+          reachable: r.status === 200,
+          detail: r.status === 200 ? undefined : r.status === 404 || r.status === 403 ? "no access" : `error ${r.status}`,
+          credential: own ? `its own token (${own})` : undefined,
+        });
       } catch {
-        out.repos.push({ slug, reachable: false, detail: "GitHub unreachable" });
+        out.repos.push({ slug, reachable: false, detail: "GitHub unreachable", credential: own ? `its own token (${own})` : undefined });
       }
     }
     return out;
@@ -262,7 +273,8 @@ export interface AuthHealth {
   /** GH_TOKEN present, so repositories can be created. */
   createRepos: boolean;
   appError?: string;
-  repos: Array<{ slug: string; reachable: boolean; detail?: string }>;
+  /** `credential` is set only for a repository reached with its own token, and names the variable, never the token. */
+  repos: Array<{ slug: string; reachable: boolean; detail?: string; credential?: string }>;
 }
 
 /** One line for /status and the start-up log. No secrets. */
@@ -275,7 +287,11 @@ export function healthLine(h: AuthHealth): string {
   return `GitHub: ${auth}. Reachable: ${ok.length ? ok.join(", ") : "none"}.${bad.length ? ` Not reachable: ${bad.join(", ")}.` : ""} ${create}.`;
 }
 
-/** One plain message for Paul when the App is failing or a managed repository cannot be reached, else undefined. */
+/**
+ * One plain message for Paul when the App is failing or a managed repository cannot be reached, else
+ * undefined. The per-repository option is named as the specific fix, because an organisation that will
+ * not install the App never will: the exact secret to add, the scopes it needs and the deploy to re-run.
+ */
 export function healthProblem(h: AuthHealth): string | undefined {
   const bad = h.repos.filter((r) => !r.reachable);
   if (h.appError) {
@@ -283,11 +299,15 @@ export function healthProblem(h: AuthHealth): string | undefined {
   }
   if (!bad.length) return undefined;
   const names = bad.map((r) => r.slug).join(", ");
+  const perRepo = bad
+    .filter((r) => !r.credential)
+    .map((r) => perRepoTokenFix(r.slug))
+    .join("");
   if (h.mode === "app") {
-    return `The GitHub App cannot reach ${names}. Open the App's installation on GitHub (Settings, Applications, Installed GitHub Apps, Configure) and choose All repositories so every repository, including new ones, is covered. Nothing else needs changing.`;
+    return `The GitHub App cannot reach ${names}. Open the App's installation on GitHub (Settings, Applications, Installed GitHub Apps, Configure) and choose All repositories so every repository, including new ones, is covered. Nothing else needs changing.${perRepo}`;
   }
-  if (h.mode === "token") return `The GitHub token (GH_TOKEN) cannot reach ${names}. Give it access to those repositories, or set up the GitHub App (docs/GITHUB_APP.md) so you never need to edit token access again.`;
-  return `I have no GitHub credentials, so I cannot reach ${names}. Set up the GitHub App (docs/GITHUB_APP.md) or add a GH_TOKEN secret in the clear-ops repository, then re-run the latest deploy workflow.`;
+  if (h.mode === "token") return `The GitHub token (GH_TOKEN) cannot reach ${names}. Give it access to those repositories, or set up the GitHub App (docs/GITHUB_APP.md) so you never need to edit token access again.${perRepo}`;
+  return `I have no GitHub credentials, so I cannot reach ${names}. Set up the GitHub App (docs/GITHUB_APP.md) or add a GH_TOKEN secret in the clear-ops repository, then re-run the latest deploy workflow.${perRepo}`;
 }
 
 /** The one instance the service uses. Tests build their own. */
@@ -315,14 +335,24 @@ export function installGhWrapper(auth: GithubAuth = githubAuth, dir = wrapperDir
 }
 
 /**
- * The environment for a worker run: process.env with the App's key removed always. With the App in use
- * (and signed in), GH_TOKEN is removed too (it may be the classic token kept only to create
- * repositories) and PATH starts with the gh wrapper, so gh uses a token that is fresh at every call.
- * Git reads the same file through its credential helper. Otherwise GH_TOKEN stays as it was.
+ * The environment for a worker run: process.env with the App's key removed always, and every
+ * per-repository token (`DOUBLESHIFT_TOKEN`, `REPO_TOKENS`, src/repo-tokens.ts) removed too, so no job
+ * can reach a repository it was not given. When the job's own repository has its own token, that token
+ * is the only credential in the environment (gh and git use it for that repository), and the App's
+ * wrapper is not installed, because the App may have no access to it. Otherwise, with the App in use
+ * (and signed in), GH_TOKEN is removed (it may be the classic token kept only to create repositories)
+ * and PATH starts with the gh wrapper, so gh uses a token that is fresh at every call. Git reads the
+ * same file through its credential helper. Otherwise GH_TOKEN stays as it was.
  */
-export async function workerGithubEnv(base: NodeJS.ProcessEnv = process.env, auth: GithubAuth = githubAuth): Promise<NodeJS.ProcessEnv> {
+export async function workerGithubEnv(base: NodeJS.ProcessEnv = process.env, auth: GithubAuth = githubAuth, repo?: { alias?: string; slug?: string }, aliases: string[] = []): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...base };
-  for (const k of WORKER_STRIPPED) delete env[k];
+  for (const k of [...WORKER_STRIPPED, ...repoTokens.names(aliases)]) delete env[k];
+  const own = repoTokens.get(repo);
+  if (own) {
+    env.GH_TOKEN = own;
+    env.GITHUB_TOKEN = own;
+    return env;
+  }
   if (auth.mode() !== "app") return env;
   try {
     if (!(await auth.refreshFile())) return env;

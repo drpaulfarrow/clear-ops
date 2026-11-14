@@ -3,6 +3,10 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 import type { FailureKind } from "./failures.js";
+import type { RetrievalRecord } from "./retrieval.js";
+
+/** How many of the chief's own retrieval decisions are kept, newest last (src/retrieval.ts). */
+export const RETRIEVAL_TURNS_KEPT = 20;
 
 export type JobKind = "research" | "write" | "engineer" | "maintain" | "analyse" | "create_agent" | "ea" | "design" | "ideate" | "cv" | "dns" | "advisor" | "prebid";
 /**
@@ -110,6 +114,12 @@ export interface Job {
    * and only a provider figure is ever displayed.
    */
   costUsd?: number;
+  /**
+   * The harness's retrieval decision for this job's run (src/retrieval.ts): what was decided, why,
+   * which engine and queries ran, and whether the budget refused anything. Never Paul's mail, calendar
+   * or upload content, only the decision and what the web returned.
+   */
+  retrieval?: RetrievalRecord;
   error?: string;
   /**
    * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,
@@ -377,6 +387,12 @@ export interface Settings {
    * here so a restart does not sign Paul out. Never printed, never logged, never handed to a model.
    */
   pageSessionKey?: string;
+  /**
+   * The reports view's long-lived token (src/reports.ts), minted on first use and printed in chat by
+   * /reports. It is its own token, not the board's, because it opens saved outputs rather than job
+   * metadata; the same rules apply (compared in constant time, never logged, read-only pages only).
+   */
+  reportsToken?: string;
 }
 
 interface State {
@@ -404,6 +420,8 @@ interface State {
   capNotifiedOn?: string;
   /** The provider's cumulative usage when the current London day began, for real spend (src/spend.ts). */
   usageStart?: { ymd: string; usd: number; at: string };
+  /** The chief's own retrieval decisions, newest last, bounded (src/retrieval.ts). Never mail or uploads. */
+  retrievalTurns?: RetrievalRecord[];
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -741,6 +759,21 @@ export class Store {
   setUsageStart(start: { ymd: string; usd: number; at: string }): void {
     this.state.usageStart = { ...start };
     this.save();
+  }
+
+  /**
+   * The chief's own retrieval decisions (src/retrieval.ts), kept so a decision can be read back and
+   * tested. Bounded: only the newest RETRIEVAL_TURNS_KEPT are kept. Never Paul's mail, calendar or
+   * upload content: a record holds the decision, the engines, the queries and any budget refusal only.
+   */
+  recordRetrievalTurn(record: RetrievalRecord): void {
+    const turns = this.state.retrievalTurns ?? (this.state.retrievalTurns = []);
+    turns.push(record);
+    while (turns.length > RETRIEVAL_TURNS_KEPT) turns.shift();
+    this.save();
+  }
+  recentRetrievals(limit = RETRIEVAL_TURNS_KEPT): RetrievalRecord[] {
+    return (this.state.retrievalTurns ?? []).slice(-limit).reverse();
   }
 
   // Settings

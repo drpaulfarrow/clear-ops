@@ -32,8 +32,18 @@ Until you do this, nothing changes: the workforce keeps using the `GH_TOKEN` sec
 - If the App cannot sign in (a wrong key, say), the service falls back to `GH_TOKEN` if it is set, and tells you once in plain English.
 - The App installation covers only what the permissions above allow. It cannot merge past branch protection on `main`, and the existing rules are unchanged: only the maintainer merges, nobody force-pushes or pushes to a default branch.
 
+## A repository the App cannot reach (its own token)
+
+Some repositories live in an organisation that will not install the App, or that nobody can ask. Those do not have to wait for an owner: one managed repository can carry its own personal access token, and that token is then the only credential the workforce uses for it.
+
+1. Create a classic token at GitHub, Settings, Developer settings, Personal access tokens, Tokens (classic), with the **repo** and **workflow** scopes (the workflow scope is what lets an engineer push a change to a GitHub Actions file).
+2. In this repository, Settings, Secrets and variables, Actions, add it as `<ALIAS>_TOKEN`, upper case: for the alias `doubleshift` that is `DOUBLESHIFT_TOKEN`. `REPO_TOKENS` (a JSON object, alias or `owner/name` to token) does the same for any number of repositories at once.
+3. Re-run the latest deploy workflow so the machine picks it up.
+
+Precedence, per repository: its own token, else the GitHub App, else `GH_TOKEN`. Nothing else changes, and a repository without its own token is reached exactly as before. The token is never in a log, a chat message, a job output, a repository or a store: the start-up log and `/status` name the variable instead, and a job that clones or pushes says which credential reached its repository in one plain line of its report. A repository with its own token never falls back to another credential, so a failure names the secret that is actually wrong.
+
 ## If something is wrong
 
 - `/status` says the App is failing: check `GH_APP_ID` and `GH_APP_PRIVATE_KEY` match the App, then re-run the deploy.
-- A repository is not reachable: GitHub, Settings, Applications, Installed GitHub Apps, Configure, and choose **All repositories**. If the repository belongs to an organisation, the App has to be installed on that organisation instead: open the organisation's Settings, GitHub Apps, Configure, and give the App access to the repository (an organisation owner approves). The chief's own message names the organisation when that is what is missing.
+- A repository is not reachable: GitHub, Settings, Applications, Installed GitHub Apps, Configure, and choose **All repositories**. If the repository belongs to an organisation, the App has to be installed on that organisation instead: open the organisation's Settings, GitHub Apps, Configure, and give the App access to the repository (an organisation owner approves). The chief's own message names the organisation when that is what is missing. If the organisation will not install the App at all, give that one repository its own token instead, as above.
 - Creating a repository fails: that needs the classic `GH_TOKEN` (see the top of this page).

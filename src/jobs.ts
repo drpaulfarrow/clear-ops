@@ -1,6 +1,7 @@
 import { SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault } from "./vault.js";
-import { BROWSE_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
+import { BROWSE_KINDS, SEARCH_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
+import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { provider, runRoute } from "./llm.js";
@@ -19,12 +20,13 @@ import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
-import { shortText, splitReport } from "./messages.js";
+import { addToReport, shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type BudgetStop, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
+import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
 
@@ -895,9 +897,19 @@ export class JobRunner {
       costMeter = this.costWatch(cap.onAnthropic ? undefined : limits.realBudgetUsd, () => live.abort.abort());
       progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
       const shown = progress;
+      // Retrieval as a harness decision (src/retrieval.ts): before a search-carrying worker composes its
+      // answer, the service decides on the cheap tier whether a search is needed, runs it itself within a
+      // hard budget, and hands the results over as fenced evidence. A resumed run keeps what it already had.
+      let evidence = "";
+      if (SEARCH_KINDS.includes(job.kind) && !job.resumed) {
+        const outcome = await retrieve(job.brief, { note: (line) => shown.note(line) });
+        this.store.updateJob(id, { retrieval: outcome.record });
+        evidence = outcome.evidence;
+      }
+      const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {
-        prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
-        systemPrompt: spec.prompt,
+        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
+        systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
         cwd: spec.cwd,
         // Only a kind that builds gets the npm development-mode settings: the service runs
@@ -966,6 +978,11 @@ export class JobRunner {
         if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
         throw new RunFailedError(failed);
       }
+      // A job that clones and pushes gains one plain line at the end of its saved report saying which
+      // GitHub credential reached its repository: the variable's name, never a token
+      // (src/repo-tokens.ts). Paul's short message is untouched, and a repository on the App or
+      // GH_TOKEN adds nothing (src/bootstrap.ts jobCredentialNote).
+      if (BUILDS(job.kind)) result.text = addToReport(result.text, jobCredentialNote(job.target));
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
       const { report, message } = splitReport(result.text);
       const outputPath = this.store.writeOutput(id, report);

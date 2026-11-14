@@ -18,7 +18,7 @@ import { DiscordListener } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
 import { isAllowed } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
-import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoProblemsMessage } from "./bootstrap.js";
+import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoCredentialLine, repoProblemsMessage } from "./bootstrap.js";
 import { startTokenRefresher } from "./github-auth.js";
 import { repoRegistry } from "./repos.js";
 import { REPO_SERVER, repoServer } from "./repo-tools.js";
@@ -43,6 +43,8 @@ import { VoiceBridge } from "./voice-bridge.js";
 import { BOARD_PATH, boardData, boardToken, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
 import { PASSWORD_PATH, SIGN_IN_PATH, SIGN_OUT_PATH, noPasswordPage, passwordPage, passwordSavedPage, signIn as pageSignIn, signInPage, SignInError } from "./sign-in.js";
 import type { SignIn } from "./sign-in.js";
+import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
+import fs from "node:fs";
 
 export interface AppDeps {
   messenger: Messenger;
@@ -380,13 +382,12 @@ export function buildApp(deps: AppDeps) {
     res.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
   };
   /**
-   * The browser pages the sign-in covers: the jobs board, and the reports view at its own path. The
-   * reports path is written out here rather than taken from `src/reports.ts` (`REPORTS_PATH`, the same
-   * string) because that page is not in this branch: the gate is one place over the path, so the
-   * reports routes are behind it the moment they exist and no page can ever be served without it.
+   * The browser pages the sign-in covers: the jobs board and the reports view, each at its own path,
+   * taken from the module that serves it so the two can never drift apart. The gate is one place over
+   * the path, so both the index and one item, and the board's JSON, are behind it alike.
    * Nothing else the service serves is behind it: no webhook, no callback and no health check.
    */
-  const GATED_PATHS = ["/reports", BOARD_PATH];
+  const GATED_PATHS = [REPORTS_PATH, BOARD_PATH];
   const under = (path: string, base: string) => path === base || path.startsWith(`${base}/`);
   /**
    * Where a signed-in visitor may be sent: one of those pages, never anywhere else. A path that leaves
@@ -506,6 +507,50 @@ export function buildApp(deps: AppDeps) {
     res.type("html").send(renderBoard(board, token));
   });
 
+  /**
+   * The reports view: every saved job output as a page Paul can read on his phone, at a stable
+   * address. Two GET routes behind the same long-lived token /reports prints in chat, and nothing
+   * else: no model call, no form and no write of any kind. Which outputs exist is decided by the same
+   * rules as the copy in the private outputs repository (src/output-folders.ts), so an assistant, CV
+   * or upload-derived output is not here either. The Markdown is rendered by src/reports.ts, which
+   * escapes everything, and a saved .html file beside an output is served under a policy that allows
+   * no script at all.
+   */
+  const reportHeaders = (res: express.Response, csp: string) => {
+    noStore(res);
+    res.set("Content-Security-Policy", csp);
+    res.set("X-Content-Type-Options", "nosniff");
+  };
+  app.get(REPORTS_PATH, (req, res) => {
+    reportHeaders(res, PAGE_CSP);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    if (!reportsTokenValid(deps.store, token)) return res.status(404).type("html").send(reportsRefusedPage());
+    res.type("html").send(renderReportsIndex(reportEntries(deps.store), token));
+  });
+  app.get(`${REPORTS_PATH}/:id`, (req, res) => {
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    const report = reportsTokenValid(deps.store, token) ? reportFor(deps.store, String(req.params.id ?? "")) : undefined;
+    if (!report) {
+      reportHeaders(res, PAGE_CSP);
+      return res.status(404).type("html").send(reportsRefusedPage());
+    }
+    if (report.htmlPath) {
+      // A self-contained page the worker saved beside the Markdown, served as-is (the sandbox and
+      // default-src 'none' mean anything script-shaped in it simply does not run).
+      reportHeaders(res, FILE_CSP);
+      let html: string;
+      try {
+        html = fs.readFileSync(report.htmlPath, "utf8");
+      } catch {
+        reportHeaders(res, PAGE_CSP);
+        return res.status(404).type("html").send(reportsRefusedPage());
+      }
+      return res.type("html").send(html);
+    }
+    reportHeaders(res, PAGE_CSP);
+    res.type("html").send(renderReportPage(report.entry, report.markdown ?? "", token));
+  });
+
   return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, voice };
 }
 
@@ -524,6 +569,8 @@ if (isMain) {
   const repoProblems = await bootstrapRepos();
   const github = await githubProblemMessage().catch(() => ({ message: undefined, line: "GitHub: health check failed." }));
   console.log(github.line);
+  // Which credential reaches each managed repository, one plain line: the variable's name, never a token.
+  console.log(repoCredentialLine());
 
   // One messenger per channel, routed by address prefix; one orchestrator behind all of them.
   const routes: Array<{ prefix: string; messenger: Messenger }> = [];
