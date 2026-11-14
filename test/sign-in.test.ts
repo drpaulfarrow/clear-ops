@@ -81,13 +81,13 @@ after(() => {
   server.close();
 });
 
-/** The reports view's path. Its routes live in src/reports.ts; src/index.ts gates the path itself. */
-const REPORTS_PATH = "/reports";
+/** The reports view's path, taken from the module that serves it, as src/index.ts's gate does. */
+const { REPORTS_PATH } = await import("../src/reports.js");
 
 /**
- * Every browser view the sign-in covers, with words that must never come back to a stranger. The
- * reports view's routes arrive with src/reports.ts: until then its path is gated but 404s, so the
- * signed-in half of its test lives in test/reports.test.ts.
+ * Every browser view the sign-in covers, with words that must never come back to a stranger. Both
+ * views' own routes are covered in full, with a session, by test/jobs-board.test.ts and
+ * test/reports.test.ts; this file is about the gate in front of them.
  */
 const views = () => [
   { name: "the jobs board", url: `${BOARD_PATH}?t=${boardToken(store)}`, content: ["Workforce jobs", "Nothing running"] },
