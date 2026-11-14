@@ -30,6 +30,7 @@ import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
 import { creditUrl, keyName, modelNote, providerName } from "./llm.js";
 import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
+import { describeRetrieval, EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { normaliseDomain, SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault, cardVault } from "./vault.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
@@ -266,10 +267,19 @@ export class Orchestrator {
     const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
     try {
       const context = await this.threadContext(from);
+      const base = context ? `${context}\n\n${prompt}` : prompt;
+      // Retrieval as a harness decision (src/retrieval.ts): before the chief composes its reply, the
+      // service decides on the cheap tier whether a search is needed and runs it itself, so a search is
+      // never left to whether the model thinks of it. The decision is kept with the turn.
+      status.update("Checking whether this needs a search…");
+      const outcome = await retrieve(prompt);
+      this.store.recordRetrievalTurn(outcome.record);
+      if (outcome.record.searches.length) status.update(describeRetrieval(outcome.record.decision));
+      const asked = outcome.evidence ? `${outcome.evidence}\n\n${base}` : base;
       const result = await this.run({
-        prompt: context ? `${context}\n\n${prompt}` : prompt,
+        prompt: asked,
         ...(images?.length ? { images } : {}),
-        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes(),
+        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes() + `\n\n${EVIDENCE_RULE}`,
         model: config.models.chief,
         resume: this.store.getSession(from),
         allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
