@@ -207,6 +207,8 @@ export class JobRunner {
   private holders = new Map<JobTarget, string[]>();
   /** Engineering jobs that may run at once per repository, each in its own working copy. */
   private readonly slots: number;
+  /** Engineering jobs at once across all repositories (config.engineerTotal). */
+  private readonly total: number;
 
   private readonly waitForDeploy: DeployWait;
   /** Batches failure messages so an outage that fails many jobs sends Paul one message, not a flood. */
@@ -254,6 +256,8 @@ export class JobRunner {
       purchase?: PurchaseGate;
       otp?: OtpRelay;
       slots?: number;
+      /** Engineering jobs at once across all repositories; defaults to config.engineerTotal. */
+      total?: number;
       spend?: SpendMeter;
       progress?: JobProgressOptions;
       costWatch?: CostWatchFactory;
@@ -269,6 +273,7 @@ export class JobRunner {
     this.spend = opts.spend ?? storeMeter(store);
     this.setup = opts.setup ?? preparedCopies;
     this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
+    this.total = Math.max(1, opts.total ?? config.engineerTotal);
     const l = opts.liveness ?? {};
     this.stallMs = l.stallMs ?? config.jobStallMinutes * MINUTE;
     this.maxRuntimeMs = l.maxRuntimeMs ?? config.jobMaxRuntimeMinutes * MINUTE;
@@ -531,7 +536,9 @@ export class JobRunner {
    */
   holder(key: JobTarget): string | undefined {
     const occupants = this.occupants(key);
-    return occupants.length >= this.slots ? occupants[0] : undefined;
+    if (occupants.length >= this.slots) return occupants[0];
+    // The repository has room but the machine does not: wait behind whichever job holds a slot.
+    return this.machineFull() ? this.anyHolder() : undefined;
   }
 
   /**
@@ -548,7 +555,20 @@ export class JobRunner {
   }
 
   private full(key: JobTarget): boolean {
-    return (this.holders.get(key) ?? []).length >= this.slots;
+    return (this.holders.get(key) ?? []).length >= this.slots || this.machineFull();
+  }
+
+  /** Every repository's slots together: the machine-wide limit (ENGINEER_TOTAL). */
+  private machineFull(except?: string): boolean {
+    let n = 0;
+    for (const ids of this.holders.values()) n += ids.filter((h) => h !== except).length;
+    return n >= this.total;
+  }
+
+  /** The first job holding any slot: what a job waits behind when the machine, not its repository, is full. */
+  private anyHolder(except?: string): string | undefined {
+    for (const ids of this.holders.values()) for (const h of ids) if (h !== except) return h;
+    return undefined;
   }
 
   private holds(key: JobTarget, id: string): boolean {
@@ -644,8 +664,10 @@ export class JobRunner {
     // Fill every free slot, one queued job at a time.
     while (!this.full(key)) {
       const before = this.waiting(key).length;
-      if (!before || !(await this.startOne(key, finished))) return;
+      if (!before || !(await this.startOne(key, finished))) break;
     }
+    // A slot freed here may be the machine-wide one another repository's queue is waiting for.
+    if (finished) for (const other of this.lockKeys()) if (other !== key && !this.full(other)) await this.startNext(other);
   }
 
   /** Starts the first job in a repository's queue in a free slot. False when nothing could start. */
@@ -729,7 +751,7 @@ export class JobRunner {
     }
     const key = lockKey(job);
     const others = key ? (this.holders.get(key) ?? []).filter((h) => h !== job.id) : [];
-    const holder = key && others.length >= this.slots ? others[0] : undefined;
+    const holder = key && others.length >= this.slots ? others[0] : key && this.machineFull(job.id) ? this.anyHolder(job.id) : undefined;
     const hold = this.store.queueHold();
     if (key && !holder && hold) {
       // The queues are held after a credit or key failure: wait for /resume rather than fail again.

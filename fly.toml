@@ -23,9 +23,12 @@ primary_region = "lhr"
   # gone badly wrong. A job's own cap, when one is set (JOB_BUDGET_USD and friends), counts the
   # provider's real money instead, call by call.
   SDK_RUNAWAY_BUDGET_USD = "1000"
-  # Engineering jobs per repository that may run at once (four shared cores), each in its own working
-  # copy. Change the number to run more or fewer; above 8 it is refused and the rest queue as usual.
-  ENGINEER_SLOTS = "4"
+  # Engineering jobs per repository that may run at once, each in its own working copy.
+  ENGINEER_SLOTS = "2"
+  # And across all repositories together. Four per repository across five repositories (up to twenty
+  # coding agents) on four shared cores took the service down on 14 Nov 2026: shared cores are
+  # throttled under sustained load and the health check stopped answering. Raise only with a bigger machine.
+  ENGINEER_TOTAL = "3"
 
 [[mounts]]
   source = "clear_ops_data"
