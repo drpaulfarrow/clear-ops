@@ -52,19 +52,27 @@ Three pieces, and where each comes from:
 
 - **Health, now** (`src/health.ts`): the verdict and its reasons, built from the runner's own counts
   (`activeWorkers`, `queuePosition`, the store's queue hold, `JobRunner.liveness` for a stalled job)
-  and from the last result of each dependency check. The checks run on their own five minute timer
-  with a five second cap each, one at a time, never on a page render and never in a way that touches a
-  job; each one is a single request whose body is never read, with the key in a header and never in a
-  URL, a log, the store or the page. A check that is not configured is "off" with the reason, and a
-  check that fails, throws or never answers is one line: the page stays readable with every one broken.
+  and from the last result of each dependency check. Each check has its own cadence, chosen by what it
+  costs. The model provider, GitHub and Google Workspace are one cheap authenticated read each and run
+  every five minutes; the two search checks run hourly, because they are metered rather than pings.
+  Brave bills per request ($5 per 1,000, with $5 of free credit a month) and Exa meters searches the
+  same way, so at five minutes each would be about 8,600 calls a month, roughly an order of magnitude
+  more than the workforce's own searches and enough to spend the free credit the jobs that need a
+  search depend on; hourly is 24 a day, and a key that has stopped working still shows on the board
+  within the hour. Each check has a five second cap, one at a time, never on a page render and never
+  in a way that touches a job; each one is a single request whose body is never read, with the key in a
+  header and never in a URL, a log, the store or the page. A check that is not configured is "off" with
+  the reason, and a check that fails, throws or never answers is one line: the page stays readable with
+  every one broken.
   The Google check is off until Paul connects his Workspace, and once he has it makes the one read the
   assistant already has (`gmail profile`, "who is connected") so a credential Google has revoked shows
   up here; Google's own words are never printed, only the status number, because an error body can
   carry an address.
 - **Uptime and downtime** (`src/uptime.ts`): a one minute heartbeat appended as one short line to
   `uptime.jsonl` in the data directory, kept 14 days and rewritten only in batches so a beat never
-  costs a rewrite. The figures, the 48 half hour strip cells, the recent gaps and the last restart are
-  a pure function of the beats and the clock, so every case is tested without a timer. A gap is
+  costs a rewrite. The figures, the 48 half hour strip cells, the recent gaps (each listed from when
+  it started to when the beats came back, so a gap never reads as starting when it ended) and the last
+  restart are a pure function of the beats and the clock, so every case is tested without a timer. A gap is
   downtime only when the beats stop for more than three intervals (three minutes); the page carries the
   sentence saying so, and that uptime here means the service was recording rather than that the page
   answered from outside.
