@@ -6,6 +6,7 @@ import path from "node:path";
 
 process.env.DAILY_BUDGET_USD = "20"; // the cap is off by default; this test turns it on
 process.env.ENGINEER_SLOTS = "1"; // the queue with one engineer per repository; test/parallel-engineers.test.ts covers two
+process.env.ENGINEER_TOTAL = "100"; // these tests are about per-repository slots; test/restarts covers the machine-wide limit
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-repos-"));
 process.env.PRODUCT_REPO = "acme/clear-exchange";
