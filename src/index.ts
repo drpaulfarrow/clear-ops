@@ -211,7 +211,7 @@ export function buildApp(deps: AppDeps) {
   // request each, and the page only ever reads the last pass. Both are started by the entry point, so
   // tests never open a file or reach the network, and the timers are unref'd.
   const uptime = deps.uptime ?? new UptimeLog({ dir: config.dataDir });
-  const probes = deps.probes ?? new HealthProbes(defaultProbes({ githubToken: () => githubAuth.token() }));
+  const probes = deps.probes ?? new HealthProbes(defaultProbes({ githubToken: () => githubAuth.token(), google: { connected: () => google.connected(), profile: () => googleApi.request("gmail", "GET", "profile") } }));
   // The start is recorded here rather than above, so a process that only builds the app (a test)
   // leaves no mark: a heartbeat file is written by a running service, and by nothing else.
   const startHealth = () => {

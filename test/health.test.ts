@@ -111,12 +111,37 @@ test("a probe that is not configured is reported as off rather than as a fault",
   const net = fakeFetch(() => reply(200));
   const probes = defaultProbes({ fetch: net.impl, keys: {}, githubToken: async () => undefined });
   const byName = new Map(probes.map((p) => [p.name, p]));
-  assert.deepEqual(Object.keys(Object.fromEntries(byName)).sort(), ["Brave search", "Exa search", "GitHub", "model provider"]);
+  assert.deepEqual(Object.keys(Object.fromEntries(byName)).sort(), ["Brave search", "Exa search", "GitHub", "Google Workspace", "model provider"]);
   assert.deepEqual(await byName.get("model provider")!.check(), { state: "off", detail: "no model key is set" });
   assert.match((await byName.get("Brave search")!.check()).detail, /no Brave key/);
   assert.match((await byName.get("Exa search")!.check()).detail, /no Exa key/);
   assert.match((await byName.get("GitHub")!.check()).detail, /no GitHub token/);
+  assert.match((await byName.get("Google Workspace")!.check()).detail, /not set up/);
   assert.equal(net.calls.length, 0, "nothing unconfigured is ever probed over the network");
+});
+
+test("the Google check is off until Paul connects, and one authenticated read once he has", async () => {
+  const named = (google: { connected: () => boolean; profile: () => Promise<unknown> }) => defaultProbes({ keys: KEYS, google }).find((p) => p.name === "Google Workspace")!;
+
+  // Not connected: nothing is asked of Google, and the line says why rather than inventing a fault.
+  let asked = 0;
+  const off = named({ connected: () => false, profile: async () => { asked += 1; } });
+  assert.deepEqual(await off.check(), { state: "off", detail: "Paul's Google account is not connected" });
+  assert.equal(asked, 0, "an unconnected account is not called");
+
+  // Connected: the smallest authenticated read, and it is the allowlisted one.
+  assert.deepEqual(await named({ connected: () => true, profile: async () => ({ emailAddress: "someone@example.com" }) }).check(), { state: "ok", detail: "answered" });
+
+  // A revoked credential is a fault, and Google's own words are never printed: a body can hold an
+  // address, so only the status number is taken and the phrase around it is this file's own.
+  const revoked = named({ connected: () => true, profile: async () => { throw new Error("Google gmail GET failed: 401 invalid_grant for someone@example.com"); } });
+  const outcome = await revoked.check();
+  assert.deepEqual(outcome, { state: "fail", detail: "refused the stored credential (401)" });
+  assert.ok(!JSON.stringify(outcome).includes("example.com"), "no address from a reply reaches the page");
+
+  // Anything else that throws is one honest line, with no status to quote.
+  assert.deepEqual(await named({ connected: () => true, profile: async () => { throw new Error("socket closed"); } }).check(), { state: "fail", detail: "did not answer" });
+  assert.deepEqual(await named({ connected: () => true, profile: async () => { throw new Error("Google gmail GET failed: 503 backend error"); } }).check(), { state: "fail", detail: "did not answer properly (503)" });
 });
 
 test("a token that cannot be read is not configured, never a refusal, and a real one that is refused still says so", async () => {

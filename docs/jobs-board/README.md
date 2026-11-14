@@ -37,12 +37,14 @@ opacity, each duration divides the refresh, and the reduced-motion rule is prese
 
 `health-and-uptime.png` is the top of the same page, at the same phone width, rendered the same
 offline way: a fixed set of jobs, a fixed clock (08:09 on 14 November 2026), a day of heartbeats with
-two nine minute holes and a restart two hours ago, and four dependency checks, all four answering. It
+two nine minute holes and a restart two hours ago, and five dependency checks (the model provider,
+Brave, Exa, GitHub and Google Workspace), all five answering. It
 is a healthy board, which is what the live service shows. The checks are given as a fixed snapshot
 here, as every other figure is, and each one reads "answered": a check that has no credential to use
 reports itself as off rather than inventing a failure, and reports a refusal only for a token that is
 really there and really refused (`test/health.test.ts`; the GitHub check answers "answered" when it is
-driven with the service's own installation token). It is clipped at the "Running now" heading, because
+driven with the service's own installation token, and the Google one when Paul's Workspace is
+connected). It is clipped at the "Running now" heading, because
 that is the new work: the health verdict and the checks, the uptime figures and the day's strip, and
 the per-kind figures for the last 24 hours and the last 7 days.
 
@@ -55,6 +57,10 @@ Three pieces, and where each comes from:
   job; each one is a single request whose body is never read, with the key in a header and never in a
   URL, a log, the store or the page. A check that is not configured is "off" with the reason, and a
   check that fails, throws or never answers is one line: the page stays readable with every one broken.
+  The Google check is off until Paul connects his Workspace, and once he has it makes the one read the
+  assistant already has (`gmail profile`, "who is connected") so a credential Google has revoked shows
+  up here; Google's own words are never printed, only the status number, because an error body can
+  carry an address.
 - **Uptime and downtime** (`src/uptime.ts`): a one minute heartbeat appended as one short line to
   `uptime.jsonl` in the data directory, kept 14 days and rewritten only in batches so a beat never
   costs a rewrite. The figures, the 48 half hour strip cells, the recent gaps and the last restart are

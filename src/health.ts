@@ -159,7 +159,23 @@ export interface ProbeDeps {
   keys?: { openrouter?: string; anthropic?: string; brave?: string; exa?: string };
   /** The GitHub credential, the same one the workers are given. Absent means there is none. */
   githubToken?: () => Promise<string | undefined>;
+  /** Paul's Google Workspace, when the service has it to hand. Absent means this process cannot say. */
+  google?: GoogleProbeDeps;
   timeoutMs?: number;
+}
+
+/**
+ * The Google half, injected: whether Paul's Workspace is connected, and the smallest authenticated
+ * read that proves the stored credential still works. `profile` is `GoogleApi`'s "who is connected"
+ * call (`gmail GET profile`, the first row of `ALLOWED_ENDPOINTS`), so the probe adds no scope and no
+ * new operation; a Google refresh token that has been revoked is exactly the sort of silent breakage
+ * the board should show.
+ */
+export interface GoogleProbeDeps {
+  /** Whether a connection exists at all. */
+  connected: () => boolean;
+  /** One authenticated read. Resolves when Google answered, throws when it did not. */
+  profile: () => Promise<unknown>;
 }
 
 /** The provider key the models run on. Both providers' endpoint is a small read that needs the key. */
@@ -235,7 +251,31 @@ export function defaultProbes(deps: ProbeDeps = {}): HealthProbe[] {
       return httpCheck(fetchImpl, "https://api.github.com/rate_limit", { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "clear-ops" } }, "token", timeoutMs);
     },
   });
+  probes.push(googleProbe(deps.google));
   return probes;
+}
+
+/** The Google Workspace check: off until Paul connects, and one authenticated read once he has. */
+function googleProbe(google: GoogleProbeDeps | undefined): HealthProbe {
+  return {
+    name: "Google Workspace",
+    check: async () => {
+      if (!google) return { state: "off", detail: "Google is not set up here" };
+      if (!google.connected()) return { state: "off", detail: "Paul's Google account is not connected" };
+      try {
+        await google.profile();
+        return { state: "ok", detail: "answered" };
+      } catch (err) {
+        // Google's own words are never printed: an error body can carry an address. Only the status
+        // number, read off the message, is taken, and the phrase around it is written here.
+        const status = /\b([45]\d\d)\b/.exec(err instanceof Error ? err.message : "")?.[1];
+        if (!status) return { state: "fail", detail: "did not answer" };
+        return status === "401" || status === "403"
+          ? { state: "fail", detail: `refused the stored credential (${status})` }
+          : { state: "fail", detail: `did not answer properly (${status})` };
+      }
+    },
+  };
 }
 
 /* ---------- What the page shows ---------- */
