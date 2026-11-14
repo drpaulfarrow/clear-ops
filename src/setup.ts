@@ -15,23 +15,34 @@ const exec = promisify(execFile);
  * running two jobs downloaded and unpacked the same tree twice at once and the tests of one job
  * fought the other job's install for four shared cores. Instead:
  *
- * - One install per `package-lock.json`, kept in a store on the data volume, outside every checkout.
+ * - One install per repository and `package-lock.json`, kept in a store on the data volume, outside
+ *   every checkout. The store is named after both, so the three managed repositories do not evict
+ *   each other's stores.
  * - A working copy that has none is given the store's tree by hard links, which costs no disk and
  *   almost no time, so a job starts with its dependencies already there.
  * - A lock around the store, so two jobs never write one at the same time.
  * - The npm cache the workers use, so the install that does happen downloads nothing twice.
- * - These are shared, so the volume can fill: nothing is written when it has too little free space,
- *   and only the two newest stores are kept.
+ * - These are shared, so the volume can fill. The store is the size of this repository's tree (about
+ *   700MB), so the guard is size-aware: it needs the measured size of a store (or `SETUP_STORE_MB`
+ *   for the first one) plus `SETUP_MIN_FREE_MB` free before it writes anything, it gives up the npm
+ *   cache before it refuses, it removes a store it has just built if the volume still fell below the
+ *   floor, and it keeps no more stores than `SETUP_KEEP` and the free space can afford.
  *
  * Nothing here may break a job. Every path that fails (no room, an install that did not finish, a
  * filesystem that cannot hard-link) falls back to exactly what happened before: the worker installs
  * what it needs itself. The store never deletes a working copy's own `node_modules`.
+ *
+ * The tree in a store is hard-linked, not copied, so a worker that writes inside its own
+ * `node_modules` writes the store every later job links. Workers are told not to (BUILD_TEST_DISCIPLINE
+ * in src/agents.ts); nothing stronger is worth a hash of 11,000 files on every job.
  */
 export interface SetupOptions {
   /** The data volume: the store and the npm cache live here, outside every checkout. */
   root?: string;
-  /** Keep at least this much of the volume free, in MB; below it nothing is written. */
+  /** Keep at least this much of the volume free, in MB, after whatever we are about to write. */
   minFreeMb?: number;
+  /** What one store is assumed to need, in MB, until this volume has measured one. */
+  storeMb?: number;
   /** How long a job waits for another job already preparing the same lockfile. */
   waitMs?: number;
   /** Lockfile stores to keep besides the one in use, newest first. */
@@ -86,6 +97,19 @@ export function lockfileKey(lockfile: Buffer | string): string {
   return crypto.createHash("sha256").update(lockfile).digest("hex").slice(0, 16);
 }
 
+/**
+ * A store's directory name: the repository it is for, then the lockfile. Two repositories sharing a
+ * volume therefore never evict each other's store, and two lockfiles of one repository stay apart.
+ */
+export function storeName(repo: string | undefined, key: string): string {
+  const slug = (repo ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  return slug ? `${slug}-${key}` : key;
+}
+
 /** Free megabytes where a path lives, found by walking up to something that exists. */
 export function freeMb(dir: string): number {
   let p = path.resolve(dir);
@@ -101,13 +125,75 @@ export function freeMb(dir: string): number {
   }
 }
 
+/** Megabytes a directory tree actually occupies, in disk blocks, following no symlink out of it. */
+export function treeMb(dir: string): number {
+  let blocks = 0;
+  const walk = (p: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(p, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const child = path.join(p, entry.name);
+      if (entry.isDirectory()) {
+        walk(child);
+        continue;
+      }
+      try {
+        const st = fs.lstatSync(child);
+        if (st.isSymbolicLink()) continue;
+        blocks += st.blocks ? Number(st.blocks) : Math.ceil(Number(st.size) / 512);
+      } catch {
+        // Something else is removing it; it does not matter to the estimate.
+      }
+    }
+  };
+  walk(dir);
+  return Math.ceil((blocks * 512) / (1024 * 1024));
+}
+
+/**
+ * The environment npm is given.
+ *
+ * Not the service's own environment: a dependency's install script (esbuild's postinstall today,
+ * anything a future lockfile brings) runs inside `npm ci`, and it must not be able to read
+ * `VAULT_KEY`, the Google or GitHub keys. Only what npm needs to run, plus proxy settings, and the
+ * development-mode variables of `workerBuildEnv`.
+ */
+export const INSTALLER_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TMP",
+  "LANG",
+  "LC_ALL",
+  "CI",
+  "SHELL",
+  "TERM",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+];
+
+export function installerEnv(source: NodeJS.ProcessEnv, cacheDir: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of INSTALLER_ENV_KEYS) if (source[key] !== undefined) env[key] = source[key];
+  return { ...env, ...workerBuildEnv(cacheDir) };
+}
+
 /**
  * The npm settings a worker needs to build and test what it wrote.
  *
  * The service itself runs with NODE_ENV=production (Dockerfile), and npm follows it: `npm ci` then
  * installs the runtime packages only, so `tsc` and `tsx` are missing and every build and test fails.
  * A worker's own installs are development installs, so it gets NODE_ENV=development and an explicit
- * --include=dev, plus the shared cache when the volume has room for one.
+ * --include=dev, plus the shared cache when the volume has room for one. Only the kinds that build
+ * get this, and only for their run (src/jobs.ts), not every worker and not the chief.
  */
 export function workerBuildEnv(cache: string | undefined): NodeJS.ProcessEnv {
   return {
@@ -153,6 +239,14 @@ export class DirLock {
   private wait(ms: number) {
     return (this.opts.wait ?? ((m: number) => new Promise((r) => setTimeout(r, m))))(ms);
   }
+  /** True when the lock directory exists and is not older than the stale window. */
+  private static fresh(dir: string, now: number, staleMs: number): boolean {
+    try {
+      return now - fs.statSync(dir).mtimeMs <= staleMs;
+    } catch {
+      return false;
+    }
+  }
 
   /** True once this process holds it. Waits up to `waitMs`, and never waits for ever. */
   async acquire(waitMs: number): Promise<boolean> {
@@ -184,6 +278,11 @@ export class DirLock {
     }
   }
 
+  /** True when some other process is inside the lock directory right now. */
+  static isFresh(dir: string, staleMs = 30 * 60_000): boolean {
+    return DirLock.fresh(dir, Date.now(), staleMs);
+  }
+
   private mtime(): number {
     try {
       return fs.statSync(this.dir).mtimeMs;
@@ -203,13 +302,13 @@ export class DirLock {
   }
 }
 
-/** The default install: `npm ci` in the store, with the shared cache. */
+/** The default install: `npm ci` in the store, with the shared cache and nothing else of ours. */
 async function npmCi(dir: string, cacheDir: string): Promise<void> {
   await exec("npm", ["ci", "--include=dev", "--no-audit", "--no-fund", "--cache", cacheDir], {
     cwd: dir,
     timeout: 15 * 60_000,
     maxBuffer: 20 * 1024 * 1024,
-    env: { ...process.env, ...workerBuildEnv(cacheDir) },
+    env: installerEnv(process.env, cacheDir),
   });
 }
 
@@ -218,9 +317,13 @@ async function hardLink(from: string, to: string, copy: boolean): Promise<void> 
   await exec("cp", copy ? ["-a", from, to] : ["-al", from, to], { timeout: 10 * 60_000 });
 }
 
+/** What a store build did: ready, no room to write it, an install that failed, or one removed again. */
+type BuildOutcome = "ready" | "no-room" | "failed" | "removed";
+
 export class PreparedCopies {
   private readonly root: string;
   private readonly minFreeMb: number;
+  private readonly storeMb: number;
   private readonly waitMs: number;
   private readonly keep: number;
   private readonly npmCacheDir: string;
@@ -230,10 +333,13 @@ export class PreparedCopies {
   private readonly free: (dir: string) => number;
   private readonly install: (dir: string, cacheDir: string) => Promise<void>;
   private readonly link: (from: string, to: string, copy: boolean) => Promise<void>;
+  /** What a store on this volume has been measured to need; undefined until one is known. */
+  private measuredMb: number | undefined;
 
   constructor(opts: SetupOptions = {}) {
     this.root = opts.root ?? config.setup.dir;
     this.minFreeMb = opts.minFreeMb ?? config.setup.minFreeMb;
+    this.storeMb = opts.storeMb ?? config.setup.storeMb;
     this.waitMs = opts.waitMs ?? config.setup.waitMs;
     this.keep = opts.keep ?? config.setup.keep;
     this.npmCacheDir = opts.npmCacheDir ?? config.setup.npmCacheDir;
@@ -249,6 +355,10 @@ export class PreparedCopies {
     return path.join(this.root, "deps");
   }
 
+  private get locks() {
+    return path.join(this.root, "locks");
+  }
+
   /** The npm cache to give a worker, or undefined when there is no room for one. */
   npmCache(): string | undefined {
     if (!this.enabled || !this.npmCacheDir) return undefined;
@@ -258,9 +368,10 @@ export class PreparedCopies {
 
   /**
    * Gives `dir` the dependencies its lockfile calls for, when they are already installed elsewhere.
-   * Returns what happened; a job carries on regardless.
+   * `repo` is the repository the working copy belongs to, so its store is not the one another
+   * repository's jobs evict. Returns what happened; a job carries on regardless.
    */
-  async prepare(dir: string): Promise<Prepared> {
+  async prepare(dir: string, repo?: string): Promise<Prepared> {
     if (!this.enabled) return { status: "skipped", detail: "reuse is off (SETUP=off)" };
     const lockfile = path.join(dir, "package-lock.json");
     if (!fs.existsSync(lockfile) || !fs.existsSync(path.join(dir, "package.json"))) return { status: "skipped", detail: "no package-lock.json" };
@@ -272,15 +383,18 @@ export class PreparedCopies {
     if (!installableAlone(dir)) return { status: "skipped", detail: "workspaces or install scripts: left to the worker" };
 
     const key = lockfileKey(fs.readFileSync(lockfile));
-    const store = path.join(this.stores, key);
+    const store = path.join(this.stores, storeName(repo, key));
     if (!this.fill(store)) {
-      const free = this.free(this.root);
-      if (free < this.minFreeMb) return { status: "skipped", detail: `only ${free}MB free on the data volume` };
-      if (!(await this.build(key, store, dir))) return { status: "failed", detail: "the shared install did not finish; the worker installs its own" };
+      const outcome = await this.build(key, store, dir);
+      if (outcome === "no-room") return { status: "skipped", detail: this.noRoomDetail() };
+      if (outcome === "removed") {
+        return { status: "failed", detail: "the store was removed again because the volume was nearly full after installing it" };
+      }
+      if (outcome === "failed") return { status: "failed", detail: "the shared install did not finish; the worker installs its own" };
     }
-    const how = await this.materialise(path.join(store, "node_modules"), modules);
+    const how = await this.materialise(path.join(store, "node_modules"), modules, key);
     if (!how) return { status: "failed", detail: "the shared install could not be copied into the working copy" };
-    await this.prune(key).catch(() => undefined);
+    await this.housekeeping(store).catch(() => undefined);
     this.log(`prepared ${dir}: node_modules ${how === "linked" ? "linked" : "copied"} from the shared store`);
     return { status: how, from: store };
   }
@@ -300,25 +414,82 @@ export class PreparedCopies {
     }
   }
 
-  /** Installs the store for a lockfile, once, under a lock. False when it did not finish. */
-  private async build(key: string, store: string, dir: string): Promise<boolean> {
-    const lock = new DirLock(path.join(this.root, "locks", `${key}.lock`), { now: this.now });
+  /** What one store costs on this volume: what a store here measured, else the configured estimate. */
+  private neededMb(): number {
+    if (this.measuredMb !== undefined) return this.measuredMb;
+    let measured: number | undefined;
+    try {
+      for (const entry of fs.readdirSync(this.stores)) {
+        const store = path.join(this.stores, entry);
+        if (!fs.existsSync(path.join(store, "node_modules"))) continue;
+        const size = this.recordedMb(store) ?? treeMb(path.join(store, "node_modules"));
+        measured = Math.max(measured ?? 0, size);
+      }
+    } catch {
+      // No stores yet on this volume: the estimate below is what we have.
+    }
+    if (measured !== undefined && measured > 0) this.measuredMb = measured;
+    return measured && measured > 0 ? measured : this.storeMb;
+  }
+
+  private recordedMb(store: string): number | undefined {
+    try {
+      const ready = JSON.parse(fs.readFileSync(path.join(store, "ready"), "utf8")) as { mb?: unknown };
+      return typeof ready.mb === "number" && ready.mb > 0 ? Math.ceil(ready.mb) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Whether the volume can take a store of `mb` megabytes and still keep the floor free. */
+  private roomFor(mb: number): boolean {
+    return this.free(this.root) >= this.minFreeMb + mb;
+  }
+
+  private noRoomDetail(): string {
+    return `only ${this.free(this.root)}MB free on the data volume, and a store needs about ${this.neededMb()}MB more than the ${this.minFreeMb}MB floor`;
+  }
+
+  /** Installs the store for a lockfile, once, under a lock. */
+  private async build(key: string, store: string, dir: string): Promise<BuildOutcome> {
+    const lockName = `${key}.lock`;
+    const lock = new DirLock(path.join(this.locks, lockName), { now: this.now });
     if (!(await lock.acquire(this.waitMs))) {
       // Another job is still installing it: whoever we are, we do our own rather than wait longer.
       this.log(`timed out waiting for the shared install of ${key}; leaving this job to install its own`);
-      return false;
+      return "failed";
     }
     try {
-      if (this.fill(store)) return true;
+      if (this.fill(store)) return "ready";
+      // The size of the tree this is about to write, not a flat number: at 500MB free the store of
+      // this repository cannot fit, and filling the volume leaves nowhere for the store, the job
+      // outputs and the sessions to be written.
+      if (!this.roomFor(this.neededMb())) {
+        // The cache is only worth what it saves; give it up before refusing to install.
+        this.pruneCache(lockName);
+        if (!this.roomFor(this.neededMb())) return "no-room";
+      }
       fs.mkdirSync(store, { recursive: true, mode: 0o700 });
       for (const f of ["package.json", "package-lock.json", ".npmrc"]) {
         if (fs.existsSync(path.join(dir, f))) fs.copyFileSync(path.join(dir, f), path.join(store, f));
       }
+      // An install that will not fit is refused a page in the cache too, so the estimate above is
+      // about the tree alone and the cache can never grow past what the volume has room for.
       const cache = this.npmCache() ?? path.join(this.root, "npm-cache");
       fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
       await this.install(store, cache);
-      fs.writeFileSync(path.join(store, "ready"), `${JSON.stringify({ key, at: new Date(this.now()).toISOString() })}\n`, { mode: 0o600 });
-      return true;
+      const mb = treeMb(path.join(store, "node_modules"));
+      this.measuredMb = Math.max(this.measuredMb ?? 0, mb);
+      fs.writeFileSync(path.join(store, "ready"), `${JSON.stringify({ key, at: new Date(this.now()).toISOString(), mb })}\n`, { mode: 0o600 });
+      if (this.free(this.root) < this.minFreeMb) {
+        // Other writers filled the volume while we installed (or the estimate was low): what we just
+        // built is the biggest thing we own, so it goes, and the cache with it. The worker installs
+        // its own, as it did before.
+        this.pruneCache(lockName);
+        this.remove(store, "removed the store it had just built because the volume was nearly full");
+        return "removed";
+      }
+      return "ready";
     } catch (err) {
       this.log(`shared install of ${key} failed (${err instanceof Error ? err.message.slice(0, 200) : "error"}); the worker installs its own`);
       // A half-finished tree is of no use to anyone and only takes up room.
@@ -327,20 +498,20 @@ export class PreparedCopies {
       } catch {
         // Nothing more to do: without `ready` it is never used.
       }
-      return false;
+      return "failed";
     } finally {
       lock.release();
     }
   }
 
   /** Hard-links (or copies) a prepared tree into the working copy, and marks which lockfile it is for. */
-  private async materialise(from: string, to: string): Promise<"linked" | "copied" | undefined> {
+  private async materialise(from: string, to: string, key: string): Promise<"linked" | "copied" | undefined> {
     for (const copy of [false, true]) {
       try {
         await this.link(from, to, copy);
-        const key = path.join(to, ".clear-ops-lock");
+        const marker = path.join(to, ".clear-ops-lock");
         try {
-          fs.writeFileSync(key, `${JSON.stringify({ key: path.basename(path.dirname(from)) })}\n`, { mode: 0o600 });
+          fs.writeFileSync(marker, `${JSON.stringify({ key })}\n`, { mode: 0o600 });
         } catch {
           // The marker is only what a later job reads to decide whether to trust the tree.
         }
@@ -356,26 +527,88 @@ export class PreparedCopies {
     return undefined;
   }
 
-  /** Keeps the store in use and the newest ones, and removes older stores for lockfiles nobody needs. */
-  private async prune(keepKey: string): Promise<void> {
-    let entries: string[];
+  /**
+   * Housekeeping, best effort and never in a job's way: the store in use is always kept, the others
+   * go once `SETUP_KEEP` or the free space says so, and the npm cache goes with them.
+   */
+  private async housekeeping(keepStore: string): Promise<void> {
+    const lock = new DirLock(path.join(this.locks, "prune.lock"), { now: this.now });
+    if (!(await lock.acquire(2_000))) return;
     try {
-      entries = fs.readdirSync(this.stores);
-    } catch {
-      return;
-    }
-    const stores = entries
-      .filter((e) => e !== keepKey)
-      .map((e) => ({ name: e, at: this.mtimeOf(path.join(this.stores, e)) }))
-      .sort((a, b) => b.at - a.at);
-    for (const store of stores.slice(Math.max(0, this.keep - 1))) {
+      let removed = false;
+      let entries: string[];
       try {
-        fs.rmSync(path.join(this.stores, store.name), { recursive: true, force: true });
-        this.log(`removed the old dependency store ${store.name}`);
+        entries = fs.readdirSync(this.stores);
       } catch {
-        // It will be removed next time; never fail a job over housekeeping.
+        return;
       }
+      const stores = entries
+        .filter((e) => e !== path.basename(keepStore))
+        .map((e) => ({ name: e, at: this.mtimeOf(path.join(this.stores, e)) }))
+        .sort((a, b) => b.at - a.at);
+      let kept = 0;
+      for (const store of stores) {
+        // Keeping a store is only worth it while the volume can still take the next install.
+        if (kept < this.keep - 1 && this.roomFor(this.neededMb())) {
+          kept += 1;
+          continue;
+        }
+        removed = this.remove(path.join(this.stores, store.name), `removed the old dependency store ${store.name}`) || removed;
+      }
+      if (removed || this.free(this.root) < this.minFreeMb) this.pruneCache("prune.lock");
+    } finally {
+      lock.release();
     }
+  }
+
+  private remove(dir: string, message: string): boolean {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      this.log(message);
+      return true;
+    } catch {
+      // It will be removed next time; never fail a job over housekeeping.
+      return false;
+    }
+  }
+
+  /**
+   * Bounds the npm cache, which otherwise keeps every tarball it has ever fetched on a volume that
+   * is the service's only disk. Only our own cache directory, only when the volume is tight, and
+   * never while another job is installing from it.
+   */
+  private pruneCache(except: string): boolean {
+    if (!this.enabled || !this.npmCacheDir) return false;
+    const dir = path.resolve(this.npmCacheDir);
+    // Only a cache we own: strictly inside the setup directory or the data directory, never the
+    // directory itself, so a mis-set NPM_CACHE_DIR cannot have a whole tree deleted.
+    const inside = (base: string) => dir !== base && dir.startsWith(`${base}${path.sep}`);
+    if (!inside(path.resolve(this.root)) && !inside(path.resolve(config.dataDir))) return false;
+    if (this.installing(except)) return false;
+    if (!fs.existsSync(dir)) return false;
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      this.log(`removed the shared npm cache (${dir}) to keep the data volume free`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** True when another install is running right now, so nothing it is reading may be deleted. */
+  private installing(except: string): boolean {
+    try {
+      return fs
+        .readdirSync(this.locks)
+        .some((entry) => entry !== except && entry.endsWith(".lock") && DirLock.isFresh(path.join(this.locks, entry), this.staleMs()));
+    } catch {
+      return false;
+    }
+  }
+
+  private staleMs(): number {
+    // The same window DirLock takes a lock over: a lock older than this is not a running install.
+    return 30 * 60_000;
   }
 
   private mtimeOf(p: string): number {
@@ -389,8 +622,3 @@ export class PreparedCopies {
 
 /** The one instance the service uses. Tests build their own. */
 export const preparedCopies = new PreparedCopies();
-
-/** The npm settings for a worker run (src/agents.ts). */
-export function setupWorkerEnv(): NodeJS.ProcessEnv {
-  return workerBuildEnv(preparedCopies.npmCache());
-}
