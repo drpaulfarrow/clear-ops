@@ -7,10 +7,15 @@
  * file never touches a brief itself: that module redacts, strips the markup and caps it, and says so
  * honestly when a brief yields nothing), what kind of worker it is, and what a finished job produced.
  *
- * It never shows spend, cost, budget, caps or model figures (it does not read src/spend.ts at all), and
+ * It never shows spend, budget, caps or model figures (it does not read src/spend.ts at all), and
  * never a job's output text, transcript, file path, environment variable, secret or personal data.
  * Titles, kind, status, timings, repository, ids, a redacted description of the brief and a link that
- * already exists (a saved output, a pull request) only.
+ * already exists (a saved output, a pull request) only. Above the cards sit the health block and the
+ * per-kind figures (src/health.ts, src/worker-stats.ts): whether the service is healthy and what it
+ * depends on is answering, how much of the time it has been up, and how quickly each kind of worker
+ * is getting through its jobs. Everything there is read from the store, the queue and the last probe
+ * pass, and a real cost per job appears only where the store holds the provider's own figure, never
+ * the Agent SDK's estimate.
  *
  * The page changes nothing: the only route is a GET, and nothing here writes to a job, a queue or a
  * schedule. The link carries a long-lived token the service minted itself and keeps in the store
@@ -27,8 +32,11 @@ import { entryFor } from "./publish-outputs.js";
 import { failureLabel } from "./failures.js";
 import { jobTitle } from "./titles.js";
 import { describeJob, liveStep, NO_DESCRIPTION } from "./job-descriptions.js";
+import { boardHealth, type BoardHealth, type ProbeResult } from "./health.js";
+import { boardEfficiency, type BoardEfficiency, type KindStats } from "./worker-stats.js";
 import type { Job, Store } from "./store.js";
 import type { ScheduledRun } from "./scheduler.js";
+import type { UptimeReport } from "./uptime.js";
 
 export const BOARD_PATH = "/jobs";
 /** The link refreshes itself so it stays useful while Paul watches a run. */
@@ -129,6 +137,10 @@ export interface Board {
   generatedAt: string;
   /** The engineering queues are held after a credit or key failure, until /resume. */
   paused: boolean;
+  /** Whether the service is healthy right now, and what it depends on: src/health.ts. */
+  health: BoardHealth;
+  /** How quickly and efficiently each kind of worker is getting through its jobs: src/worker-stats.ts. */
+  efficiency: BoardEfficiency;
   running: BoardJob[];
   queued: BoardJob[];
   finished: BoardJob[];
@@ -142,6 +154,14 @@ export interface BoardSource {
   queue: Pick<JobRunner, "isHeld" | "queuePosition"> & { latestStep?: (id: string) => string | undefined };
   /** The enabled schedules with their next runs, from the scheduler. */
   schedules?: readonly ScheduledRun[];
+  /** The heartbeats this process records (src/uptime.ts). Absent means no uptime is known here. */
+  uptime?: { report: () => UptimeReport };
+  /** The last pass over what the workforce depends on. Read here, never taken here. */
+  probes?: { snapshot: () => ProbeResult[] };
+  /** How many workers are really running, from the queue itself. */
+  activeWorkers?: () => number;
+  /** The runner's own view of whether a running job's worker is alive, so no threshold is repeated here. */
+  liveness?: (id: string) => { alive: boolean } | undefined;
   /** The clock, for the tests. */
   now?: number;
 }
@@ -260,7 +280,11 @@ export function boardData(source: BoardSource): Board {
   const scheduled = [...schedules]
     .sort((a, b) => (a.next ?? "~").localeCompare(b.next ?? "~"))
     .map((s) => ({ title: s.title, kind: s.kind, cron: s.cron, timezone: s.timezone, ...(s.next ? { next: s.next } : {}) }));
-  return { generatedAt: new Date(now).toISOString(), paused: !!store.queueHold(), running, queued, finished, scheduled };
+  // The health block and the per-kind figures: both read what the service already knows (the store,
+  // the queue, the last probe pass), so rendering the page makes no request and waits for nothing.
+  const health = boardHealth(source);
+  const efficiency = boardEfficiency({ jobs: all, now });
+  return { generatedAt: new Date(now).toISOString(), paused: !!store.queueHold(), health, efficiency, running, queued, finished, scheduled };
 }
 
 /* ---------- The page ---------- */
@@ -306,6 +330,25 @@ h2{font-size:1rem;margin:1.4rem 0 .5rem;color:#333;border-bottom:1px solid #e2e2
 .empty{color:#777;font-size:.9rem;margin:.3rem 0}
 .ok{color:#1a7f37}
 .fail{color:#b42318}
+/* The health block and the per-kind figures. The verdict is a sentence, not a number, so it is the
+   only thing that changes size: everything else is the same small grey the cards use. */
+.verdict{margin:.35rem 0 0;font-size:.95rem;font-weight:600}
+/* The health, uptime and per-kind figures sit in their own boxes, kept apart from the job cards
+   (class "job") so a test or a reader can tell a figure from a card. */
+.panel{border:1px solid #e2e2e2;border-radius:8px;padding:.6rem .8rem;margin:.6rem 0;background:#fff}
+.panel .live{margin:.3rem 0 0;font-size:.85rem;color:#333}
+.checks{list-style:none;padding:0;margin:.3rem 0 0}
+.checks li{font-size:.82rem;color:#444;margin:.15rem 0 0}
+.dim{color:#777}
+/* One cell per half hour for the last day: 48 cells, no image, nothing fetched. */
+.strip{display:flex;gap:1px;margin:.45rem 0}
+.strip i{flex:1;height:1rem;background:#e8e8e8}
+.strip i.up{background:#1a7f37}
+.strip i.down{background:#b42318}
+h3{font-size:.92rem;margin:1.1rem 0 .35rem;color:#444}
+.stat{border:1px solid #e2e2e2;border-radius:8px;padding:.5rem .75rem;margin:.4rem 0;background:#fff}
+.stat .t{font-weight:600;font-size:.95rem}
+.stat .m{font-size:.85rem;color:#555;margin-top:.15rem}
 a{color:#1a56db}`;
 
 function jobBlock(job: BoardJob): string {
@@ -345,6 +388,58 @@ function section(title: string, jobs: BoardJob[], empty: string): string {
   return `<h2>${escapeHtml(title)}</h2>${body}`;
 }
 
+/**
+ * The health block: the verdict in a sentence rather than a bare percentage, the live counts, one
+ * line per outside thing the workforce depends on, then uptime as a strip, the recent gaps and the
+ * last restart. Everything printed here is a phrase this service wrote: a probe's own words, never a
+ * reply body, so no key, address or provider text can appear.
+ */
+function healthBlock(health: BoardHealth): string {
+  const verdict = `<p class="verdict ${health.level === "warn" ? "fail" : "ok"}">${escapeHtml(health.headline)}</p>`;
+  const live = `<div class="live">${escapeHtml(health.live)}</div>`;
+  const checks = health.checks.length
+    ? `<ul class="checks">${health.checks
+        .map((c) => `<li><span class="${c.state === "fail" ? "fail" : c.state === "ok" ? "ok" : "dim"}">${escapeHtml(c.name)}</span>: ${escapeHtml(c.detail)}</li>`)
+        .join("")}</ul><p class="note">${escapeHtml(health.checksLine)}</p>`
+    : `<p class="note">${escapeHtml(health.checksLine)}</p>`;
+  const strip = health.uptime.strip.map((cell) => `<i class="${cell}"></i>`).join("");
+  return `<h2>Health and uptime</h2>
+<div class="panel">${verdict}${live}${checks}</div>
+<div class="panel">
+<div class="live">${escapeHtml(health.uptime.headline)}</div>
+<div class="strip" aria-hidden="true">${strip}</div>
+<p class="note">${escapeHtml(health.uptime.stripNote)}</p>
+<div class="live">${escapeHtml(health.uptime.gapsLine)}</div>
+<div class="live">${escapeHtml(health.uptime.restartLine)}</div>
+<p class="note">${escapeHtml(health.uptime.note)}</p>
+</div>`;
+}
+
+/** One kind's block: what it finished, what it waited, how long it ran, what it cost where known. */
+function kindBlock(kind: KindStats, window: string): string {
+  const lines = [
+    `${kind.finished} finished in the ${window}, ${kind.done} done and ${kind.stoppedOrFailed} stopped or failed${kind.why ? ` (${kind.why})` : ""}`,
+    ...(kind.wait ? [kind.wait] : []),
+    ...(kind.run ? [kind.run] : []),
+    ...(kind.cost ? [kind.cost] : []),
+    ...(kind.cache ? [kind.cache] : []),
+  ];
+  return `<div class="stat"><div class="t">${escapeHtml(kind.label)}</div>${lines.map((l) => `<div class="m">${escapeHtml(l)}</div>`).join("")}</div>`;
+}
+
+/** The per-kind figures, one block per kind that finished something, per window. */
+function efficiencyBlock(efficiency: BoardEfficiency): string {
+  const blocks = efficiency.windows
+    .map((w) => {
+      const body = w.kinds.length ? w.kinds.map((k) => kindBlock(k, w.label)).join("") : `<p class="empty">Nothing finished in the ${w.label}.</p>`;
+      return `<h3>${escapeHtml(w.label)}</h3><p class="note">${escapeHtml(w.note)}</p>${body}`;
+    })
+    .join("");
+  // One line about money for the whole section, and it is a figure only where the store holds a real
+  // one: where it holds none, the line says exactly that rather than putting an estimate there.
+  return `<h2>How the workers are doing</h2><p class="note">${escapeHtml(efficiency.costNote)}</p>${blocks}`;
+}
+
 /** The whole page. Every value is escaped; the only markup is this template. */
 export function renderBoard(board: Board, token: string): string {
   const now = new Date(board.generatedAt);
@@ -363,6 +458,8 @@ export function renderBoard(board: Board, token: string): string {
 <h1>Workforce jobs</h1>
 <p class="note">Read only, refreshes every ${BOARD_REFRESH_SECONDS} seconds. Updated ${escapeHtml(clock)} London. <a href="${SIGN_OUT_PATH}">Sign out</a>.</p>
 ${paused}
+${healthBlock(board.health)}
+${efficiencyBlock(board.efficiency)}
 ${section("Running now", board.running, "Nothing running.")}
 ${section("Queued", board.queued, "Nothing queued.")}
 ${section("Finished recently", board.finished, "Nothing finished in the last day.")}

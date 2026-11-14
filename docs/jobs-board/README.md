@@ -23,7 +23,6 @@ Regenerating them needs a checkout with its dependencies installed and Chromium:
 Nothing on the board is written for the picture: both images come from the real renderer.
 
 ## A running card, animating
-
 `running-card.png` is the same page at the same phone width with three jobs running, rendered the same
 offline way, after the running card was given a small turning arc and a soft pulse on its badge. Both
 are CSS only, on `transform` and `opacity` alone, so nothing on the card moves and no filter, blur or
@@ -33,3 +32,46 @@ both on the same phase and the seam is invisible. With `prefers-reduced-motion: 
 and the badge simply reads "running". `test/jobs-board.test.ts` holds all of that: one card per status
 is rendered, only the running one carries the arc, no keyframe animates anything but transform or
 opacity, each duration divides the refresh, and the reduced-motion rule is present.
+
+## Health, uptime and how the workers are doing
+
+`health-and-uptime.png` is the top of the same page, at the same phone width, rendered the same
+offline way: a fixed set of jobs, a fixed clock (08:09 on 14 November 2026), a day of heartbeats with
+two nine minute holes and a restart two hours ago, and five dependency checks (the model provider,
+Brave, Exa, GitHub and Google Workspace), all five answering. It
+is a healthy board, which is what the live service shows. The checks are given as a fixed snapshot
+here, as every other figure is, and each one reads "answered": a check that has no credential to use
+reports itself as off rather than inventing a failure, and reports a refusal only for a token that is
+really there and really refused (`test/health.test.ts`; the GitHub check answers "answered" when it is
+driven with the service's own installation token, and the Google one when Paul's Workspace is
+connected). It is clipped at the "Running now" heading, because
+that is the new work: the health verdict and the checks, the uptime figures and the day's strip, and
+the per-kind figures for the last 24 hours and the last 7 days.
+
+Three pieces, and where each comes from:
+
+- **Health, now** (`src/health.ts`): the verdict and its reasons, built from the runner's own counts
+  (`activeWorkers`, `queuePosition`, the store's queue hold, `JobRunner.liveness` for a stalled job)
+  and from the last result of each dependency check. The checks run on their own five minute timer
+  with a five second cap each, one at a time, never on a page render and never in a way that touches a
+  job; each one is a single request whose body is never read, with the key in a header and never in a
+  URL, a log, the store or the page. A check that is not configured is "off" with the reason, and a
+  check that fails, throws or never answers is one line: the page stays readable with every one broken.
+  The Google check is off until Paul connects his Workspace, and once he has it makes the one read the
+  assistant already has (`gmail profile`, "who is connected") so a credential Google has revoked shows
+  up here; Google's own words are never printed, only the status number, because an error body can
+  carry an address.
+- **Uptime and downtime** (`src/uptime.ts`): a one minute heartbeat appended as one short line to
+  `uptime.jsonl` in the data directory, kept 14 days and rewritten only in batches so a beat never
+  costs a rewrite. The figures, the 48 half hour strip cells, the recent gaps and the last restart are
+  a pure function of the beats and the clock, so every case is tested without a timer. A gap is
+  downtime only when the beats stop for more than three intervals (three minutes); the page carries the
+  sentence saying so, and that uptime here means the service was recording rather than that the page
+  answered from outside.
+- **How the workers are doing** (`src/worker-stats.ts`): per kind, over the last 24 hours and the last
+  7 days, from the job records alone: finished, done, stopped or failed and why, the queue wait and the
+  run time (median and worst), the cache hit share where the records carry token counts, and a cost per
+  job only where the store holds a real figure. The Agent SDK's estimate is never shown as one; where
+  there is no real figure the page says that in one line. Nothing here reads a brief, an output or a
+  transcript.
+
