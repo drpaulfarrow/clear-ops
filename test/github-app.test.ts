@@ -252,6 +252,12 @@ test("repo creation still uses GH_TOKEN, never the App, and the error says why",
     );
     assert.deepEqual(seen, [`Bearer ${PAT}`]);
     assert.match(explainCloneFailure("drpaulfarrow/x", "Repository not found"), /GitHub App.*All repositories/);
+    // A repository in an organisation needs the App installed on that organisation, not on Paul's own account.
+    const org = explainCloneFailure("shftd2-pre/app-doubleshift", "Repository not found");
+    assert.match(org, /could not reach shftd2-pre\/app-doubleshift with the GitHub App/);
+    assert.match(org, /belongs to the shftd2-pre organisation/);
+    assert.match(org, /installed there: on GitHub open shftd2-pre's Settings, GitHub Apps, Configure/);
+    assert.match(org, /Nothing needs changing in the code or the secrets/);
     assert.match(explainCreateFailure(401, "o", "n"), /GitHub App/);
     // No GH_TOKEN at all: says plainly what is needed.
     await assert.rejects(
