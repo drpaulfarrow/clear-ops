@@ -34,9 +34,19 @@ jobs:
       - name: Wait until no job is running
         run: |
           url="https://${FLY_APP}.fly.dev/busy"
+          # A busy machine can be slow to answer, so one missed answer is not "down": only six in a row
+          # (about three minutes) means the service really is not running, and then deploying is the fix.
+          misses=0
           for i in $(seq 1 90); do
-            n=$(curl -fsS --max-time 10 "$url" 2>/dev/null | sed -n 's/.*"running":\([0-9]*\).*/\1/p')
-            if [ -z "$n" ]; then echo "No answer from $url; deploying now."; exit 0; fi
+            n=$(curl -fsS --max-time 20 "$url" 2>/dev/null | sed -n 's/.*"running":\([0-9]*\).*/\1/p')
+            if [ -z "$n" ]; then
+              misses=$((misses + 1))
+              if [ "$misses" -ge 6 ]; then echo "No answer from $url six times in a row; the service looks down, deploying now."; exit 0; fi
+              echo "No answer from $url ($misses in a row); treating it as busy and checking again in 30 seconds."
+              sleep 30
+              continue
+            fi
+            misses=0
             if [ "$n" = "0" ]; then echo "No jobs running; deploying."; exit 0; fi
             echo "$n job(s) running; checking again in 30 seconds ($i/90)."
             sleep 30
