@@ -83,7 +83,7 @@ jobs:
             exit 0
           fi
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
-            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps watchdog: the health check has failed 3 times in a row. Restarting the Fly machine now; I will post here when ClearOps answers again."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps health check failed three times. Attempting an automatic restart."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
           else
             echo "No DISCORD_WEBHOOK_URL secret yet; skipping the Discord post."
           fi
@@ -110,7 +110,7 @@ jobs:
             exit 0
           fi
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
-            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps watchdog: the health check passes again - ClearOps is back up."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps is responding again."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
           fi
 
       - name: Fail the run while ClearOps is down
