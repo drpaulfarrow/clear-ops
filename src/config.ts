@@ -294,6 +294,31 @@ export const config = {
    */
   engineerSlots: engineerSlots().slots,
   jobStallMinutes: positive(process.env.JOB_STALL_MINUTES, 30),
+  /**
+   * Reused installs for engineering jobs (src/setup.ts): one `npm ci` per package-lock.json, kept on
+   * the data volume and hard-linked into each working copy, and the npm cache the workers use, so a
+   * job does not install what another job already installed. SETUP=off leaves every job as it was.
+   */
+  setup: {
+    enabled: (process.env.SETUP ?? "on").toLowerCase() !== "off",
+    /** The store, outside every checkout. */
+    dir: path.resolve(process.env.SETUP_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "setup")),
+    /**
+     * The floor: this much of the volume is left free for everything else on it (the store, the job
+     * outputs, the sessions, the vault) after whatever setup is about to write. Nothing is written
+     * below it, but the check is size-aware: an install must also fit (`SETUP_STORE_MB` or the size
+     * this volume has measured for a store), so the first install on a volume needs both.
+     */
+    minFreeMb: positive(process.env.SETUP_MIN_FREE_MB, 512),
+    /** What one store is assumed to need, in MB, until this volume has measured one. */
+    storeMb: positive(process.env.SETUP_STORE_MB, 900),
+    /** How many lockfile stores to keep besides the one in use, newest first, when the volume can. */
+    keep: Math.max(1, Math.floor(positive(process.env.SETUP_KEEP, 4))),
+    /** How long a job waits for another job already installing the same lockfile. */
+    waitMs: positive(process.env.SETUP_WAIT_MINUTES, 10) * 60_000,
+    /** The npm cache every worker install reads and writes, when the volume has room for it. */
+    npmCacheDir: path.resolve(process.env.NPM_CACHE_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "setup", "npm-cache")),
+  },
   /** The longest any job may run, in minutes, before it is stopped. */
   jobMaxRuntimeMinutes: positive(process.env.JOB_MAX_RUNTIME_MINUTES, 240),
   /** Max WhatsApp text length per message. Meta's limit is 4096. */
