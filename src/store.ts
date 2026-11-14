@@ -367,6 +367,16 @@ export interface Settings {
    * printed in chat by /board. Only a read-only page of job metadata is behind it, never a secret.
    */
   jobsBoardToken?: string;
+  /**
+   * The browser pages' sign-in (src/sign-in.ts): a random salt and a scrypt hash of the password Paul
+   * set on the one-time /password page. Only ever the salt and the hash, never the password itself.
+   */
+  pagePassword?: { salt: string; hash: string; at: string };
+  /**
+   * The service's own key for signing a session cookie (src/sign-in.ts), minted on first use and kept
+   * here so a restart does not sign Paul out. Never printed, never logged, never handed to a model.
+   */
+  pageSessionKey?: string;
 }
 
 interface State {

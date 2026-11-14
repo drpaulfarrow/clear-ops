@@ -40,7 +40,9 @@ import { PURCHASE_PATH, PurchaseGate } from "./purchase.js";
 import { OtpRelay } from "./otp.js";
 import { GmailCodeReader, type CodeMailbox } from "./mail-code.js";
 import { VoiceBridge } from "./voice-bridge.js";
-import { BOARD_PATH, boardData, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
+import { BOARD_PATH, boardData, boardToken, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
+import { PASSWORD_PATH, SIGN_IN_PATH, SIGN_OUT_PATH, noPasswordPage, passwordPage, passwordSavedPage, signIn as pageSignIn, signInPage, SignInError } from "./sign-in.js";
+import type { SignIn } from "./sign-in.js";
 
 export interface AppDeps {
   messenger: Messenger;
@@ -67,6 +69,8 @@ export interface AppDeps {
   vault?: Vault;
   /** The card vault, for the same reason. */
   cardVault?: CardVault;
+  /** The sign-in that stands in front of the browser pages. The singleton by default; tests pin its clock. */
+  signIn?: SignIn;
 }
 
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
@@ -129,6 +133,9 @@ export function buildApp(deps: AppDeps) {
   // a pinned clock, which is how the one-time links' expiry is exercised through the pages themselves.
   const loginVault = deps.vault ?? vault;
   const cardStore = deps.cardVault ?? cardVault;
+  // The sign-in in front of the browser pages, shared with the orchestrator's /password command so the
+  // link that command sends opens this service's own page.
+  const signIn = deps.signIn ?? pageSignIn;
   // Live voice: the chief's and the jobs' messages pass a tap, so replies to the voice channel can be spoken (src/voice.ts).
   const tap = new VoiceTap();
   const tapped = tap.wrap(deps.messenger);
@@ -361,9 +368,110 @@ export function buildApp(deps: AppDeps) {
   });
 
   /**
+   * The sign-in that stands in front of the browser pages, and the one-time page that sets the
+   * password. No model is involved anywhere here: the password is typed on Paul's own phone, hashed by
+   * the service and compared in constant time, and never appears in chat, in a job brief, in a log
+   * line, in an error message or on a page. `GET /password?t=<token>` opens the form from the link the
+   * chief sends in chat when Paul sends /password; the link works once and expires like the vault's.
+   * No password is ever echoed, and the only thing a request here writes is the session cookie.
+   */
+  const signInHeaders = (res: express.Response) => {
+    noStore(res);
+    res.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
+  };
+  /** The pages the sign-in covers: the browser views, and nothing else the service serves. */
+  const gatedPaths = [BOARD_PATH];
+  /**
+   * Where a signed-in visitor may be sent: one of those pages, never anywhere else. A path that leaves
+   * the service, doubles a slash, climbs with `..` or carries anything but the query's own characters
+   * is ignored, so the sign-in page cannot be used to send him somewhere else.
+   */
+  const SAFE_NEXT = /^\/[A-Za-z0-9._~/?&=%-]*$/;
+  const safeNext = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || value.length > 300 || !SAFE_NEXT.test(value) || value.includes("//") || value.includes("..")) return undefined;
+    const path = value.split("?")[0];
+    return gatedPaths.some((p) => path === p || path.startsWith(`${p}/`)) ? value : undefined;
+  };
+  /** Where a signed-in visit with nowhere to go lands. */
+  const landing = () => `${BOARD_PATH}?t=${boardToken(deps.store)}`;
+  /**
+   * The gate itself: a visit without a session is sent to the sign-in page, carrying the address it
+   * asked for, so a bookmarked link still opens the page he wanted once he has signed in. A wrong or
+   * missing token is refused afterwards exactly as it was before.
+   */
+  const signedIn = (req: express.Request, res: express.Response): boolean => {
+    if (signIn.sessionValid(deps.store, req.headers.cookie)) return true;
+    res.redirect(303, `${SIGN_IN_PATH}?next=${encodeURIComponent(req.originalUrl)}`);
+    return false;
+  };
+  app.get(SIGN_IN_PATH, (req, res) => {
+    signInHeaders(res);
+    const next = safeNext(req.query.next);
+    if (signIn.sessionValid(deps.store, req.headers.cookie)) return res.redirect(303, next ?? landing());
+    if (!signIn.hasPassword(deps.store)) return res.type("html").send(noPasswordPage());
+    res.type("html").send(signInPage(next ? { next } : {}));
+  });
+  app.post(SIGN_IN_PATH, express.urlencoded({ extended: false, limit: "4kb" }), async (req, res) => {
+    signInHeaders(res);
+    const b = (req.body ?? {}) as Record<string, string>;
+    const next = safeNext(b.next);
+    const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
+    if (!signIn.hasPassword(deps.store)) return res.status(400).type("html").send(noPasswordPage());
+    // A short cool-off and a growing delay per address, never a lock-out: the /password link in chat
+    // always gets him back in, and a right password after the cool-off clears the record.
+    const limit = signIn.limit(address);
+    if (!limit.allowed) {
+      res.set("Retry-After", String(Math.ceil(limit.retryAfterMs / 1000)));
+      return res.status(429).type("html").send(signInPage({ ...(next ? { next } : {}), error: `Too many attempts. Try again in ${Math.ceil(limit.retryAfterMs / 1000)} seconds.` }));
+    }
+    if (!signIn.checkPassword(deps.store, String(b.password ?? ""))) {
+      const { delayMs } = signIn.failed(address);
+      await signIn.pause(delayMs);
+      return res.status(401).type("html").send(signInPage({ ...(next ? { next } : {}), error: "That is not the password. Try again." }));
+    }
+    signIn.succeeded(address);
+    const cookie = signIn.sessionCookie(deps.store);
+    if (cookie) res.set("Set-Cookie", cookie);
+    res.redirect(303, next ?? landing());
+  });
+  app.get(SIGN_OUT_PATH, (req, res) => {
+    signInHeaders(res);
+    // Only a request that actually carried this service's session cookie clears it, so a link or an
+    // image on another site (which sends no cookie under SameSite=Strict) cannot sign him out.
+    if (signIn.sessionValid(deps.store, req.headers.cookie)) res.set("Set-Cookie", signIn.clearCookie());
+    res.redirect(303, SIGN_IN_PATH);
+  });
+  // The one-time page that sets a new password: the password twice, POST only, nothing echoed back.
+  app.get(PASSWORD_PATH, (req, res) => {
+    signInHeaders(res);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    if (!token || !signIn.peek(token)) return res.status(410).type("html").send(expiredPage("This link has expired or was already used. Send /password in chat for a new one.", "Nothing was changed."));
+    res.type("html").send(passwordPage(token));
+  });
+  app.post(PASSWORD_PATH, express.urlencoded({ extended: false, limit: "4kb" }), async (req, res) => {
+    signInHeaders(res);
+    const b = (req.body ?? {}) as Record<string, string>;
+    const token = String(b.t ?? "");
+    try {
+      const r = signIn.setFromLink(deps.store, token, String(b.password ?? ""), String(b.confirm ?? ""));
+      // Setting a new password ends every session on every device at once: the cookie is signed with a
+      // key folded together with the password's hash (src/sign-in.ts), so nothing has to be swept.
+      res.type("html").send(passwordSavedPage());
+      await deps.messenger
+        .send(r.replyTo, "Password saved. The reports and the jobs board are behind it now, and every device that was signed in with the old password has been signed out.")
+        .catch(() => undefined);
+    } catch (err) {
+      const msg = err instanceof SignInError ? err.message : "That could not be saved. Send /password in chat for a new link.";
+      if (!signIn.peek(token)) return res.status(410).type("html").send(expiredPage("This link has expired or was already used. Send /password in chat for a new one.", "Nothing was changed."));
+      res.status(400).type("html").send(passwordPage(token, { error: msg }));
+    }
+  });
+
+  /**
    * The jobs board: one read-only page Paul bookmarks and opens on his phone instead of typing /jobs.
-   * GET only, behind a long-lived token the service minted itself (/board prints the link in chat).
-   * It changes nothing and shows no spend, brief or output; with ?format=json the same data is JSON.
+   * GET only, behind a long-lived token the service minted itself (/board prints the link in chat) and
+   * behind the sign-in above, so the token on its own is not enough. It changes nothing and shows no
+   * spend, brief or output; with ?format=json the same data is JSON.
    */
   const boardHeaders = (res: express.Response) => {
     noStore(res);
@@ -371,6 +479,7 @@ export function buildApp(deps: AppDeps) {
   };
   app.get(BOARD_PATH, (req, res) => {
     boardHeaders(res);
+    if (!signedIn(req, res)) return;
     const token = typeof req.query.t === "string" ? req.query.t : "";
     if (!boardTokenValid(deps.store, token)) return res.status(404).type("html").send(refusedPage());
     const board = boardData({ store: deps.store, queue: jobs, schedules: scheduler.upcoming() });
