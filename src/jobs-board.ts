@@ -2,10 +2,15 @@
  * The jobs board: one read-only page Paul opens on his phone instead of typing /jobs in chat.
  *
  * It shows only jobs: what is running now, what is queued (and behind which job, in which
- * repository's queue), what finished recently and what is scheduled. It never shows spend, cost,
- * budget, caps or model figures (it does not read src/spend.ts at all), and it never renders a job's
- * brief, output, transcript, file path, environment variable, secret or personal data. Titles, kind,
- * status, timings, repository, ids and a link that already exists (a saved output, a pull request) only.
+ * repository's queue), what finished recently and what is scheduled. Each card says in plain English
+ * what the job is, two or three lines taken from the job's own brief by src/job-descriptions.ts (this
+ * file never touches a brief itself: that module redacts, strips the markup and caps it, and says so
+ * honestly when a brief yields nothing), what kind of worker it is, and what a finished job produced.
+ *
+ * It never shows spend, cost, budget, caps or model figures (it does not read src/spend.ts at all), and
+ * never a job's output text, transcript, file path, environment variable, secret or personal data.
+ * Titles, kind, status, timings, repository, ids, a redacted description of the brief and a link that
+ * already exists (a saved output, a pull request) only.
  *
  * The page changes nothing: the only route is a GET, and nothing here writes to a job, a queue or a
  * schedule. The link carries a long-lived token the service minted itself and keeps in the store
@@ -21,6 +26,7 @@ import { classify, EXCLUDED_KINDS } from "./output-folders.js";
 import { entryFor } from "./publish-outputs.js";
 import { failureLabel } from "./failures.js";
 import { jobTitle } from "./titles.js";
+import { describeJob, liveStep, NO_DESCRIPTION } from "./job-descriptions.js";
 import type { Job, Store } from "./store.js";
 import type { ScheduledRun } from "./scheduler.js";
 
@@ -77,11 +83,21 @@ export interface BoardJob {
   title: string;
   /** The worker kind, raw ("engineer"). */
   kind: string;
-  /** The kind in plain words, with the repository where it differs ("engineer, workforce"). */
+  /** What the kind of worker and the repository mean, in one plain line ("engineer on the workforce repo: ..."). */
   kindLabel: string;
   /** The repository alias whose queue the job belongs to. */
   repository: string;
   status: "running" | "queued" | "done" | "failed";
+  /** What this job is, in plain English from its own brief: two or three lines on a phone. */
+  description?: string;
+  /** Shown instead of a description when the brief yields nothing usable. */
+  descriptionUnavailable?: string;
+  /** The longer detail from the same brief, behind the card's expand control. */
+  more?: string;
+  /** Running: what the worker is doing this minute, in plain words ("Editing jobs.ts"). */
+  now?: string;
+  /** Finished: one line on what it produced, from the record only. */
+  produced?: string;
   /** Running: how long it has been going, e.g. "12 min". */
   runningFor?: string;
   /** Running: when its worker last did anything, e.g. "2 min ago". */
@@ -123,7 +139,7 @@ export interface Board {
 export interface BoardSource {
   store: Store;
   /** The queue's view of a job's place and whether it is held, so the board repeats none of that logic. */
-  queue: Pick<JobRunner, "isHeld" | "queuePosition">;
+  queue: Pick<JobRunner, "isHeld" | "queuePosition"> & { latestStep?: (id: string) => string | undefined };
   /** The enabled schedules with their next runs, from the scheduler. */
   schedules?: readonly ScheduledRun[];
   /** The clock, for the tests. */
@@ -152,12 +168,6 @@ function ago(fromIso: string | undefined, now: number): string | undefined {
 }
 
 /* ---------- The data ---------- */
-
-/** The kind in plain words, with the repository it runs in: "engineer, workforce", "design, product". */
-export function kindLabel(job: Pick<Job, "kind" | "target">): string {
-  const repo = lockKey(job) ?? job.target ?? "product";
-  return `${job.kind}, ${repo === "self" ? "workforce" : repo}`;
-}
 
 /**
  * A finished job's saved output, as a link into the private outputs repository, when one would be
@@ -190,17 +200,25 @@ function jobLinks(store: Store, job: Job): BoardLink[] {
 function toBoardJob(source: BoardSource, job: Job, now: number): BoardJob {
   const repository = lockKey(job) ?? job.target ?? "product";
   const links = jobLinks(source.store, job);
+  // Everything the card says about the job comes from its own record: its brief (redacted, stripped and
+  // capped by src/job-descriptions.ts), its kind, and the links that already exist on it.
+  const described = describeJob(job, { hasPullRequest: links.some((l) => l.what === "pull request"), hasSavedOutput: links.some((l) => l.what === "saved output") }, repository);
   const base: BoardJob = {
     id: job.id,
     title: jobTitle(job),
     kind: job.kind,
-    kindLabel: kindLabel(job),
+    kindLabel: described.kindLine,
     repository,
     status: job.status,
+    ...(described.description ? { description: described.description } : { descriptionUnavailable: NO_DESCRIPTION }),
+    ...(described.more ? { more: described.more } : {}),
+    ...(described.produced ? { produced: described.produced } : {}),
     ...(links.length ? { links } : {}),
   };
   if (job.status === "running") {
-    return { ...base, runningFor: since(job.startedAt ?? job.createdAt, now), lastActive: ago(job.lastActivityAt, now) };
+    // What it is doing this minute: the worker's latest step, in plain words, when it is running here.
+    const now_ = liveStep(source.queue.latestStep?.(job.id));
+    return { ...base, runningFor: since(job.startedAt ?? job.createdAt, now), lastActive: ago(job.lastActivityAt, now), ...(now_ ? { now: now_ } : {}) };
   }
   if (job.status === "queued") {
     // A job blocked by the daily cap points waitingFor at itself when no queue holder exists, so a
@@ -264,6 +282,14 @@ h2{font-size:1rem;margin:1.4rem 0 .5rem;color:#333;border-bottom:1px solid #e2e2
 .job .t{font-weight:600}
 .job .m{font-size:.85rem;color:#555;margin-top:.15rem}
 .job .id{font-family:ui-monospace,Menlo,Consolas,monospace;color:#333}
+.job .d{margin:.35rem 0 0;font-size:.9rem}
+.job .p{margin:.3rem 0 0;font-size:.9rem}
+.job .now{margin:.3rem 0 0;font-size:.9rem;color:#1a7f37}
+.job .k{margin:.4rem 0 0;font-size:.78rem;color:#666}
+.job .none{margin:.35rem 0 0;font-size:.9rem;color:#777;font-style:italic}
+.job details{margin:.4rem 0 0}
+.job summary{font-size:.8rem;color:#1a56db;cursor:pointer}
+.job .x{margin:.3rem 0 0;font-size:.85rem;color:#444}
 .badge{display:inline-block;font-size:.75rem;padding:.05rem .4rem;border-radius:999px;background:#eef1f5;color:#333;margin-left:.35rem;vertical-align:middle}
 .badge.run{background:#e6f4ea;color:#1a7f37}
 .badge.fail{background:#fdecec;color:#b42318}
@@ -276,8 +302,17 @@ a{color:#1a56db}`;
 
 function jobBlock(job: BoardJob): string {
   const badge = job.status === "running" ? `<span class="badge run">running</span>` : job.status === "failed" ? `<span class="badge fail">failed</span>` : "";
-  // The kind and the repository read as one phrase ("engineer, workforce"), so the repository is not repeated.
-  const meta: string[] = [`${escapeHtml(job.kindLabel)} &middot; <span class="id">${escapeHtml(job.id)}</span>`];
+  // What the job is: the short description read off its brief, or the honest note that there is none.
+  const what = job.description
+    ? `<p class="d">${escapeHtml(job.description)}</p>`
+    : job.descriptionUnavailable
+      ? `<p class="none">${escapeHtml(job.descriptionUnavailable)}</p>`
+      : "";
+  const nowLine = job.now ? `<p class="now">Now: ${escapeHtml(job.now)}</p>` : "";
+  const produced = job.produced ? `<p class="p">${escapeHtml(job.produced)}</p>` : "";
+  // What the kind of worker means, and the repository in Paul's own name for it.
+  const kind = `<div class="k">${escapeHtml(job.kindLabel)}</div>`;
+  const meta: string[] = [`<span class="id">${escapeHtml(job.id)}</span>`];
   if (job.runningFor) meta.push(`running ${escapeHtml(job.runningFor)}`);
   if (job.lastActive) meta.push(`worker last active ${escapeHtml(job.lastActive)}`);
   if (job.queuePosition) meta.push(`#${job.queuePosition} in the queue`);
@@ -286,7 +321,9 @@ function jobBlock(job: BoardJob): string {
   if (job.finishedAgo) meta.push(`finished ${escapeHtml(job.finishedAgo)}`);
   if (job.outcome) meta.push(`<span class="${job.status === "failed" ? "fail" : "ok"}">${escapeHtml(job.outcome)}</span>`);
   for (const link of job.links ?? []) meta.push(`<a href="${escapeHtml(link.url)}">${escapeHtml(link.what)}</a>`);
-  return `<div class="job"><div class="t">${escapeHtml(job.title)}${badge}</div><div class="m">${meta.join(" &middot; ")}</div></div>`;
+  // The rest of the brief, behind an expand control: plain HTML, nothing loaded and no script.
+  const more = job.more ? `<details><summary>More of the brief</summary><div class="x">${escapeHtml(job.more)}</div></details>` : "";
+  return `<div class="job"><div class="t">${escapeHtml(job.title)}${badge}</div>${what}${nowLine}${produced}${kind}<div class="m">${meta.join(" &middot; ")}</div>${more}</div>`;
 }
 
 function section(title: string, jobs: BoardJob[], empty: string): string {

@@ -66,6 +66,8 @@ interface LiveRun {
   waitingForCopy: boolean;
   /** The run returned and the job is being reported: too late to stop it. */
   finishing: boolean;
+  /** The worker's latest step in plain words (src/status.ts describeWorkerTool), for the jobs board. */
+  step?: string;
   stop?: StopReason;
   /** The stop has been recorded on the job, so it is never recorded twice. */
   recorded?: boolean;
@@ -753,6 +755,15 @@ export class JobRunner {
     return this.running.has(id);
   }
 
+  /**
+   * What a running job's worker is doing this minute, in plain words ("Editing jobs.ts"), or undefined
+   * when this process is not running it. The jobs board shows it on the job's card; it is the same
+   * phrase (src/status.ts describeWorkerTool) the job's thread gets, never a command or an argument.
+   */
+  latestStep(id: string): string | undefined {
+    return this.live.get(id)?.step;
+  }
+
   private async execute(id: string): Promise<void> {
     const job = this.store.getJob(id);
     if (!job) return;
@@ -883,7 +894,11 @@ export class JobRunner {
         costMeter,
         abortController: live.abort,
         onActivity: () => this.touch(id, live),
-        onToolUse: (name: string, input: Record<string, unknown>) => shown.note(describeWorkerTool(name, input)),
+        onToolUse: (name: string, input: Record<string, unknown>) => {
+          const step = describeWorkerTool(name, input);
+          live.step = step;
+          shown.note(step);
+        },
         onSession: (sessionId: string) => {
           if (this.store.getJob(id)?.sessionId !== sessionId) this.store.updateJob(id, { sessionId });
         },
