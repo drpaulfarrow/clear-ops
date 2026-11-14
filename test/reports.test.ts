@@ -19,6 +19,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-reports-
 const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
 const { reportsToken, reportsTokenValid, reportsUrl, reportEntries, reportFor, renderMarkdown, renderReportPage, renderReportsIndex, dropRepeatedTitle, REPORTS_PATH, PAGE_CSP, FILE_CSP } = await import("../src/reports.js");
+const { signIn, SIGN_IN_PATH, SIGN_OUT_PATH, SESSION_COOKIE } = await import("../src/sign-in.js");
 const { londonYmd } = await import("../src/london.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner } from "../src/agents.js";
@@ -35,6 +36,16 @@ const messenger = new ConsoleMessenger();
 const PAUL = "tg:99887766";
 const at = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 const MIN = 60_000;
+
+/**
+ * The reports view sits behind the browser sign-in (src/sign-in.ts), so every request here carries the
+ * session cookie of a signed-in Paul. The password is set in `before` and signed in with once, through
+ * the real route; the one-time link and the cookie's own rules are covered by test/sign-in.test.ts.
+ */
+const PASSWORD = "the reports test password";
+let session = "";
+const get = (url: string, init: RequestInit = {}) =>
+  fetch(url, { ...init, headers: { ...((init.headers as Record<string, string>) ?? {}), cookie: session } });
 
 /** An output with something of everything the renderer has to handle. */
 const MARKDOWN = `# Deep review
@@ -120,6 +131,17 @@ before(async () => {
   queue = built.jobs;
   await new Promise<void>((r) => (server = built.app.listen(0, r)));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+
+  // Signed in as Paul would be: set the password through the class, then the real sign-in route.
+  signIn.setPassword(store, PASSWORD);
+  const signedIn = await fetch(`${base}${SIGN_IN_PATH}`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ password: PASSWORD }).toString(),
+  });
+  session = (signedIn.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`)) ?? "").split(";")[0];
+  if (!session) throw new Error(`the reports test could not sign in: ${signedIn.status}`);
 });
 
 after(() => {
@@ -140,11 +162,27 @@ test("the token is minted once, kept in the store, and accepted only when it mat
   assert.match(reportsUrl(store), new RegExp(`^https?://[^/]+${REPORTS_PATH}\\?t=${token}$`), "the link carries the token in the query string");
 });
 
-test("the index is served only with the token, is never cached, and cannot be written to", async () => {
-  assert.equal((await fetch(`${base}${REPORTS_PATH}`)).status, 404);
-  assert.equal((await fetch(`${base}${REPORTS_PATH}?t=not-the-token`)).status, 404);
+test("the view sits behind the sign-in: signed out it sends him to sign in, signed in it opens, and both pages can sign out", async () => {
   const token = reportsToken(store);
-  const ok = await fetch(`${base}${REPORTS_PATH}?t=${token}`);
+  // Signed out: not the content and not a 404 — the sign-in page, carrying the page he asked for.
+  const out = await fetch(`${base}${REPORTS_PATH}?t=${token}`, { redirect: "manual" });
+  assert.equal(out.status, 303);
+  assert.equal(out.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(`${REPORTS_PATH}?t=${token}`)}`);
+  const outOne = await fetch(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`, { redirect: "manual" });
+  assert.equal(outOne.status, 303, "one report is gated too");
+  // The token alone is no longer enough: with the session, it still is what opens the page.
+  assert.equal((await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`)).status, 200);
+  // Both pages offer a way out.
+  const index = await (await get(`${base}${REPORTS_PATH}?t=${token}`)).text();
+  const one = await (await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`)).text();
+  for (const html of [index, one]) assert.match(html, new RegExp(`<a href="${SIGN_OUT_PATH}">Sign out</a>`), "a Sign out link");
+});
+
+test("the index is served only with the token, is never cached, and cannot be written to", async () => {
+  assert.equal((await get(`${base}${REPORTS_PATH}`)).status, 404);
+  assert.equal((await get(`${base}${REPORTS_PATH}?t=not-the-token`)).status, 404);
+  const token = reportsToken(store);
+  const ok = await get(`${base}${REPORTS_PATH}?t=${token}`);
   assert.equal(ok.status, 200);
   assert.match(ok.headers.get("content-type") ?? "", /text\/html/);
   assert.match(ok.headers.get("cache-control") ?? "", /no-store/);
@@ -158,8 +196,8 @@ test("the index is served only with the token, is never cached, and cannot be wr
   assert.match(html, /href="\/reports\/[A-Za-z0-9_-]+\?t=/, "each report is linked with the token");
   // Read only: no route of any other method exists, so nothing on the view can act.
   for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
-    assert.equal((await fetch(`${base}${REPORTS_PATH}?t=${token}`, { method })).status, 404, `${method} is not a route`);
-    assert.equal((await fetch(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`, { method })).status, 404, `${method} is not a route`);
+    assert.equal((await get(`${base}${REPORTS_PATH}?t=${token}`, { method })).status, 404, `${method} is not a route`);
+    assert.equal((await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`, { method })).status, 404, `${method} is not a route`);
   }
 });
 
@@ -183,17 +221,17 @@ test("the assistant, CV and upload-derived outputs, a running job and a job with
   const token = reportsToken(store);
   for (const job of [eaJob, cvJob, uploadJob, noOutputJob, runningJob]) {
     assert.equal(reportFor(store, job.id), undefined, `${job.kind} output must not be served`);
-    assert.equal((await fetch(`${base}${REPORTS_PATH}/${job.id}?t=${token}`)).status, 404);
+    assert.equal((await get(`${base}${REPORTS_PATH}/${job.id}?t=${token}`)).status, 404);
   }
   assert.equal(reportFor(store, "orphan1"), undefined, "an output with no job record cannot be classified");
-  const index = await (await fetch(`${base}${REPORTS_PATH}?t=${token}`)).text();
+  const index = await (await get(`${base}${REPORTS_PATH}?t=${token}`)).text();
   for (const id of [eaJob.id, cvJob.id, uploadJob.id, runningJob.id]) assert.ok(!index.includes(id), `${id} must not be linked`);
   assert.ok(!index.includes("orphan1"));
 });
 
 test("one report renders as a page: headings, paragraphs, lists, tables, code and links", async () => {
   const token = reportsToken(store);
-  const res = await fetch(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`);
+  const res = await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   const html = await res.text();
@@ -217,7 +255,7 @@ test("one report renders as a page: headings, paragraphs, lists, tables, code an
 
 test("raw HTML and a script in a saved output are shown as text and never become markup", async () => {
   const token = reportsToken(store);
-  const html = await (await fetch(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`)).text();
+  const html = await (await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`)).text();
   assert.ok(!/<script/i.test(html), "a script tag in an output must never be markup");
   assert.ok(!/<div/i.test(html), "raw HTML in an output must never be markup");
   assert.match(html, /&#60;script&#62;alert\(&#34;SECRET SCRIPT&#34;\)&#60;\/script&#62;/, "it is shown, escaped");
@@ -251,7 +289,7 @@ test("the Markdown renderer: a link that is not http(s) or mailto is left as pla
 
 test("a self-contained .html page saved beside the Markdown is served as-is, and the Markdown is not", async () => {
   const token = reportsToken(store);
-  const res = await fetch(`${base}${REPORTS_PATH}/${htmlJob.id}?t=${token}`);
+  const res = await get(`${base}${REPORTS_PATH}/${htmlJob.id}?t=${token}`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-type") ?? "", /text\/html/);
   assert.match(res.headers.get("cache-control") ?? "", /no-store/);
@@ -271,7 +309,7 @@ test("an empty or oversize saved .html falls back to the rendered Markdown rathe
   store.updateJob(empty.id, { status: "done", finishedAt: at(6 * MIN) });
   store.writeOutput(empty.id, "# Empty page\n\nFallback body.\n");
   fs.writeFileSync(path.join(store.dir, "outputs", `${empty.id}.html`), "");
-  const res = await fetch(`${base}${REPORTS_PATH}/${empty.id}?t=${token}`);
+  const res = await get(`${base}${REPORTS_PATH}/${empty.id}?t=${token}`);
   assert.equal(res.status, 200);
   assert.match(await res.text(), /<h1>Empty page<\/h1>/, "the Markdown is rendered instead");
   assert.equal(reportFor(store, empty.id)!.entry.html, false);
@@ -279,19 +317,19 @@ test("an empty or oversize saved .html falls back to the rendered Markdown rathe
 
 test("a report page is reached only through the token, and an id that is not a saved output is refused", async () => {
   const token = reportsToken(store);
-  assert.equal((await fetch(`${base}${REPORTS_PATH}/${reportJob.id}`)).status, 404);
-  assert.equal((await fetch(`${base}${REPORTS_PATH}/${reportJob.id}?t=wrong`)).status, 404);
-  assert.equal((await fetch(`${base}${REPORTS_PATH}/../../../state.json?t=${token}`)).status, 404);
-  assert.equal((await fetch(`${base}${REPORTS_PATH}/..%2Fstate.json?t=${token}`)).status, 404);
-  assert.equal((await fetch(`${base}${REPORTS_PATH}/state.json?t=${token}`)).status, 404);
-  const refused = await (await fetch(`${base}${REPORTS_PATH}/${reportJob.id}?t=wrong`)).text();
+  assert.equal((await get(`${base}${REPORTS_PATH}/${reportJob.id}`)).status, 404);
+  assert.equal((await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=wrong`)).status, 404);
+  assert.equal((await get(`${base}${REPORTS_PATH}/../../../state.json?t=${token}`)).status, 404);
+  assert.equal((await get(`${base}${REPORTS_PATH}/..%2Fstate.json?t=${token}`)).status, 404);
+  assert.equal((await get(`${base}${REPORTS_PATH}/state.json?t=${token}`)).status, 404);
+  const refused = await (await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=wrong`)).text();
   assert.ok(!refused.includes("wrong"), "the refused page never echoes the token");
   assert.ok(!refused.includes(token));
 });
 
 test("the index shows metadata only: no output text, brief or personal file name reaches it", async () => {
   const token = reportsToken(store);
-  const res = await fetch(`${base}${REPORTS_PATH}?t=${token}`);
+  const res = await get(`${base}${REPORTS_PATH}?t=${token}`);
   const html = await res.text();
   for (const text of ["SECRET SCRIPT", "SECRET HTML", "SECRET MAIL", "SECRET CV", "SECRET CONTACTS", "SECRET ORPHAN", "jo@example.com", "SECRET MARKDOWN", "Connections.csv"]) {
     assert.ok(!html.includes(text), `the index leaked: ${text}`);

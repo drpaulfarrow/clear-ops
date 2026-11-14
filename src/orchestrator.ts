@@ -10,6 +10,7 @@ import type { Job, JobKind, JobTarget, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
 import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
 import { boardUrl } from "./jobs-board.js";
+import { PASSWORD_LINK_MINUTES, signIn } from "./sign-in.js";
 import { reportsUrl } from "./reports.js";
 import { describeUploads, formatSize, inlineImages, receiptText, transcriptAsMessage, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
 import { isAudio, transcribe, TranscribeError, transcriptionAvailable, transcriptionUnavailableReason } from "./transcribe.js";
@@ -190,11 +191,16 @@ export class Orchestrator {
     }
     if (/^\/jobs$/i.test(trimmed)) return this.messenger.send(from, this.jobsText());
     // The jobs board link: the same list as /jobs, as a page Paul can bookmark on his phone. The token
-    // is minted once and kept in the store; only the read-only board is behind it.
+    // is minted once and kept in the store; only the read-only board is behind it, and behind the
+    // sign-in below.
     if (/^\/board$/i.test(trimmed)) return this.messenger.send(from, this.boardText());
     // The reports link: every saved job output as a page he can read on his phone. Its own token, kept
-    // in the store; only the read-only reports pages are behind it (src/reports.ts).
+    // in the store; only the read-only reports pages are behind it (src/reports.ts), and like the board
+    // they sit behind the password too, so the link alone is not enough.
     if (/^\/reports$/i.test(trimmed)) return this.messenger.send(from, this.reportsText());
+    // The password for the browser pages: a fresh one-time link to set a new one, in the same shape as
+    // /board. Paul types it on his own phone, never in chat, and setting it signs out every device.
+    if (/^\/password$/i.test(trimmed)) return this.messenger.send(from, this.passwordLinkText(from));
     const spend = trimmed.match(/^\/spend(?:\s+(yesterday|today|\d{4}-\d{2}-\d{2}))?$/i);
     if (spend) return this.messenger.send(from, await this.spendText(spend[1]?.toLowerCase()));
     if (/^\/status$/i.test(trimmed)) return this.messenger.send(from, this.githubStatus ? await this.githubStatus().catch(() => "GitHub: could not check just now.") : "No GitHub check is configured.");
@@ -592,7 +598,12 @@ export class Orchestrator {
   }
 
   private boardText(): string {
-    return `The jobs board is at ${boardUrl(this.store)}. Bookmark it on your phone: it shows what is running, what is queued and behind what, what finished recently and what is scheduled, and it refreshes itself. It is read only, and it shows no costs.`;
+    return `The jobs board is at ${boardUrl(this.store)}. Bookmark it on your phone: it shows what is running, what is queued and behind what, what finished recently and what is scheduled, and it refreshes itself. It is read only, it shows no costs, and it sits behind your password: if you are signed out, the link asks you to sign in first, and the token on its own is not enough.`;
+  }
+
+  private passwordLinkText(from: string): string {
+    const url = signIn.link(this.store, from);
+    return `Here is a private link to set a new password for the reports and the board. Type the new password twice there, on your phone, never here in chat: the service keeps only a salted hash of it.\n${url}\nThe link works once and expires in ${PASSWORD_LINK_MINUTES} minutes. Setting a new password signs out every device that was signed in with the old one.`;
   }
 
   private reportsText(): string {
@@ -1047,8 +1058,9 @@ const HELP = `Talk to me normally. I answer quick things myself and delegate the
 
 Commands:
 /jobs: recent jobs
-/board: a link to the jobs board, a read-only page you can bookmark on your phone
-/reports: a link to your saved reports, every finished job's output as a page you can read on your phone
+/board: a link to the jobs board, a read-only page you can bookmark on your phone, behind your password
+/reports: a link to your saved reports, every finished job's output as a page you can read on your phone, behind your password
+/password: a private one-time link to set or change the password that opens the reports and the board (type it there, never in chat; setting it signs out every device)
 /spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free
 /resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
 retry <id>: rerun one failed job

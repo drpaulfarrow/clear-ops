@@ -5,6 +5,10 @@
  * every card says in plain English what its job is (from the job's own brief) and what kind of worker
  * it is, that a token, a pasted report, an output, a schedule brief or a spend figure cannot leak, and
  * that a running, a queued and a finished job each render.
+ *
+ * Since 14 Nov 2026 the board also sits behind the service's sign-in (src/sign-in.ts), so every
+ * request here goes through `page()`, which carries a real session cookie minted by POSTing to
+ * /sign-in once. The gate itself is covered in test/sign-in.test.ts.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -18,6 +22,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-board-")
 const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
 const { boardToken, boardTokenValid, boardData, renderBoard, BOARD_PATH, BOARD_REFRESH_SECONDS } = await import("../src/jobs-board.js");
+const { signIn, SIGN_IN_PATH, SESSION_COOKIE } = await import("../src/sign-in.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner } from "../src/agents.js";
 import type { JobRunner } from "../src/jobs.js";
@@ -46,6 +51,13 @@ let queuedJob: Job;
 let doneJob: Job;
 let failedJob: Job;
 let eaJob: Job;
+/** A real signed-in session, minted through POST /sign-in below, so the board is served at all. */
+const PASSWORD = "the board's own test password";
+let cookie = "";
+
+/** Every request to the board carries the session, exactly as Paul's phone would. */
+const page = (p: string, init: RequestInit = {}) =>
+  fetch(`${base}${p}`, { redirect: "manual", ...init, headers: { cookie, ...((init.headers ?? {}) as Record<string, string>) } });
 let reviewJob: Job;
 let vagueJob: Job;
 
@@ -86,6 +98,18 @@ before(async () => {
   queue = built.jobs;
   await new Promise<void>((r) => (server = built.app.listen(0, r)));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+
+  // The board is behind the sign-in now: set a password and sign in once, so the tests below are about
+  // the board itself and not about the gate.
+  signIn.setPassword(store, PASSWORD);
+  const res = await fetch(`${base}${SIGN_IN_PATH}`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ password: PASSWORD }).toString(),
+  });
+  assert.equal(res.status, 303, "the sign-in must work, or every test below is meaningless");
+  cookie = res.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(";")[0];
 });
 
 // buildApp boots the scheduler, which arms this test's schedule; the armed tasks would keep the
@@ -107,10 +131,10 @@ test("the token is minted once, kept in the store, and accepted only when it mat
 });
 
 test("the page is served only with the token, is never cached, and has no way to change anything", async () => {
-  assert.equal((await fetch(`${base}${BOARD_PATH}`)).status, 404);
-  assert.equal((await fetch(`${base}${BOARD_PATH}?t=not-the-token`)).status, 404);
+  assert.equal((await page(BOARD_PATH)).status, 404);
+  assert.equal((await page(`${BOARD_PATH}?t=not-the-token`)).status, 404);
   const token = boardToken(store);
-  const ok = await fetch(`${base}${BOARD_PATH}?t=${token}`);
+  const ok = await page(`${BOARD_PATH}?t=${token}`);
   assert.equal(ok.status, 200);
   assert.match(ok.headers.get("cache-control") ?? "", /no-store/);
   const html = await ok.text();
@@ -118,11 +142,17 @@ test("the page is served only with the token, is never cached, and has no way to
   assert.match(html, /name="viewport"/, "reads on a phone");
   assert.match(html, /http-equiv="refresh"/, "refreshes itself");
   // Read only: a POST to the page is not a route at all, so nothing on it can act.
-  assert.equal((await fetch(`${base}${BOARD_PATH}?t=${token}`, { method: "POST" })).status, 404);
+  assert.equal((await page(`${BOARD_PATH}?t=${token}`, { method: "POST" })).status, 404);
   assert.ok(!html.includes("SECRET"), "no brief or output text reaches the page");
+  // Signed out, the token alone is not enough: the visit goes to the sign-in page, carrying the page
+  // and the token it asked for, and no part of the board is served.
+  const signedOut = await fetch(`${base}${BOARD_PATH}?t=${token}`, { redirect: "manual" });
+  assert.equal(signedOut.status, 303);
+  assert.equal(signedOut.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(`${BOARD_PATH}?t=${token}`)}`);
+  assert.doesNotMatch(await signedOut.text(), /Workforce jobs|SECRET/, "not one word of the board comes back");
   // The same data as JSON, behind the same token, with the same refusal.
-  assert.equal((await fetch(`${base}${BOARD_PATH}?format=json`)).status, 404);
-  const jsonRes = await fetch(`${base}${BOARD_PATH}?t=${token}&format=json`);
+  assert.equal((await page(`${BOARD_PATH}?format=json`)).status, 404);
+  const jsonRes = await page(`${BOARD_PATH}?t=${token}&format=json`);
   assert.match(jsonRes.headers.get("content-type") ?? "", /application\/json/);
   const data = (await jsonRes.json()) as { running: unknown[]; queued: unknown[]; finished: unknown[]; scheduled: unknown[] };
   assert.deepEqual(Object.keys(data).sort(), ["finished", "generatedAt", "paused", "queued", "running", "scheduled"]);
