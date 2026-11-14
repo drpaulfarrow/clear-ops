@@ -259,7 +259,11 @@ export class Orchestrator {
         // The chief gets the service's own search for quick answers; the browser is for workers only.
         mcpServers: { ops: this.opsServer(sender, from, messageId), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
         maxTurns: 25,
-        maxBudgetUsd: config.jobBudgetUsd,
+        // The chief's own turn gets the same runaway guard as a job: not a cap, only a backstop. It has
+        // no per-job cap, because nothing counts a real-dollar figure for a chat turn (a job's cap is
+        // the sum of the provider's own per-call charges, src/realcost.ts, and only JobRunner builds
+        // that meter); the chief's own replies are not recorded as spend anywhere either.
+        maxBudgetUsd: config.sdkRunawayBudgetUsd,
         onToolUse: (name, input) => status.update(describeToolUse(name, input)),
       });
       await status.finish();

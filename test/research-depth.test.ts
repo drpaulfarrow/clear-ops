@@ -74,12 +74,16 @@ test("deep research gets more turns and a configurable budget; every kind keeps 
   const deep = runLimits("research", "deep");
   assert.ok(deep.maxTurns > std.maxTurns);
   assert.ok(std.maxTurns >= 40, "standard research never drops below the old limit");
-  assert.equal(deep.maxBudgetUsd, config.deepResearchBudgetUsd);
-  assert.equal(std.maxBudgetUsd, config.jobBudgetUsd);
-  assert.deepEqual(runLimits("engineer"), { maxTurns: 200, maxBudgetUsd: config.engineerBudgetUsd });
-  assert.deepEqual(runLimits("maintain"), { maxTurns: 80, maxBudgetUsd: config.engineerBudgetUsd });
-  assert.deepEqual(runLimits("design"), { maxTurns: 80, maxBudgetUsd: config.design.budgetUsd });
-  assert.deepEqual(runLimits("write", "deep"), { maxTurns: 40, maxBudgetUsd: config.jobBudgetUsd }, "depth only applies to research");
+  // The SDK's guard is what every run is handed; the job's own cap is separate and in the provider's
+  // money (src/realcost.ts), which is why deep research shows up as a larger realBudgetUsd.
+  assert.equal(deep.maxBudgetUsd, config.sdkRunawayBudgetUsd);
+  assert.equal(std.maxBudgetUsd, config.sdkRunawayBudgetUsd);
+  assert.equal(deep.realBudgetUsd, config.deepResearchBudgetUsd);
+  assert.equal(std.realBudgetUsd, config.jobBudgetUsd);
+  assert.deepEqual(runLimits("engineer"), { maxTurns: 200, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.engineerBudgetUsd });
+  assert.deepEqual(runLimits("maintain"), { maxTurns: 80, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.engineerBudgetUsd });
+  assert.deepEqual(runLimits("design"), { maxTurns: 80, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.design.budgetUsd });
+  assert.deepEqual(runLimits("write", "deep"), { maxTurns: 40, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.jobBudgetUsd }, "depth only applies to research");
   // Money limits are off by default (Paul's call, 13 Nov 2026); every kind is still bounded by turns.
   for (const kind of JOB_KINDS) assert.ok(runLimits(kind, "deep").maxTurns > 0, `${kind} always has a turn limit`);
   assert.equal(config.jobBudgetUsd, undefined, "no per-run money cap unless one is set");
@@ -96,8 +100,8 @@ test("a deep research job runs with the deep limits and note; a standard one wit
   assert.equal(store.getJob(quick.id)!.depth, "standard");
   assert.ok(d.prompt.includes(DEEP_RESEARCH_NOTE));
   assert.ok(!q.prompt.includes(DEEP_RESEARCH_NOTE));
-  assert.deepEqual([d.maxTurns, d.maxBudgetUsd], [runLimits("research", "deep").maxTurns, config.deepResearchBudgetUsd]);
-  assert.deepEqual([q.maxTurns, q.maxBudgetUsd], [runLimits("research", "standard").maxTurns, config.jobBudgetUsd]);
+  assert.deepEqual([d.maxTurns, d.maxBudgetUsd], [runLimits("research", "deep").maxTurns, config.sdkRunawayBudgetUsd]);
+  assert.deepEqual([q.maxTurns, q.maxBudgetUsd], [runLimits("research", "standard").maxTurns, config.sdkRunawayBudgetUsd]);
 });
 
 test("an unlabelled research brief that asks for depth runs deep; other kinds never carry a depth", async () => {

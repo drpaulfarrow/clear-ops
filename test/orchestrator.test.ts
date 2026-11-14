@@ -138,7 +138,7 @@ test("the chief can ask for deep research: the job gets the deep depth, more tur
   const run = calls.find((c) => c.systemPrompt.includes("research analyst") && c.prompt.startsWith("who buys licensed content"))!;
   assert.ok(run.prompt.includes(DEEP_RESEARCH_NOTE));
   assert.equal(run.maxTurns, 200);
-  assert.equal(run.maxBudgetUsd, config.deepResearchBudgetUsd);
+  assert.equal(run.maxBudgetUsd, config.sdkRunawayBudgetUsd, "the run is handed the SDK's guard, and its own cap is counted in the provider's money");
   const chiefReply = messenger.sent.find((m) => m.text.startsWith("Delegated.") && m.text.includes("Market map"));
   assert.match(chiefReply?.text ?? "", /Depth: deep/);
 });
@@ -261,7 +261,7 @@ test("the chief starts the agent-creator on the workforce repo, and its pull req
   assert.match(call.systemPrompt, /This task is on the workforce itself/);
   assert.match(call.systemPrompt, /Clean room rule/);
   assert.ok(call.disallowedTools!.includes("Bash(gh pr merge*)"));
-  assert.equal(call.maxBudgetUsd, config.engineerBudgetUsd);
+  assert.equal(call.maxBudgetUsd, config.sdkRunawayBudgetUsd);
   await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Finished: Outreach agent · create_agent · ${job.id}.`) && m.text.includes("Started Review: Outreach agent · maintain, workforce")));
 });
 

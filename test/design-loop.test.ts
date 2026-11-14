@@ -210,7 +210,7 @@ test("design jobs have their own spend cap and turn limit, and plain design jobs
   jobs.start("design", "Three brand directions for Clear Exchange", FOUNDER);
   await waitFor(() => settled() && runs.length === 1);
   await new Promise((r) => setTimeout(r, 50));
-  assert.equal(runs[0].maxBudgetUsd, config.design.budgetUsd);
+  assert.equal(runs[0].maxBudgetUsd, config.sdkRunawayBudgetUsd);
   assert.equal(runs[0].maxTurns, 80);
   assert.equal(runs[0].cwd, config.dataDir);
   assert.equal(store.allJobs().length, 1, "a one-off design job never starts an engineer");
