@@ -3,8 +3,9 @@
 # 3 failed checks in a row it posts to a Discord webhook (DISCORD_WEBHOOK_URL secret) and
 # restarts the app's Fly machines through the existing FLY_API_TOKEN. It posts again once the
 # health check passes. A failed check fails the run, which is how the streak below is counted.
-# WATCHDOG_ALERTED (a repo variable) remembers that an episode was alerted, so a hiccup in one
-# run can only delay an alert, never suppress it, and an episode alerts exactly once.
+# An Actions cache entry remembers that an episode was alerted: exactly one alert per episode,
+# a hiccup in one run can only delay an alert (never suppress it), and if that state ever gets
+# stuck the episode is still escalated at 1, 2 and 3 hours down.
 name: watchdog
 on:
   schedule:
@@ -12,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write  # read the run history; remember the alert state in a repo variable
+  actions: write  # read the run history; save and clear the alert-state cache entry
 
 concurrency:
   group: watchdog
@@ -39,49 +40,56 @@ jobs:
           done
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
-      - name: Count recent failures and read the alert state
+      - name: Count this workflow's recent failures
         id: streak
         run: |
           streak=0
-          # API errors degrade to "skip alert actions this run" (below), never to a failed run:
-          # a failed run here could build a false streak and restart a healthy service.
+          # If the API call fails, keep the streak at 0 so no alert or restart fires on a guess;
+          # a failed health check still fails the run below, so a real outage keeps counting.
           if conclusions=$(gh api "repos/${{ github.repository }}/actions/workflows/watchdog.yml/runs?status=completed&per_page=10" --jq '.workflow_runs[].conclusion' 2>/dev/null); then
             for c in $conclusions; do
               if [ "$c" = "failure" ]; then streak=$((streak + 1)); else break; fi
             done
           else
-            echo "Could not list recent runs; skipping alert actions this run."
-          fi
-          if state=$(gh api "repos/${{ github.repository }}/actions/variables/WATCHDOG_ALERTED" --jq '.value' 2>/dev/null); then
-            alerted="$state"
-          elif gh api -X POST "repos/${{ github.repository }}/actions/variables" -f name=WATCHDOG_ALERTED -f value=0 >/dev/null 2>&1; then
-            alerted=0
-            echo "Created the WATCHDOG_ALERTED variable."
-          else
-            alerted=""
-            echo "Could not read the alert state; skipping alert actions this run."
+            echo "Could not list recent runs; skipping streak-based actions this run."
           fi
           echo "previous_failures=$streak" >> "$GITHUB_OUTPUT"
-          echo "alerted=$alerted" >> "$GITHUB_OUTPUT"
-          echo "Consecutive failed runs before this one: $streak; alerted: ${alerted:-unknown}"
+          echo "Consecutive failed runs before this one: $streak"
 
+      - name: Restore the alert state
+        id: alertstate
+        uses: actions/cache/restore@v4
+        with:
+          path: .watchdog-alerted
+          key: watchdog-alerted
+          lookup-only: true
+
+      - name: Mark the episode as alerted
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.alertstate.outputs.cache-hit != 'true'
+        run: date -u > .watchdog-alerted
+
+      # If this save fails, the alert below is skipped (a failed step blocks later steps), the
+      # state stays unset, and the next run tries again: an alert is delayed, never lost.
+      - name: Save the alert state
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.alertstate.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .watchdog-alerted
+          key: watchdog-alerted
+
+      # Escalation: if the alert state is somehow stuck (cleared recovery failed), a new episode
+      # still raises the alarm once it has been down for 1, 2 or 3 hours.
       - name: Set up flyctl
-        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.streak.outputs.alerted == '0'
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && (steps.alertstate.outputs.cache-hit != 'true' || steps.streak.outputs.previous_failures == '12' || steps.streak.outputs.previous_failures == '24' || steps.streak.outputs.previous_failures == '36')
         # Never let a setup hiccup suppress the alert below: GitHub implicitly ANDs every step's
         # if with success(), so without continue-on-error a failed install would skip the alert.
         continue-on-error: true
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Alert in Discord and restart the Fly machines
-        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.streak.outputs.alerted == '0'
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && (steps.alertstate.outputs.cache-hit != 'true' || steps.streak.outputs.previous_failures == '12' || steps.streak.outputs.previous_failures == '24' || steps.streak.outputs.previous_failures == '36')
         continue-on-error: true
         run: |
-          # Mark the episode alerted first; if the marker cannot be saved, skip this run and
-          # retry on the next one rather than risk repeat alerts and restarts every 5 minutes.
-          if ! gh api -X PATCH "repos/${{ github.repository }}/actions/variables/WATCHDOG_ALERTED" -f value=1 >/dev/null 2>&1; then
-            echo "Could not save the alert state; skipping so the next run can try."
-            exit 0
-          fi
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
             curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps health check failed three times. Attempting an automatic restart."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
           else
@@ -99,16 +107,23 @@ jobs:
             echo "No FLY_API_TOKEN secret; cannot restart."
           fi
 
+      - name: Clear the alert state
+        if: steps.health.outputs.ok == 'true' && steps.alertstate.outputs.cache-hit == 'true'
+        id: clear
+        run: |
+          # If the state cannot be cleared, skip the recovery post and retry on the next run
+          # rather than post a recovery message every 5 minutes.
+          if gh api -X DELETE "repos/${{ github.repository }}/actions/caches?key=watchdog-alerted" 2>/dev/null; then
+            echo "cleared=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cleared=false" >> "$GITHUB_OUTPUT"
+            echo "Could not clear the alert state; skipping the recovery post so the next run can try."
+          fi
+
       - name: Report the recovery in Discord
-        if: steps.health.outputs.ok == 'true' && steps.streak.outputs.alerted == '1'
+        if: steps.health.outputs.ok == 'true' && steps.alertstate.outputs.cache-hit == 'true' && steps.clear.outputs.cleared == 'true'
         continue-on-error: true
         run: |
-          # Clear the marker first; if it cannot be saved, skip and retry next run rather than
-          # post a recovery message every 5 minutes.
-          if ! gh api -X PATCH "repos/${{ github.repository }}/actions/variables/WATCHDOG_ALERTED" -f value=0 >/dev/null 2>&1; then
-            echo "Could not clear the alert state; skipping so the next run can try."
-            exit 0
-          fi
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
             curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps is responding again."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
           fi
