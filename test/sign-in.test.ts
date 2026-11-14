@@ -354,7 +354,12 @@ test("a session cookie is refused when it is tampered with, expired, or minted b
   // Tampered: a changed signature, a changed time, a wrong shape, another service's cookie.
   const value = good.slice(`${SESSION_COOKIE}=`.length);
   const [v, issued, sig] = value.split(".");
-  const flipped = `${sig.slice(0, -1)}${sig.endsWith("A") ? "B" : "A"}`;
+  // Flip the *first* character, which carries 6 significant bits, so the decoded signature is always
+  // different. The last character of a 43-character base64url HMAC carries 4 significant bits and 2
+  // bits of padding, so swapping it can leave the decoded bytes identical and the cookie genuinely
+  // valid (the flake that reddened CI run 43554822933: roughly one HMAC in sixteen ends in "A").
+  const flipped = `${sig[0] === "A" ? "B" : "A"}${sig.slice(1)}`;
+  assert.notEqual(flipped, sig, "the flipped signature must differ from the real one");
   for (const bad of [
     `${SESSION_COOKIE}=${v}.${issued}.${flipped}`,
     `${SESSION_COOKIE}=${v}.${Number(issued) + 1}.${sig}`,
