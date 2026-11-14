@@ -20,12 +20,13 @@ import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
-import { shortText, splitReport } from "./messages.js";
+import { addToReport, shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type BudgetStop, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
+import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
 
@@ -977,6 +978,11 @@ export class JobRunner {
         if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
         throw new RunFailedError(failed);
       }
+      // A job that clones and pushes gains one plain line at the end of its saved report saying which
+      // GitHub credential reached its repository: the variable's name, never a token
+      // (src/repo-tokens.ts). Paul's short message is untouched, and a repository on the App or
+      // GH_TOKEN adds nothing (src/bootstrap.ts jobCredentialNote).
+      if (BUILDS(job.kind)) result.text = addToReport(result.text, jobCredentialNote(job.target));
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
       const { report, message } = splitReport(result.text);
       const outputPath = this.store.writeOutput(id, report);

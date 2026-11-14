@@ -2,7 +2,8 @@ import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMes
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
-import { workerGithubEnv } from "./github-auth.js";
+import { githubAuth, workerGithubEnv } from "./github-auth.js";
+import { repoCredentialLabel } from "./repo-tokens.js";
 import { SEARCH_SECRETS } from "./search.js";
 import { TRANSCRIBE_SECRETS } from "./transcribe.js";
 import { DIRECT_STRIPPED, LLM_STRIPPED, llmEnv, llmManagedSettings, provider, resolveModel } from "./llm.js";
@@ -81,8 +82,10 @@ export interface RunResult {
 export type AgentRunner = (o: RunOptions) => Promise<RunResult>;
 
 /** The worker environment: GitHub credentials, minus the raw OpenRouter variables in OpenRouter mode. */
-async function workerEnv(direct = false): Promise<NodeJS.ProcessEnv> {
-  const env = { ...(await workerGithubEnv()) };
+async function workerEnv(direct = false, cwd?: string): Promise<NodeJS.ProcessEnv> {
+  // A repository with its own token (src/repo-tokens.ts) is reached with it by this job alone, and
+  // every per-repository token is kept out of every other worker's environment.
+  const env = { ...(await workerGithubEnv(process.env, githubAuth, repoForDir(cwd), repoRegistry.aliases())) };
   if (provider() === "openrouter") for (const k of LLM_STRIPPED) delete env[k];
   // Search keys are used by the service's own search tools only, never by a worker.
   for (const k of SEARCH_SECRETS) delete env[k];
@@ -155,7 +158,7 @@ export const sdkRunner: AgentRunner = async (o) => {
         // OpenRouter mode: price its models so total_cost_usd and maxBudgetUsd stay meaningful.
         ...(!direct && llmManagedSettings() ? { managedSettings: llmManagedSettings() } : {}),
         env: {
-          ...(await workerEnv(direct)),
+          ...(await workerEnv(direct, o.cwd)),
           // Extra settings for this run only: the npm development-mode variables a kind that builds
           // needs (src/jobs.ts), never the chief's or a read-only kind's environment.
           ...(o.env ?? {}),
@@ -241,6 +244,16 @@ async function* withImages(text: string, images: NonNullable<RunOptions["images"
       ],
     },
   } as SDKUserMessage;
+}
+
+/**
+ * The managed repository a working directory belongs to: a checkout, or one of the git worktrees
+ * beside it that a second engineering job is given (src/jobs.ts laneDir). Undefined for anything else,
+ * which is what the chief and every read-only worker run with.
+ */
+export function repoForDir(cwd: string | undefined): { alias: string; slug?: string } | undefined {
+  if (!cwd) return undefined;
+  return repoRegistry.list().find((r) => cwd === r.dir || cwd.startsWith(`${r.dir.replace(/\/+$/, "")}.lane`));
 }
 
 /** Both codebases. Every agent may read them; only engineers write; only the maintainer merges. */
@@ -390,6 +403,16 @@ export function repoFocus(target: JobTarget | undefined, kind: JobKind): string 
   return `Repository for this job: "${repo.alias}"${repo.slug ? `, GitHub ${repo.slug}` : ""}, at ${repo.dir}. ${work}`;
 }
 
+/**
+ * One plain line naming the credential that reaches a job's repository, for the kinds that clone,
+ * fetch and push. It says the variable's name and never the token itself.
+ */
+export function githubAccessNote(target: JobTarget | undefined): string {
+  const repo = repoRegistry.find(target ?? "product");
+  const what = repo?.slug ? `${repo.alias} (${repo.slug})` : (repo?.alias ?? "the product");
+  return `GitHub access: you reach ${what} with ${repoCredentialLabel(repo, githubAuth.mode())}. If you clone, fetch or push, say which credential you used in one line of your report, and never a token or a key.`;
+}
+
 export function workerSpec(kind: JobKind, target: JobTarget = "product"): WorkerSpec {
   // The agent-creator only ever works on the workforce itself, whatever target it was given.
   if (kind === "create_agent") target = "self";
@@ -399,11 +422,15 @@ export function workerSpec(kind: JobKind, target: JobTarget = "product"): Worker
   const base = { ...spec, prompt: `${spec.prompt}\n\n${UPLOADS_RULE}` };
   const self = (kind === "engineer" || kind === "maintain" || kind === "create_agent") && target === "self";
   const other = (kind === "engineer" || kind === "maintain") && target !== "product" && target !== "self" && !!repoRegistry.find(target);
-  const scoped = self
+  const where = self
     ? { ...base, cwd: config.selfRepoDir, prompt: base.prompt + SELF_IMPROVEMENT }
     : other
       ? { ...base, cwd: repoRegistry.dir(target), prompt: `${base.prompt}\n\n${repoFocus(target, kind)}` }
       : base;
+  // A job that clones and pushes is told, in one plain line, which GitHub credential reaches its
+  // repository, so its report says so when it does (never a token: the variable's name only).
+  const access = PR_KINDS.includes(kind) || kind === "maintain" ? `\n\n${githubAccessNote(target)}` : "";
+  const scoped = access ? { ...where, prompt: `${where.prompt}${access}` } : where;
   // Paul's messaging rule and the two-part final answer (full report, short message) come last, for every kind.
   return { ...scoped, prompt: `${scoped.prompt}\n\n${REPORT_RULE}` };
 }
