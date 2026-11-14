@@ -362,6 +362,8 @@ export interface SignupAction {
 
 /** Runtime settings Paul sets from chat. */
 export interface Settings {
+  /** Sites Paul unlocked with "act as me on <site>" (src/site-policy.ts): only his own chat message sets this. */
+  actAsMe?: string[];
   /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */
   eaBookingLink?: string;
   /** Where follow-up nudges and hold releases are reported: the chat Google was connected from. */
