@@ -35,7 +35,7 @@ What did Sam last say about pricing?
 Prep me for my 10am.
 connect Google   /google   /google disconnect
 show job 93137e
-/board   /jobs   /status   /pending   /reset   /help   /uploads
+/board   /reports   /jobs   /status   /pending   /reset   /help   /uploads
 /resume   retry 3552e7
 /spend   /spend yesterday
 What DNS records does clearexchange.ai have?
@@ -83,6 +83,11 @@ Send `/board` and you get a link to a page on this service you can bookmark. Eve
 Beyond that, it shows what is running now (each job's title, its id, how long it has been going and when its worker last did anything), what is queued (in order, its place on its repository's queue, the job it is waiting behind, or the queue hold after a credit or key failure), what finished in the last day (the outcome, with a link to a saved output or a pull request where the job already has one) and the next run of each schedule, in London time. It refreshes itself every ten seconds. `docs/jobs-board/` has the page before and after the cards were explained, at phone width.
 
 The link carries a long-lived token the service mints itself and keeps in the store; sending `/board` again gives the same link, and the token is never logged. Nothing on the page changes anything: it is one read-only route, with no button, no form, no script and no model call, so it cannot cancel, resume, retry, spend or merge anything. The expand control is plain HTML, so nothing loads when you tap it. It deliberately shows no spend, cost, budget or cap figure anywhere, and never a job's output, transcript, file path, secret or anything from your mail, calendar or uploaded files. A description is derived from the brief in one place (`src/job-descriptions.ts`): redacted with the service's own redaction, stripped of markup and link addresses, with the machine sections of a generated brief (a pasted report, the scheduler's own note) dropped and the whole thing capped, so a brief is never rendered whole and a token in one never reaches the page. Titles, kind, status, timings, repository, ids, that description and a link that already exists are all that is on it.
+
+### Reading a saved report on your phone
+Send `/reports` and you get a link to another read-only page you can bookmark. It lists every saved job output newest first, with its title, the kind of job that wrote it, the date in London and the job id, and tapping one opens it as a proper page: headings, paragraphs, lists, tables, code blocks and links, laid out for a phone, instead of raw Markdown. Where a worker saved a self-contained HTML page beside its Markdown (some briefs ask for one), that page is what opens.
+
+It has its own long-lived token, minted by the service and kept in the store, so `/board` and its link are untouched; sending `/reports` again gives the same link, and the token is never logged. `docs/reports-pages/` shows what both pages look like. Nothing on either page changes anything: one GET route each, no form, no model call. The pages carry no script, no cookie, no tracking and no request to anywhere, and a report's own text is escaped before it is shown, so a raw HTML tag or a script inside an output is shown as words and never runs. Exactly the same things are kept out of it as out of the private outputs repository: an assistant (ea) or CV output, an output with no job record, and anything derived from a file you uploaded are not there at all.
 
 ## Set up in five steps
 
