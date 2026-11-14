@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+process.env.ENGINEER_TOTAL = "100"; // these tests are about per-repository slots; test/restarts covers the machine-wide limit
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-parallel-"));
 // Real checkouts, so the copies the jobs are given are real git worktrees.
@@ -37,7 +38,7 @@ const waitFor = async (pred: () => boolean, ms = 30_000) => {
   }
 };
 
-function setup(slots = 2, copyWaitMs = 5) {
+function setup(slots = 2, copyWaitMs = 5, total?: number) {
   const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-par-")));
   const messenger = new ConsoleMessenger();
   const gates = new Map<string, (r: RunResult) => void>();
@@ -48,7 +49,7 @@ function setup(slots = 2, copyWaitMs = 5) {
       started.push({ key, cwd: o.cwd, prompt: `${o.systemPrompt ?? ""}\n${o.prompt}` });
       gates.set(key, resolve);
     });
-  const jobs = new JobRunner(store, messenger, runner, undefined, { slots, liveness: { copyWaitMs } });
+  const jobs = new JobRunner(store, messenger, runner, undefined, { slots, total, liveness: { copyWaitMs } });
   return { store, jobs, started, finish: (key: string) => gates.get(key)!({ text: `${key} done` }) };
 }
 
@@ -261,4 +262,20 @@ test("a job that cannot be given a copy of its own waits for the checkout rather
   } finally {
     fs.unlinkSync(blocked);
   }
+});
+
+test("a machine-wide limit holds across repositories, and a freed slot starts another repository's queue", async () => {
+  const { store, jobs, started, finish } = setup(2, 5, 3);
+  const p1 = jobs.start("engineer", "A1", FOUNDER, "product");
+  const p2 = jobs.start("engineer", "A2", FOUNDER, "product");
+  const s1 = jobs.start("engineer", "B1", FOUNDER, "self");
+  const s2 = jobs.start("engineer", "B2", FOUNDER, "self");
+  for (const j of [p1, p2, s1]) assert.equal(store.getJob(j.id)!.status, "running");
+  assert.equal(s2.status, "queued", "the self repository has room, but the machine does not");
+  assert.ok(s2.waitingFor, "and it says which job it waits behind");
+  await waitFor(() => started.length >= 3);
+  assert.equal(started.some((s) => s.key === "B2"), false);
+  finish("A1");
+  await waitFor(() => started.some((s) => s.key === "B2"));
+  for (const k of ["A2", "B1", "B2"]) finish(k);
 });

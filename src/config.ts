@@ -308,6 +308,12 @@ export const config = {
    * default, at most ENGINEER_SLOTS_MAX (8), and anything above that is refused and queued instead.
    */
   engineerSlots: engineerSlots().slots,
+  /**
+   * Engineering jobs that may run at once across every repository together, whatever ENGINEER_SLOTS
+   * says per repository. The machine (4 shared cores, 4 GB) stopped answering its health check on
+   * 14 Nov 2026 when 4 per repository across 5 repositories were allowed. ENGINEER_TOTAL, default 3.
+   */
+  engineerTotal: Math.max(1, Math.floor(positive(process.env.ENGINEER_TOTAL, 3))),
   jobStallMinutes: positive(process.env.JOB_STALL_MINUTES, 30),
   /**
    * Reused installs for engineering jobs (src/setup.ts): one `npm ci` per package-lock.json, kept on
