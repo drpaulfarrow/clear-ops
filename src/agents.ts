@@ -1,4 +1,4 @@
-import { query, type AgentDefinition, type McpServerConfig, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
@@ -89,6 +89,31 @@ async function workerEnv(direct = false): Promise<NodeJS.ProcessEnv> {
   return env;
 }
 
+/**
+ * The provider's own id for one model call, from the frame the SDK hands us. On OpenRouter's
+ * Anthropic-compatible endpoint the frame carries `request_id` (`gen-...`), which is the id its
+ * `GET /api/v1/generation` prices; `message.id` is the Anthropic-shaped `msg-...` and is not a
+ * generation id, so reading it left every cap unable to fire. Exported so a test can feed it a frame
+ * shaped exactly like the SDK's.
+ */
+export function callIdOf(message: Pick<SDKAssistantMessage, "request_id">): string | undefined {
+  const id = message.request_id;
+  return typeof id === "string" && id.trim() ? id : undefined;
+}
+
+/**
+ * One assistant frame's cost tracking: the generation id goes to the meter, which is the only place a
+ * job's real spend is counted (src/realcost.ts). Tracking it must never break the run.
+ */
+export function noteCallCost(message: SDKAssistantMessage, meter: CostMeter | undefined): void {
+  if (!meter) return;
+  try {
+    meter.note(callIdOf(message));
+  } catch {
+    // Tracking a job's real cost must never break the run.
+  }
+}
+
 /** Runs one agent turn with the Claude Agent SDK and returns the final text. */
 export const sdkRunner: AgentRunner = async (o) => {
   let text = "";
@@ -152,15 +177,7 @@ export const sdkRunner: AgentRunner = async (o) => {
         }
       }
       if (message.type === "assistant" && message.error && !message.parent_tool_use_id) sdkError = message.error;
-      // Each reply carries the provider's own id for that call: the runner sums what the provider
-      // charged for them, which is the only figure a job's cap is ever counted in (src/realcost.ts).
-      if (message.type === "assistant" && o.costMeter) {
-        try {
-          o.costMeter.note(message.message.id);
-        } catch {
-          // Tracking a job's real cost must never break the run.
-        }
-      }
+      if (message.type === "assistant") noteCallCost(message, o.costMeter);
       if (message.type === "assistant" && o.onToolUse && !message.parent_tool_use_id) {
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;

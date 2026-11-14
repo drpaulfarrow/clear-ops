@@ -3,7 +3,7 @@ import { safeVaultDomains, vault } from "./vault.js";
 import { BROWSE_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
-import { runRoute } from "./llm.js";
+import { provider, runRoute } from "./llm.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -111,6 +111,20 @@ function withPurchase(kept: JobPermit[], granted: JobPermit[] | undefined): JobP
  * fetch, so the accounting is covered offline.
  */
 export type CostWatchFactory = (capUsd: number | undefined, stop: () => void) => JobCostWatch;
+
+/**
+ * Which money limit one run is given. On OpenRouter the SDK gets only its own runaway guard and the
+ * job's cap is counted from the provider's own figures; on Anthropic the SDK's list-price cost is the
+ * bill, so the job's cap itself is handed to the SDK.
+ */
+interface RunCap {
+  /** The figure handed to the Agent SDK as `maxBudgetUsd`, in the estimate it prices it from. */
+  sdkUsd: number;
+  /** True when this run goes to Anthropic's API directly, where the SDK's cost is the bill. */
+  onAnthropic: boolean;
+  /** True when the limit that stopped the run was the SDK's own runaway guard, not a cap Paul set. */
+  isGuard: boolean;
+}
 
 export class JobRunner {
   private running = new Set<string>();
@@ -632,6 +646,7 @@ export class JobRunner {
     this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at });
     let web: WebTools | undefined;
     let progress: JobProgress | undefined;
+    let costMeter: JobCostWatch | undefined;
     try {
       // A design round after a merge looks only once the product's deploy of that merge is live.
       if (job.awaitDeploy) {
@@ -679,19 +694,32 @@ export class JobRunner {
       const purchasePermit = buying ? `\n\n${PURCHASE_NOTE}` : "";
       const focus = job.kind !== "engineer" && job.kind !== "maintain" && job.kind !== "create_agent" ? repoFocus(job.target, job.kind) : "";
       const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
-      // Every run is capped; deep research gets more turns and budget than the default.
+      // Every run is capped on turns; deep research gets more of them.
       const limits = runLimits(job.kind, job.depth);
-      // The job's own cap, counted in the provider's money, call by call (src/realcost.ts): the sum of
-      // what OpenRouter charged, read from its own figures. A job is stopped for budget only when those
-      // figures have passed the cap, so it is never stopped while it has really spent pennies. When the
-      // provider cannot be read, the cap simply does not fire and the message says there is no figure.
-      const costMeter = this.costWatch(limits.realBudgetUsd, () => live.abort.abort());
+      // Which money limit this run is given, and on which provider.
+      //
+      // On OpenRouter the job's own cap is counted in the provider's money, call by call
+      // (src/realcost.ts): the sum of what OpenRouter charged, read from its own figures. A job is
+      // stopped for budget only when those figures have passed the cap, so it is never stopped while
+      // it has really spent pennies, and when the provider cannot be read the cap simply does not fire
+      // and the message says there is no figure. The SDK is given only its own runaway guard, priced
+      // from its rounded-up estimate, which is not a bill.
+      //
+      // On Anthropic directly there is no per-call price to read and the SDK's list-price cost is what
+      // is billed, so the job's own cap is handed to the SDK itself and the measure is named as
+      // Anthropic's own list price.
+      const route = runRoute(job, spec.model);
+      const onAnthropic = route.provider === "anthropic" || provider() === "anthropic";
+      const cap: RunCap = onAnthropic
+        ? { sdkUsd: limits.realBudgetUsd ?? limits.maxBudgetUsd, onAnthropic, isGuard: limits.realBudgetUsd === undefined }
+        : { sdkUsd: limits.maxBudgetUsd, onAnthropic, isGuard: true };
+      costMeter = this.costWatch(cap.onAnthropic ? undefined : limits.realBudgetUsd, () => live.abort.abort());
       progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
       const shown = progress;
       const opts = {
         prompt: `${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
         systemPrompt: spec.prompt,
-        ...runRoute(job, spec.model),
+        ...route,
         cwd: spec.cwd,
         allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...web.allowed],
         disallowedTools: spec.disallowedTools,
@@ -700,8 +728,9 @@ export class JobRunner {
         mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers, ...(buying ? { [PURCHASE_SERVER]: buying } : {}) } : undefined,
         additionalDirectories: dirs,
         maxTurns: limits.maxTurns,
-        // The SDK's own guard, priced from its rounded-up estimate: a runaway trip, never the job's cap.
-        maxBudgetUsd: limits.maxBudgetUsd,
+        // The SDK's own guard (a runaway trip, never the job's cap), or the job's own cap on Anthropic,
+        // where the SDK's list-price cost is the bill.
+        maxBudgetUsd: cap.sdkUsd,
         costMeter,
         abortController: live.abort,
         onActivity: () => this.touch(id, live),
@@ -739,7 +768,7 @@ export class JobRunner {
       live.finishing = true;
       // Stopped for money: the job's own cap, counted in the provider's money, or the SDK's runaway
       // guard. Recorded as failed with the honest figures, and nothing follows it.
-      const broke = await this.budgetStop(result, costMeter, limits);
+      const broke = await this.budgetStop(result, costMeter, limits, cap);
       if (broke) {
         if (result.costUsd !== undefined) this.store.updateJob(id, { costUsd: result.costUsd });
         throw new RunFailedError(broke);
@@ -827,6 +856,8 @@ export class JobRunner {
       else await this.recordFailure(job, failureFromError(err));
     } finally {
       await progress?.finish().catch(() => undefined);
+      // No more per-call price reads for a job that has ended, however it ended.
+      costMeter?.stop();
       // The job's browser, if it opened one, goes with it.
       await web?.close().catch(() => undefined);
       // A worker that would not let go after a stop was already finished without it; nothing more here.
@@ -1073,20 +1104,30 @@ export class JobRunner {
   /**
    * A run stopped for money, with the figures that say which measure stopped it and what it really
    * spent. The job's own cap is counted in the provider's money (src/realcost.ts); the SDK's guard is
-   * counted in its own estimate, and is named as an estimate rather than quoted as a bill. When the
-   * provider's figure cannot be read, that is said, and the estimate is not offered in its place.
+   * counted in its own estimate, and is named as an estimate rather than quoted as a bill. On
+   * Anthropic there is no per-call price to read and the SDK's list-price cost is the bill, so the
+   * run's own cost is the figure and the measure is named as Anthropic's own list price. When the
+   * figure cannot be read, that is said, and the estimate is not offered in its place.
    */
-  private async budgetStop(result: RunResult, meter: JobCostWatch, limits: RunLimits): Promise<RunFailure | undefined> {
+  private async budgetStop(result: RunResult, meter: JobCostWatch, limits: RunLimits, cap: RunCap): Promise<RunFailure | undefined> {
     const past = meter.exceededBy();
     const guard = result.error?.kind === "budget";
     if (!past && !guard) return undefined;
+    if (!past && cap.onAnthropic) {
+      // The SDK's list price is what is billed here, so the run's own cost is the honest figure and
+      // there is no per-call endpoint to ask. The cap it passed is the one the SDK was given.
+      const spentUsd = result.costUsd;
+      const detail = `${result.error?.detail ?? "The run passed its budget."} Anthropic's own list-price cost for the run: ${spentUsd !== undefined ? `$${usdAmount(spentUsd)}` : "not reported"}.`;
+      const budget: BudgetStop = { ...(spentUsd !== undefined ? { spentUsd } : {}), capUsd: cap.sdkUsd, measure: "anthropic", ...(cap.isGuard ? { guard: true } : {}) };
+      return { kind: "budget", detail, budget };
+    }
     const cost = await meter.settle();
     const spentUsd = cost.source === "provider" ? cost.usd : undefined;
     const unreadable = cost.source === "provider" ? Math.max(0, cost.calls - cost.read) : 0;
     const figures = { ...(spentUsd !== undefined ? { spentUsd } : {}), ...(unreadable ? { unreadable } : {}) };
     const budget: BudgetStop = past
       ? { ...figures, capUsd: limits.realBudgetUsd ?? 0, measure: "provider" }
-      : { ...figures, capUsd: limits.maxBudgetUsd, measure: "estimate" };
+      : { ...figures, capUsd: limits.maxBudgetUsd, measure: "estimate", guard: true };
     const detail = `${result.error?.detail ?? "The run passed the cap on what it had really spent."} The provider's own figure for the run: ${spentUsd !== undefined ? `$${usdAmount(spentUsd)}` : "could not be read"}.`;
     return { kind: "budget", detail, budget };
   }

@@ -34,6 +34,8 @@ export interface BudgetStop {
   capUsd: number;
   /** Which measure stopped it: the provider's own figures, Anthropic's list price, or the SDK's estimate. */
   measure: "provider" | "anthropic" | "estimate";
+  /** True when the limit that stopped it was the SDK's own runaway guard rather than a cap Paul set. */
+  guard?: boolean;
 }
 
 export interface RunFailure {
@@ -162,9 +164,16 @@ export function budgetReason(b: BudgetStop | undefined): string {
   const spent = b.spentUsd !== undefined ? `$${usdAmount(b.spentUsd)}` : undefined;
   const short = b.unreadable ? ` (a lower bound: ${b.unreadable} of its calls could not be priced)` : "";
   if (b.measure === "estimate") {
+    // The SDK's guard on OpenRouter: priced from the rounded-up estimate, which is not a bill.
     return spent
       ? `it was stopped by the SDK's own runaway guard of ${cap}, an internal estimate and not a bill, by which time OpenRouter had really charged ${spent}`
       : `it was stopped by the SDK's own runaway guard of ${cap}, an internal estimate and not a bill, and OpenRouter's figure for it could not be read`;
+  }
+  if (b.guard) {
+    // The same guard on Anthropic, where the SDK's list price is what is billed, so the figure is real.
+    return spent
+      ? `it was stopped by the SDK's own runaway guard of ${cap}, priced at Anthropic's own list price, by which time it had really spent ${spent}`
+      : `it was stopped by the SDK's own runaway guard of ${cap}, priced at Anthropic's own list price, and the real figure could not be read, so there is no amount to quote`;
   }
   const measure = b.measure === "anthropic" ? "Anthropic's own list price" : "OpenRouter's own figures";
   return spent

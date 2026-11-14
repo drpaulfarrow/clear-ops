@@ -5,11 +5,14 @@ import os from "node:os";
 import path from "node:path";
 
 // One engineer slot, one founder, and a small real cap, so the cap is counted in the provider's money
-// and the whole path (meter, stop, job record, message) can be driven offline.
+// and the whole path (meter, stop, job record, message) can be driven offline. The workforce runs on
+// OpenRouter, which is where a job's cap is counted from the provider's own figures, so this file runs
+// in that mode too; the Anthropic-direct case is covered by one test of its own below.
 process.env.ENGINEER_SLOTS = "1";
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-realcost-"));
 process.env.ENGINEER_BUDGET_USD = "0.25";
+process.env.OPENROUTER_API_KEY = "test-key";
 
 const { RealCostMeter, usdAmount } = await import("../src/realcost.js");
 const { Store } = await import("../src/store.js");
@@ -17,7 +20,8 @@ const { JobRunner } = await import("../src/jobs.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 const { budgetReason, failureText } = await import("../src/failures.js");
 const { config } = await import("../src/config.js");
-const { runLimits } = await import("../src/agents.js");
+const { callIdOf, noteCallCost, runLimits } = await import("../src/agents.js");
+const { SpendMeter } = await import("../src/spend.js");
 import type { AgentRunner, RunOptions, RunResult } from "../src/agents.js";
 import type { JobCostWatch } from "../src/realcost.js";
 
@@ -39,8 +43,26 @@ function fakeProvider(costs: Record<string, number | "404" | "400" | "429"> = { 
   return { fetch, asked };
 }
 
+/**
+ * A generation endpoint that has not published a call's record yet: OpenRouter answers 404 for a
+ * moment after a call finishes and prices it a little later. The first `notReady` reads 404.
+ */
+function slowProvider(costs: Record<string, number> = { gen1: 0.02 }, notReady = 1) {
+  const asked: string[] = [];
+  const counts = new Map<string, number>();
+  const fetch: typeof globalThis.fetch = async (input) => {
+    const id = decodeURIComponent(new URL(String(input)).searchParams.get("id") ?? "");
+    asked.push(id);
+    const n = (counts.get(id) ?? 0) + 1;
+    counts.set(id, n);
+    if (n <= notReady) return new Response("{}", { status: 404 });
+    return new Response(JSON.stringify({ data: { id, total_cost: costs[id] ?? 0 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  return { fetch, asked };
+}
+
 const meterFor = (fetch: typeof globalThis.fetch, capUsd?: number, onExceeded: (cost: { usd: number }) => void = () => undefined) =>
-  new RealCostMeter({ apiKey: "test-key", fetch, capUsd, onExceeded, gapMs: 0, settleMs: 500, retryMs: 5, timeoutMs: 500, warn: () => undefined });
+  new RealCostMeter({ apiKey: "test-key", fetch, capUsd, onExceeded, gapMs: 0, settleMs: 500, settlePassMs: 5, pendingSweepMs: 5, timeoutMs: 500, warn: () => undefined });
 
 test("a job's cost is the sum of the provider's own per-call figures, each id read once", async () => {
   const { fetch, asked } = fakeProvider({ gen1: 0.0012, gen2: 0.0031 });
@@ -122,6 +144,49 @@ test("without a provider key nothing is read and the figure is simply not availa
   assert.equal(meter.exceededBy(), undefined);
 });
 
+test("a call the provider has not published yet is read again, not given up on", async () => {
+  // The record for a call appears a little after it finishes, so a 404 straight after the call is
+  // ordinary: the id stays pending and is priced on a later read.
+  const { fetch, asked } = slowProvider({ gen1: 0.02 }, 2);
+  const meter = meterFor(fetch);
+  meter.note("gen1");
+  const cost = await meter.settle();
+  assert.equal(cost.source, "provider");
+  assert.equal(cost.usd, 0.02);
+  assert.equal(asked.length, 3, "asked again until the provider published it");
+});
+
+test("a cap fires during the run as soon as the provider publishes the calls", async () => {
+  const { fetch } = slowProvider({ gen1: 0.3 }, 1);
+  const stopped: number[] = [];
+  const meter = meterFor(fetch, 0.25, (cost) => stopped.push(cost.usd));
+  meter.note("gen1");
+  await waitFor(() => meter.exceededBy() !== undefined, 2000);
+  assert.deepEqual(stopped, [0.3], "the run is stopped once the real figure passes the cap");
+  meter.stop();
+});
+
+test("the id the meter is given is the provider's generation id, never the message id", () => {
+  // The frame the SDK hands the runner for a real call, as OpenRouter's Anthropic-compatible endpoint
+  // sends it: `message.id` is the Anthropic-shaped msg_..., `request_id` is the gen-... its own
+  // pricing endpoint takes. Reading the wrong one left every cap unable to fire.
+  const seen: Array<string | undefined> = [];
+  const meter = { note: (id?: string) => seen.push(id) };
+  const frame = {
+    type: "assistant",
+    message: { id: "msg_BGhiVlVXGAkILktchYfr" },
+    request_id: "gen-1794609616-BGhiVlVXGAkILktchYfr",
+    session_id: "s1",
+    uuid: "u1",
+    parent_tool_use_id: null,
+  } as unknown as Parameters<typeof noteCallCost>[0];
+  noteCallCost(frame, meter);
+  assert.deepEqual(seen, ["gen-1794609616-BGhiVlVXGAkILktchYfr"]);
+  assert.equal(callIdOf({ request_id: "  " }), undefined, "a blank id is not a call");
+  noteCallCost({ ...frame, request_id: undefined } as unknown as Parameters<typeof noteCallCost>[0], meter);
+  assert.deepEqual(seen, ["gen-1794609616-BGhiVlVXGAkILktchYfr", undefined], "a frame with no request id is left uncounted");
+});
+
 test("usdAmount keeps a fraction of a cent visible", () => {
   assert.equal(usdAmount(0.0042), "0.0042");
   assert.equal(usdAmount(0.3), "0.30");
@@ -144,6 +209,19 @@ test("the stopped-for-budget sentence states the spend, the cap and the measure"
     "it was stopped by the SDK's own runaway guard of $1000.00, an internal estimate and not a bill, by which time OpenRouter had really charged $4.20",
   );
   assert.match(budgetReason({ capUsd: 1000, measure: "estimate" }), /could not be read/);
+  // On Anthropic the SDK's list-price cost is the bill, so the same sentence names it as such.
+  assert.equal(
+    budgetReason({ spentUsd: 12.4, capUsd: 25, measure: "anthropic" }),
+    "it was stopped for budget with Anthropic's own list price at $12.40 against the $25.00 cap for this kind",
+  );
+  assert.equal(
+    budgetReason({ spentUsd: 25.5, capUsd: 1000, measure: "anthropic", guard: true }),
+    "it was stopped by the SDK's own runaway guard of $1000.00, priced at Anthropic's own list price, by which time it had really spent $25.50",
+  );
+  assert.equal(
+    budgetReason({ capUsd: 1000, measure: "anthropic", guard: true }),
+    "it was stopped by the SDK's own runaway guard of $1000.00, priced at Anthropic's own list price, and the real figure could not be read, so there is no amount to quote",
+  );
 });
 
 /** A runner that reports one call, then waits to be stopped the way the SDK does. */
@@ -162,7 +240,10 @@ function stoppingRunner(ids = ["gen1"]): AgentRunner {
 function setup(run: AgentRunner, costWatch?: (capUsd: number | undefined, stop: () => void) => JobCostWatch) {
   const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-realcost-run-")));
   const messenger = new ConsoleMessenger();
-  const jobs = new JobRunner(store, messenger, run, undefined, { failureNotices: { batchMs: 20, cooldownMs: 50 }, ...(costWatch ? { costWatch } : {}) });
+  // The spend meter is off: these tests are about a job's own cap, and nothing here may reach the
+  // network for a usage figure.
+  const spend = new SpendMeter({ apiKey: "" });
+  const jobs = new JobRunner(store, messenger, run, undefined, { failureNotices: { batchMs: 20, cooldownMs: 50 }, spend, ...(costWatch ? { costWatch } : {}) });
   return { store, messenger, jobs };
 }
 
@@ -215,8 +296,9 @@ test("a run stopped by the SDK's runaway guard names the guard as the measure, a
 
 test("when the real figure cannot be read the message says so rather than quoting the estimate", async () => {
   const run: AgentRunner = async () => ({ text: "", costUsd: 1000.5, error: { kind: "budget", detail: "The agent stopped early (error_max_budget_usd), which is the SDK's own runaway guard, not a job's cap." } });
-  // The default meter: no OpenRouter key in the test environment, so there is no figure to read.
-  const { store, messenger, jobs } = setup(run);
+  // A meter with no provider to ask: there is no per-call figure to read, and the estimate is not
+  // offered in its place.
+  const { store, messenger, jobs } = setup(run, (capUsd, stop) => new RealCostMeter({ apiKey: "", capUsd, onExceeded: stop }));
   const job = jobs.start("write", "No figure", FOUNDER, "product");
   await waitFor(() => store.getJob(job.id)!.status === "failed");
   await jobs.failures.flushAll();
@@ -226,9 +308,11 @@ test("when the real figure cannot be read the message says so rather than quotin
   assert.doesNotMatch(notice.text, /\$1000\.50/);
 });
 
-test("a run under its cap finishes as usual, and the guard is what a job is given", async () => {
+test("a run under its cap finishes as usual, and the guard is what the SDK is given on OpenRouter", async () => {
   const { fetch } = fakeProvider({ gen1: 0.02 });
+  let given: number | undefined;
   const run: AgentRunner = async (o) => {
+    given = o.maxBudgetUsd;
     o.costMeter?.note("gen1");
     return { text: "Report.\n\n<message_to_paul>\nAll done, nothing needed from you.\n</message_to_paul>", costUsd: 3 };
   };
@@ -236,6 +320,33 @@ test("a run under its cap finishes as usual, and the guard is what a job is give
   const job = jobs.start("engineer", "Under the cap", FOUNDER, "self");
   await waitFor(() => store.getJob(job.id)!.status === "done");
   assert.equal(store.getJob(job.id)!.failure, undefined);
+  assert.equal(given, config.sdkRunawayBudgetUsd, "on OpenRouter the SDK gets only the runaway guard");
+});
+
+test("on Anthropic the SDK is given the job's own cap, and the message names Anthropic's list price", async () => {
+  // The ea runs on Anthropic directly, and an Anthropic-only deployment runs everything there: no
+  // per-call price to read, and the SDK's list-price cost is what is billed, so the job's cap is
+  // handed to the SDK itself rather than being lost.
+  const key = config.openrouter.apiKey;
+  config.openrouter.apiKey = "";
+  try {
+    let given: number | undefined;
+    const run: AgentRunner = async (o) => {
+      given = o.maxBudgetUsd;
+      return { text: "", costUsd: 12.4, error: { kind: "budget", detail: "The agent stopped early (error_max_budget_usd)." } };
+    };
+    const { store, messenger, jobs } = setup(run);
+    const job = jobs.start("engineer", "Anthropic cap", FOUNDER, "self");
+    await waitFor(() => store.getJob(job.id)!.status === "failed");
+    assert.equal(given, config.engineerBudgetUsd, "the job's own cap is the figure the SDK is given on Anthropic");
+    assert.equal(store.getJob(job.id)!.failure, "budget");
+    await jobs.failures.flushAll();
+    const notice = messenger.sent.find((s) => s.text.startsWith("Failed:"))!;
+    assert.match(notice.text, /Anthropic's own list price at \$12\.40 against the \$0\.25 cap for this kind/);
+    assert.doesNotMatch(notice.text, /not a bill/, "on Anthropic the SDK's figure is the bill, not an estimate");
+  } finally {
+    config.openrouter.apiKey = key;
+  }
 });
 
 test("the SDK's guard is the only money figure the SDK is given, and the cap is separate", () => {

@@ -10,15 +10,20 @@
  * A job's own cap is counted here instead, in the money the provider actually charged. OpenRouter
  * reports the cost of each request at `GET /api/v1/generation?id=<generation id>`, which takes the same
  * inference key the models already use, so there is no new secret and no new dependency. The id is the
- * one on the response the SDK hands us: it is recorded for every model call in the run and priced once
+ * `request_id` on the reply the SDK hands us (`gen-...`; `message.id` is the Anthropic-shaped
+ * `msg_...` and is not a generation id): it is recorded for every model call in the run and priced once
  * each, and the job's spend so far is the sum of the figures that have been read.
  *
- * Two rules, both deliberate. A figure is only ever the provider's, so an id it will not price (or an
- * endpoint that cannot be reached) leaves that call uncounted, makes the total a lower bound and is
- * said plainly in the reading, rather than falling back to the estimate. And because the sum can only
- * under-count, a cap counted this way can never stop a job that has really spent pennies: a job is
- * stopped for money when the provider's own figures have passed the cap, or when the SDK's guard
- * fires, and then the message names the guard as the measure, because that is what happened.
+ * Three rules, all deliberate. A figure is only ever the provider's, so a call it will not price (or
+ * an endpoint that cannot be reached) leaves that call uncounted, makes the total a lower bound and is
+ * said plainly in the reading, rather than falling back to the estimate. A call the provider has not
+ * published yet (404: its record appears a little after the call finishes) is not given up on: it stays
+ * pending, is read again every `GENERATION_PENDING_SWEEP_MS` while a cap is counting, and is given
+ * several passes over tens of seconds at the end of a run before the figure is called unreadable, so a
+ * cap Paul sets actually fires. And because the sum can only under-count, a cap counted this way can
+ * never stop a job that has really spent pennies: a job is stopped for money when the provider's own
+ * figures have passed the cap, or when the SDK's guard fires, and then the message names the measure
+ * that actually stopped it.
  *
  * Reading every call is one request per call, so nothing is read unless a cap needs a running total;
  * when a run ends for money its calls are priced once, there and then.
@@ -32,8 +37,14 @@ export const GENERATION_TIMEOUT_MS = 5_000;
 export const GENERATION_GAP_MS = 120;
 /** How long one pass over a job's calls may take at the end of a run. */
 export const GENERATION_SETTLE_MS = 20_000;
-/** A generation is often priced a moment after it finishes, so one retry is worth the wait. */
-export const GENERATION_RETRY_MS = 1_500;
+/** How long to wait between those passes, while the provider publishes the records it had not yet. */
+export const GENERATION_SETTLE_PASS_MS = 15_000;
+/** How many passes the end of a run makes over calls the provider had not priced yet. */
+export const GENERATION_SETTLE_PASSES = 3;
+/** While a cap is counting, how often a call the provider had not priced yet is read again. */
+export const GENERATION_PENDING_SWEEP_MS = 15_000;
+/** How many times one call may be read before it is given up on, so a sweep cannot run for ever. */
+export const GENERATION_MAX_ATTEMPTS = 4;
 /** The most calls one run may have priced: a guard on the queue, far above any real run. */
 export const MAX_GENERATION_READS = 2_000;
 
@@ -62,6 +73,8 @@ export interface JobCostWatch extends CostMeter {
   exceededBy(): RealCost | undefined;
   /** Waits (bounded) for the outstanding reads and returns what is known about this job's calls. */
   settle(): Promise<RealCost>;
+  /** Stops the in-run sweeps: the job has ended, so nothing more is read for it. */
+  stop(): void;
 }
 
 export interface RealCostOptions {
@@ -76,7 +89,10 @@ export interface RealCostOptions {
   timeoutMs?: number;
   gapMs?: number;
   settleMs?: number;
-  retryMs?: number;
+  settlePassMs?: number;
+  settlePasses?: number;
+  pendingSweepMs?: number;
+  maxAttempts?: number;
   /** The job's cap in the provider's money. Unset: nothing is read until the run ends for money. */
   capUsd?: number;
   /** Called once, when the sum of what has been read passes the cap. The runner stops the run. */
@@ -97,19 +113,30 @@ export class RealCostMeter implements JobCostWatch {
   private readonly timeoutMs: number;
   private readonly gapMs: number;
   private readonly settleMs: number;
-  private readonly retryMs: number;
+  private readonly settlePassMs: number;
+  private readonly settlePasses: number;
+  private readonly pendingSweepMs: number;
+  private readonly maxAttempts: number;
   private readonly capUsd?: number;
   private readonly onExceeded?: (cost: RealCost) => void;
   private readonly seen = new Set<string>();
   private readonly ids: string[] = [];
   private readonly amounts = new Map<string, number>();
+  /** Calls the provider has not published a figure for yet: read again, never given up on at once. */
+  private readonly pending = new Set<string>();
+  /** Calls there is no figure for and no point asking again about. */
   private readonly unpriced = new Set<string>();
+  private readonly attempts = new Map<string, number>();
   private chain: Promise<void> = Promise.resolve();
   private live: boolean;
   /** Set when the endpoint will not price these ids at all, so the rest of the run does not ask again. */
   private hopeless?: string;
   private exceeded?: RealCost;
   private warned = false;
+  /** Reads made, so a sweep over ids the provider never publishes cannot go on for ever. */
+  private reads = 0;
+  private sweepTimer?: ReturnType<typeof setTimeout>;
+  private closed = false;
 
   constructor(options: RealCostOptions = {}) {
     this.apiKey = options.apiKey ?? config.openrouter.apiKey;
@@ -121,7 +148,10 @@ export class RealCostMeter implements JobCostWatch {
     this.timeoutMs = options.timeoutMs ?? GENERATION_TIMEOUT_MS;
     this.gapMs = options.gapMs ?? GENERATION_GAP_MS;
     this.settleMs = options.settleMs ?? GENERATION_SETTLE_MS;
-    this.retryMs = options.retryMs ?? GENERATION_RETRY_MS;
+    this.settlePassMs = options.settlePassMs ?? GENERATION_SETTLE_PASS_MS;
+    this.settlePasses = options.settlePasses ?? GENERATION_SETTLE_PASSES;
+    this.pendingSweepMs = options.pendingSweepMs ?? GENERATION_PENDING_SWEEP_MS;
+    this.maxAttempts = options.maxAttempts ?? GENERATION_MAX_ATTEMPTS;
     this.capUsd = options.capUsd;
     this.onExceeded = options.onExceeded;
     // A running total is only needed while a cap is being counted against it.
@@ -139,11 +169,20 @@ export class RealCostMeter implements JobCostWatch {
     if (!id || this.seen.has(id)) return;
     this.seen.add(id);
     this.ids.push(id);
-    if (this.live && !this.hopeless && this.ids.length <= MAX_GENERATION_READS) this.enqueue(id);
+    if (this.live && !this.closed && !this.hopeless && this.reads < MAX_GENERATION_READS) this.enqueue(id);
   }
 
   exceededBy(): RealCost | undefined {
     return this.exceeded;
+  }
+
+  /** Stops the in-run sweeps. Called when the job's run is over, however it ended. */
+  stop(): void {
+    this.closed = true;
+    if (this.sweepTimer) {
+      clearTimeout(this.sweepTimer);
+      this.sweepTimer = undefined;
+    }
   }
 
   /** The figures read so far. Cheap: no call is made here. */
@@ -177,17 +216,21 @@ export class RealCostMeter implements JobCostWatch {
   }
 
   /**
-   * Prices every call this run has not been charged for yet, waits (bounded) for the answers, retries
-   * whatever was not ready once, and returns the total. Never throws.
+   * Prices every call this run has not been charged for yet, waits (bounded) for the answers, and
+   * reads again, in bounded passes over tens of seconds, whatever the provider had not published yet
+   * (its record for a call appears a little after the call finishes). Never throws.
    */
   async settle(): Promise<RealCost> {
+    this.stop();
     if (!this.enabled || this.hopeless) return this.cost();
     for (const id of this.ids) if (!this.amounts.has(id) && !this.unpriced.has(id)) this.enqueue(id);
     await this.awaitChain(this.settleMs);
-    if (!this.hopeless && this.unpriced.size) {
-      await this.sleep(this.retryMs);
-      for (const id of [...this.unpriced]) {
-        this.unpriced.delete(id);
+    for (let pass = 0; pass < this.settlePasses && !this.hopeless; pass++) {
+      const waiting = [...this.pending];
+      if (!waiting.length) break;
+      await this.sleep(this.settlePassMs);
+      for (const id of waiting) {
+        this.pending.delete(id);
         this.enqueue(id);
       }
       await this.awaitChain(this.settleMs);
@@ -211,9 +254,16 @@ export class RealCostMeter implements JobCostWatch {
 
   /** One generation read. Records the figure, or why there is not one, and never throws. */
   private async read(id: string): Promise<void> {
-    if (this.amounts.has(id) || this.hopeless) return;
+    if (this.amounts.has(id) || this.unpriced.has(id) || this.hopeless) return;
+    if (this.reads >= MAX_GENERATION_READS) {
+      this.unpriced.add(id);
+      return;
+    }
     if (this.gapMs > 0) await this.sleep(this.gapMs);
-    if (this.hopeless) return;
+    if (this.amounts.has(id) || this.unpriced.has(id) || this.hopeless) return;
+    const attempt = (this.attempts.get(id) ?? 0) + 1;
+    this.attempts.set(id, attempt);
+    this.reads++;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -223,10 +273,17 @@ export class RealCostMeter implements JobCostWatch {
         signal: controller.signal,
       });
       if (!res.ok) {
-        // 400 or 404: the provider will not price this id (either it is not a generation id, or the
-        // record is not ready). 429: the endpoint is rate limiting the reads. Both are said, once.
-        this.unpriced.add(id);
-        if (res.status === 400 || res.status === 404 || res.status === 429) this.giveUp(res.status);
+        // 400: not a generation id at all, so nothing this run sends will ever be priced. 429: the
+        // endpoint is rate limiting the reads. Both are said once and the asking stops. 404: the
+        // record is simply not published yet, which is normal right after a call, so the id stays
+        // pending and is read again rather than being counted as unpriceable.
+        if (res.status === 400 || res.status === 429) {
+          this.unpriced.add(id);
+          this.giveUp(res.status);
+          return;
+        }
+        // A 404 is the ordinary case right after a call, so it is not worth a warning; anything else is.
+        this.notYet(id, attempt, res.status === 404 ? undefined : `HTTP ${res.status}`);
         return;
       }
       const body = (await res.json()) as { data?: { total_cost?: unknown } };
@@ -235,14 +292,54 @@ export class RealCostMeter implements JobCostWatch {
         this.unpriced.add(id);
         return;
       }
+      this.pending.delete(id);
       this.amounts.set(id, amount);
       this.checkCap();
     } catch (err) {
-      this.unpriced.add(id);
-      if (!this.hopeless) this.warnOnce(`a generation could not be priced (${err instanceof Error ? err.message : String(err)})`);
+      this.notYet(id, attempt, err instanceof Error ? err.message : String(err));
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * The provider has not priced this call yet: keep it pending and read it again later, until it has
+   * been tried enough times to say plainly that there is no figure for it.
+   */
+  private notYet(id: string, attempt: number, why?: string): void {
+    if (attempt >= this.maxAttempts) {
+      this.unpriced.add(id);
+      return;
+    }
+    this.pending.add(id);
+    if (why) this.warnOnce(`a generation could not be priced yet (${why}).`);
+    this.scheduleSweep();
+  }
+
+  /**
+   * While a cap is counting, reads again the calls the provider had not published, so the running
+   * total keeps up and the cap can actually fire on a job that has really spent the money.
+   */
+  private scheduleSweep(): void {
+    if (!this.live || this.closed || this.sweepTimer || this.hopeless || !this.pending.size) return;
+    const timer = setTimeout(() => {
+      this.sweepTimer = undefined;
+      this.sweep();
+    }, this.pendingSweepMs);
+    // A price read must never hold the process open.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.sweepTimer = timer;
+  }
+
+  /** One sweep: read again everything the provider had not published, then wait for the next one. */
+  private sweep(): void {
+    if (this.closed || this.hopeless) return;
+    for (const id of [...this.pending]) {
+      this.pending.delete(id);
+      if (this.reads < MAX_GENERATION_READS) this.enqueue(id);
+      else this.unpriced.add(id);
+    }
+    this.scheduleSweep();
   }
 
   /** The endpoint will not price this run's calls: stop asking, and say why. */
