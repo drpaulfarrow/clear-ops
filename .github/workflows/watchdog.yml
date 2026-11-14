@@ -1,0 +1,78 @@
+# Outside watchdog, requested by Paul on 14 Nov 2026. Runs on GitHub (outside ClearOps) so a
+# crashed ClearOps is still detected: it checks the Fly health page every 5 minutes, and after
+# 3 failed checks in a row it posts to a Discord webhook (DISCORD_WEBHOOK_URL secret) and
+# restarts the app's Fly machines through the existing FLY_API_TOKEN. It posts again once the
+# health check passes. A failed check fails the run, which is how the streak below is counted.
+name: watchdog
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      FLY_APP: ${{ vars.FLY_APP || 'clear-ops' }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check the ClearOps health page
+        id: health
+        run: |
+          ok=false
+          for i in 1 2 3; do
+            if curl -fsS --max-time 20 "https://${FLY_APP}.fly.dev/health" 2>/dev/null | grep -q '"ok": *true'; then ok=true; break; fi
+            echo "Health check attempt $i failed."
+            if [ "$i" -lt 3 ]; then sleep 10; fi
+          done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Count this workflow's recent failures
+        id: streak
+        run: |
+          streak=0
+          for c in $(gh api "repos/${{ github.repository }}/actions/workflows/watchdog.yml/runs?status=completed&per_page=10" --jq '.workflow_runs[].conclusion'); do
+            if [ "$c" = "failure" ]; then streak=$((streak + 1)); else break; fi
+          done
+          echo "previous_failures=$streak" >> "$GITHUB_OUTPUT"
+          echo "Consecutive failed runs before this one: $streak"
+
+      - name: Alert in Discord and restart the Fly machines
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures == '2'
+        continue-on-error: true
+        run: |
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps watchdog: the health check has failed 3 times in a row. Restarting the Fly machine now; I will post here when ClearOps answers again."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
+          else
+            echo "No DISCORD_WEBHOOK_URL secret yet; skipping the Discord post."
+          fi
+          if [ -n "$FLY_API_TOKEN" ]; then
+            for id in $(curl -fsS -H "Authorization: Bearer $FLY_API_TOKEN" "https://api.machines.dev/v1/apps/$FLY_APP/machines" | jq -r '.[].id'); do
+              echo "Restarting Fly machine $id"
+              curl -fsS -X POST -H "Authorization: Bearer $FLY_API_TOKEN" "https://api.machines.dev/v1/apps/$FLY_APP/machines/$id/restart" || echo "Restart call failed for $id."
+            done
+          else
+            echo "No FLY_API_TOKEN secret; cannot restart."
+          fi
+
+      - name: Report the recovery in Discord
+        if: steps.health.outputs.ok == 'true' && steps.streak.outputs.previous_failures >= '3'
+        continue-on-error: true
+        run: |
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps watchdog: the health check passes again - ClearOps is back up."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
+          fi
+
+      - name: Fail the run while ClearOps is down
+        run: |
+          if [ "${{ steps.health.outputs.ok }}" = "true" ]; then echo "ClearOps is healthy."; exit 0; else echo "ClearOps health check failed."; exit 1; fi
