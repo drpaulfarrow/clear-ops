@@ -1,0 +1,118 @@
+# Outside watchdog, requested by Paul on 14 Nov 2026. Runs on GitHub (outside ClearOps) so a
+# crashed ClearOps is still detected: it checks the Fly health page every 5 minutes, and after
+# 3 failed checks in a row it posts to a Discord webhook (DISCORD_WEBHOOK_URL secret) and
+# restarts the app's Fly machines through the existing FLY_API_TOKEN. It posts again once the
+# health check passes. A failed check fails the run, which is how the streak below is counted.
+# WATCHDOG_ALERTED (a repo variable) remembers that an episode was alerted, so a hiccup in one
+# run can only delay an alert, never suppress it, and an episode alerts exactly once.
+name: watchdog
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write  # read the run history; remember the alert state in a repo variable
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      FLY_APP: ${{ vars.FLY_APP || 'clear-ops' }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check the ClearOps health page
+        id: health
+        run: |
+          ok=false
+          for i in 1 2 3; do
+            if curl -fsS --max-time 20 "https://${FLY_APP}.fly.dev/health" 2>/dev/null | grep -q '"ok": *true'; then ok=true; break; fi
+            echo "Health check attempt $i failed."
+            if [ "$i" -lt 3 ]; then sleep 10; fi
+          done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Count recent failures and read the alert state
+        id: streak
+        run: |
+          streak=0
+          # API errors degrade to "skip alert actions this run" (below), never to a failed run:
+          # a failed run here could build a false streak and restart a healthy service.
+          if conclusions=$(gh api "repos/${{ github.repository }}/actions/workflows/watchdog.yml/runs?status=completed&per_page=10" --jq '.workflow_runs[].conclusion' 2>/dev/null); then
+            for c in $conclusions; do
+              if [ "$c" = "failure" ]; then streak=$((streak + 1)); else break; fi
+            done
+          else
+            echo "Could not list recent runs; skipping alert actions this run."
+          fi
+          if state=$(gh api "repos/${{ github.repository }}/actions/variables/WATCHDOG_ALERTED" --jq '.value' 2>/dev/null); then
+            alerted="$state"
+          elif gh api -X POST "repos/${{ github.repository }}/actions/variables" -f name=WATCHDOG_ALERTED -f value=0 >/dev/null 2>&1; then
+            alerted=0
+            echo "Created the WATCHDOG_ALERTED variable."
+          else
+            alerted=""
+            echo "Could not read the alert state; skipping alert actions this run."
+          fi
+          echo "previous_failures=$streak" >> "$GITHUB_OUTPUT"
+          echo "alerted=$alerted" >> "$GITHUB_OUTPUT"
+          echo "Consecutive failed runs before this one: $streak; alerted: ${alerted:-unknown}"
+
+      - name: Set up flyctl
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.streak.outputs.alerted == '0'
+        # Never let a setup hiccup suppress the alert below: GitHub implicitly ANDs every step's
+        # if with success(), so without continue-on-error a failed install would skip the alert.
+        continue-on-error: true
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Alert in Discord and restart the Fly machines
+        if: steps.health.outputs.ok == 'false' && steps.streak.outputs.previous_failures >= '2' && steps.streak.outputs.alerted == '0'
+        continue-on-error: true
+        run: |
+          # Mark the episode alerted first; if the marker cannot be saved, skip this run and
+          # retry on the next one rather than risk repeat alerts and restarts every 5 minutes.
+          if ! gh api -X PATCH "repos/${{ github.repository }}/actions/variables/WATCHDOG_ALERTED" -f value=1 >/dev/null 2>&1; then
+            echo "Could not save the alert state; skipping so the next run can try."
+            exit 0
+          fi
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps health check failed three times. Attempting an automatic restart."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
+          else
+            echo "No DISCORD_WEBHOOK_URL secret yet; skipping the Discord post."
+          fi
+          if [ -n "$FLY_API_TOKEN" ]; then
+            ids=$(curl -fsS -H "Authorization: Bearer $FLY_API_TOKEN" "https://api.machines.dev/v1/apps/$FLY_APP/machines" | jq -r '.[].id') || ids=""
+            if [ -z "$ids" ]; then
+              echo "Could not list the app's machines; skipping the restart."
+            else
+              echo "Restarting Fly machine(s): $ids"
+              flyctl machine restart $ids --app "$FLY_APP" --skip-health-checks || echo "flyctl machine restart failed."
+            fi
+          else
+            echo "No FLY_API_TOKEN secret; cannot restart."
+          fi
+
+      - name: Report the recovery in Discord
+        if: steps.health.outputs.ok == 'true' && steps.streak.outputs.alerted == '1'
+        continue-on-error: true
+        run: |
+          # Clear the marker first; if it cannot be saved, skip and retry next run rather than
+          # post a recovery message every 5 minutes.
+          if ! gh api -X PATCH "repos/${{ github.repository }}/actions/variables/WATCHDOG_ALERTED" -f value=0 >/dev/null 2>&1; then
+            echo "Could not clear the alert state; skipping so the next run can try."
+            exit 0
+          fi
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"content":"ClearOps is responding again."}' "$DISCORD_WEBHOOK_URL" || echo "Discord post failed."
+          fi
+
+      - name: Fail the run while ClearOps is down
+        run: |
+          if [ "${{ steps.health.outputs.ok }}" = "true" ]; then echo "ClearOps is healthy."; exit 0; else echo "ClearOps health check failed."; exit 1; fi
