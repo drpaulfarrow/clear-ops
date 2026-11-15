@@ -368,11 +368,17 @@ test("context: Paul's own message is captured by the service for the turn that s
   await orch.handle("tg:99887766", "And another thing: look at Prebid timeouts", { messageId: "m-101" });
   const made = store.allJobs().filter((j) => j.origin !== "instinct");
   assert.equal(made.length, 2);
-  assert.equal(made[0].triggerMessage?.text, "Research how TollBit prices access, please");
-  assert.equal(made[0].triggerMessage?.messageId, "m-100");
-  assert.equal(made[0].triggerMessage?.kind, "typed");
-  assert.equal(made[0].triggerMessage?.sender, "tg:99887766");
-  assert.equal(made[1].triggerMessage?.text, "And another thing: look at Prebid timeouts", "the second turn's job carries the second message only");
+  // Pair each job with its turn by the title the runner gave it. Do not rely on store order: job ids are random
+  // hex, and an id made only of digits is an integer-like object key, which JavaScript lists before the others.
+  const first = made.find((j) => j.title === "Turn 1 job")!;
+  const second = made.find((j) => j.title === "Turn 2 job")!;
+  assert.ok(first && second, "each turn started one job");
+  assert.equal(first.triggerMessage?.text, "Research how TollBit prices access, please");
+  assert.equal(first.triggerMessage?.messageId, "m-100");
+  assert.equal(first.triggerMessage?.kind, "typed");
+  assert.equal(first.triggerMessage?.sender, "tg:99887766");
+  assert.equal(second.triggerMessage?.text, "And another thing: look at Prebid timeouts", "the second turn's job carries the second message only");
+  assert.equal(second.triggerMessage?.messageId, "m-101");
   assert.ok(!JSON.stringify(made).includes("FORGED"));
   // A job started later by the system (a review, a schedule) has none, and the bridge never carries one.
   const later = jobs.start("research", "scheduled run", "tg:99887766", "product", "tg:99887766");
@@ -431,4 +437,14 @@ test("oversight scope is the exact configured id, not every allowlisted sender",
   const job = (by: string) => ({ origin: undefined, requestedBy: by }) as never;
   assert.equal(isPaulsJob(job("tg:55554444"), isOversightSender), false);
   assert.equal(isPaulsJob(job("tg:99887766"), isOversightSender), true);
+});
+
+test("store order is not creation order: an all-digit job id is listed first, so tests and code must not index allJobs()", () => {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-order-")));
+  const messenger = { send: async () => undefined } as never;
+  const jobs = new JobRunner(store, messenger, (async () => ({ text: "ok" })) as AgentRunner);
+  const a = jobs.start("research", "first", "tg:99887766", "product", "tg:99887766");
+  const state = (store as unknown as { state: { jobs: Record<string, unknown> } }).state;
+  state.jobs["123456"] = { ...(state.jobs[a.id] as object), id: "123456", brief: "second" };
+  assert.equal(store.allJobs()[0].id, "123456", "an integer-like id comes first whatever the creation order");
 });
