@@ -122,6 +122,7 @@ jobs:
             GODADDY_API_SECRET="${{ secrets.GODADDY_API_SECRET }}" \
             GODADDY_DOMAINS="${{ vars.GODADDY_DOMAINS }}" \
             SIGNUP_EMAILS="${{ secrets.SIGNUP_EMAILS }}" \
+            INSTINCT_BRIDGE_TOKEN="${{ secrets.INSTINCT_BRIDGE_TOKEN }}" \
             SIGNUP_SITES="${{ vars.SIGNUP_SITES }}" \
             SIGNUP_TTL_HOURS="${{ vars.SIGNUP_TTL_HOURS }}" \
             SIGNUP_DAILY_CAP="${{ vars.SIGNUP_DAILY_CAP }}" \
