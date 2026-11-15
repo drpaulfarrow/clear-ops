@@ -124,7 +124,7 @@ import type { AgentRunner } from "../src/agents.js";
 
 function orchHarness() {
   config.openrouter.apiKey = "or-main-test-key";
-  (config as any).deviceOpenrouterKey = "or-device-test-key";
+  config.deviceOpenrouterKey = "or-device-test-key";
   const store = new Store(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-devs-")), "s.json"));
   const sent: string[] = [];
   const messenger = { send: async (_to: string, t: string) => void sent.push(t) } as never;
@@ -238,4 +238,28 @@ test("a device run carries the SDK guard, not the global runaway figure", async 
   const h = orchHarness();
   await h.orch.askAsDevice("hi");
   assert.equal(h.seen[0].maxBudgetUsd, 0.05);
+});
+
+test("device key: a device turn runs on its own key, never the main one, and refuses without it", async () => {
+  const h = orchHarness();
+  await h.orch.askAsDevice("hello");
+  assert.equal(h.seen.at(-1)!.apiKey, "or-device-test-key");
+  assert.notEqual(h.seen.at(-1)!.apiKey, config.openrouter.apiKey);
+  const before = h.seen.length;
+  const metersBefore = h.meters.length;
+  config.deviceOpenrouterKey = "";
+  const reply = await h.orch.askAsDevice("hello again");
+  assert.match(reply, /separate capped key is not set/);
+  assert.equal(h.seen.length, before, "no model call without the device key");
+  assert.equal(h.meters.length, metersBefore, "no meter is created either");
+  config.deviceOpenrouterKey = "or-device-test-key";
+});
+
+test("device key: the SDK environment carries the device key only when asked, and workers never inherit it", async () => {
+  const { llmEnv, LLM_STRIPPED, DIRECT_STRIPPED } = await import("../src/llm.js");
+  config.openrouter.apiKey = "or-main-test-key";
+  assert.equal(llmEnv().ANTHROPIC_AUTH_TOKEN, "or-main-test-key");
+  assert.equal(llmEnv("or-device-test-key").ANTHROPIC_AUTH_TOKEN, "or-device-test-key");
+  assert.ok(LLM_STRIPPED.includes("OPENROUTER_DEVICE_API_KEY"));
+  assert.ok(DIRECT_STRIPPED.includes("OPENROUTER_DEVICE_API_KEY"));
 });
