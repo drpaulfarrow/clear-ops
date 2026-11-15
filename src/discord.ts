@@ -280,3 +280,36 @@ export async function inspectGuilds(client: { guilds: { cache: Iterable<GuildVie
   }
   return { guilds: out };
 }
+
+/** What `readOwnerDm` needs from the gateway client, so a test can use a plain object. */
+export interface DmView {
+  users: { fetch(id: string): Promise<{ createDM(): Promise<{ messages: { fetch(o: { limit: number; before?: string }): Promise<{ values(): Iterable<{ id: string; createdTimestamp: number; content?: string | null; author?: { id: string; bot?: boolean } | null; attachments?: { size: number } | null }> }> } }> }> };
+}
+
+/**
+ * Read-only look at the bot's own direct-message channel with the owner, for the Instinct bridge. The channel
+ * is always the owner's DM (the owner id comes from the service's configuration, never from the request), so
+ * no guild, server channel or other person can be reached. Text only (attachments are counted, not fetched),
+ * oldest first, one page at a time. Nothing is sent, written or marked read.
+ */
+export async function readOwnerDm(client: DmView, ownerUserId: string, limit: number, before?: string) {
+  const dm = await (await client.users.fetch(ownerUserId)).createDM();
+  const fetched = await dm.messages.fetch({ limit, ...(before ? { before } : {}) });
+  const rows = [...fetched.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+  return {
+    messages: rows.map((m) => ({
+      id: m.id,
+      at: new Date(m.createdTimestamp).toISOString(),
+      from: m.author?.id === ownerUserId ? "Paul" : m.author?.bot ? "Clear Ops" : "other",
+      text: m.content ?? "",
+      attachments: m.attachments?.size ?? 0,
+    })),
+    ...(rows.length >= limit && rows[0] ? { nextBefore: rows[0].id } : {}),
+  };
+}
+
+/** The one Discord user the owner-only reads may target. More than one `dc:u:` entry is ambiguous, so none is chosen. */
+export function soleDiscordOwner(senderIds: readonly string[]): string | undefined {
+  const ids = [...new Set(senderIds.filter((x) => x.startsWith("dc:u:")).map((x) => x.slice(5)))];
+  return ids.length === 1 && /^\d{15,25}$/.test(ids[0]!) ? ids[0] : undefined;
+}
