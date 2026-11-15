@@ -322,7 +322,7 @@ export class JobRunner {
    * the lock, or, while the queues are held after a credit or key failure, behind the job that failed.
    * `ignoreHold` is for a job Paul explicitly asked to retry.
    */
-  private dispatch(job: Job, ignoreHold = false): Job {
+  private dispatch(job: Job, ignoreHold = false, passHoldOnly = false): Job {
     const key = lockKey(job);
     // Keep the spend figure current without waiting for it: cached, so at most one call a minute.
     void this.refreshSpend().catch(() => undefined);
@@ -331,7 +331,7 @@ export class JobRunner {
       const holder = this.holder(key);
       if (holder) return this.store.updateJob(job.id, { waitingFor: holder, queuePos: this.nextQueuePos() });
       const hold = this.store.queueHold();
-      if (hold && !ignoreHold) return this.store.updateJob(job.id, { waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
+      if (hold && !ignoreHold && !passHoldOnly) return this.store.updateJob(job.id, { waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
       this.take(key, job.id);
     }
     // Fire and forget. The webhook has already been acknowledged.
@@ -455,6 +455,16 @@ export class JobRunner {
    * Puts a failed job back to work under the same id, title and links (pull request, review, loop), as
    * if it had just been started. Paul asked for it, so it runs even while the queues are held.
    */
+  /**
+   * Starts ONE engineer job on the workforce repo from a brief the caller has already pinned by hash. It passes the
+   * queue hold for itself only (the hold stays set, nothing else starts, no failed job is retried) but still obeys the
+   * daily spend cap and its repository's lock. No permits. Nothing reviews or merges it afterwards (see finish).
+   */
+  startCommission(commission: string, brief: string, requestedBy: string, title: string): Job {
+    const job = this.store.createJob("engineer", brief, requestedBy, "self", undefined, { title, commission });
+    return this.dispatch(job, false, true);
+  }
+
   retry(id: string): Job {
     const job = this.store.getJob(id);
     if (!job) throw new Error(`No job ${id}.`);
@@ -937,7 +947,7 @@ export class JobRunner {
         // NODE_ENV=production, which would leave typescript and tsx out of a worker's own install.
         ...(BUILDS(job.kind) ? { env: workerBuildEnv(this.setup.npmCache()) } : {}),
         allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...web.allowed],
-        disallowedTools: bridged ? [...(spec.disallowedTools ?? []), ...BRIDGE_READ_DENY] : spec.disallowedTools,
+        disallowedTools: bridged ? [...(spec.disallowedTools ?? []), ...BRIDGE_READ_DENY] : job.commission ? [...(spec.disallowedTools ?? []), "Task"] : spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
         mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers, ...(buying ? { [PURCHASE_SERVER]: buying } : {}) } : undefined,
@@ -1024,7 +1034,11 @@ export class JobRunner {
       // maintainer is not an engineering kind, so it runs at once and never waits for the lock.
       let chained = "";
       let escalation: string | undefined;
-      if (job.kind === "engineer") {
+      if (job.kind === "engineer" && job.commission) {
+        const pr = job.pr ?? findPrUrl(report);
+        if (pr && !job.pr) this.store.updateJob(id, { pr });
+        chained = pr ? `Opened ${pr} for review. Nothing reviews or merges it automatically.` : "";
+      } else if (job.kind === "engineer") {
         // A fix round already knows its pull request; a fresh job's is read from its report.
         const pr = job.pr ?? findPrUrl(report);
         if (pr && !job.pr) this.store.updateJob(id, { pr });
