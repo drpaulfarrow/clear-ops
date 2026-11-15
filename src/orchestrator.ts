@@ -765,7 +765,7 @@ export class Orchestrator {
    */
   async askAsDevice(text: string): Promise<string> {
     // One exact spoken intent is answered from the job store with no model call, no ledger entry and no key.
-    if (DEVICE_STATUS_INTENT.test(text.trim())) return deviceStatusReply(this.store.allJobs().filter((j) => isPaulsJob(j, isOversightSender)), queueHeldNow(this.store));
+    if (isDeviceStatusIntent(text)) return deviceStatusReply(this.store.allJobs().filter((j) => isPaulsJob(j, isOversightSender)), queueHeldNow(this.store));
     const budget = this.deviceBudget;
     const refused = budget?.gate() ?? (budget ? undefined : "no test budget has been set for the device");
     if (refused) return `The device cannot answer: ${refused}.`;
@@ -1322,12 +1322,26 @@ export function repoLabel(alias: string): string {
 }
 
 /**
- * The one spoken request the device answers without a model: status of his jobs, in these words and no others.
- * The speech-to-text transcript may carry a leading "you said"/"said" echo, so that lead-in is stripped here;
- * the rest is still only a read-only status question ("what is", "can you tell me", "all of"/"all my jobs").
- * Nothing else matches: no approvals, no execution words, no trailing instructions.
+ * The one spoken request the device answers without a model: a status question about Paul's jobs, in any
+ * natural wording of it and nothing else. The transcript is normalised (case and punctuation folded, a
+ * leading "you said"/"said" echo and politeness wrappers stripped from the front, trailing fillers from the
+ * end); what remains must be exactly one status kernel. Any extra words - approvals, execution verbs, other
+ * objects, a second request - fail the match, so this stays read-only and free by construction.
  */
-export const DEVICE_STATUS_INTENT = /^(?:(?:you said|said)[:,]?\s+)?(?:hey,?\s+)?(?:what(?:'s| is)\s+)?(?:can you\s+)?(?:please\s+)?(?:tell me\s+)?(?:the\s+)?status of (?:all(?: of)? )?my jobs(?:\s+please)?[.?!]?$/i;
+const DEVICE_SPEECH_LEAD = /^(?:you said|said|hey|ok(?:ay)?|please|can you|could you|would you|will you|tell me|give me|let me know|what is|what's|whats|what are|what|are)\s+/;
+const DEVICE_SPEECH_TAIL = /\s+(?:please|right now|just now|now|thanks|thank you)$/;
+const DEVICE_STATUS_KERNEL = /^(?:(?:the|a|an) )?(?:current )?(?:status|update) (?:of|on|for) (?:all (?:of )?|all the |the |my |running |active |current |queued |waiting |failed |done |finished )*jobs(?: (?:that )?(?:are )?(?:running|active|in progress|done|finished|queued|waiting|failed))?$/;
+const DEVICE_HOW_KERNEL = /^how (?:are|is) (?:the |my )?jobs(?: doing| going| running)?$/;
+const DEVICE_RUNNING_KERNEL = /^(?:(?:the|my) )?jobs (?:that )?(?:are )?(?:running|active|in progress|done|finished|queued|waiting|failed)$/;
+
+/** True when the whole transcript, after normalisation, is exactly a job-status question. */
+export function isDeviceStatusIntent(text: string): boolean {
+  let t = text.toLowerCase().replace(/[.?!,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  let prev: string;
+  do { prev = t; t = t.replace(DEVICE_SPEECH_LEAD, ""); } while (t !== prev);
+  do { prev = t; t = t.replace(DEVICE_SPEECH_TAIL, ""); } while (t !== prev);
+  return DEVICE_STATUS_KERNEL.test(t) || DEVICE_HOW_KERNEL.test(t) || DEVICE_RUNNING_KERNEL.test(t);
+}
 /** Said when the SDK's per-answer safety limit stopped a device answer: a retry of the same question does the same. */
 export const DEVICE_GUARD_TEXT = "The safety limit on one spoken answer stopped it before it finished. Asking the same question again will do the same, so please ask something shorter or use your usual chat.";
 const queueHeldNow = (store: { queueHold(): unknown }) => !!store.queueHold();
