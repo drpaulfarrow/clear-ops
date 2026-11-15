@@ -28,8 +28,8 @@ import type { AgentRunner } from "../src/agents.js";
 
 const SECRET_BRIEF = "SECRET-BRIEF-TEXT sk-or-v1-abcdef";
 const jobs = [
-  { id: "aaa111", kind: "engineer", title: "Fly deploy", brief: SECRET_BRIEF, status: "failed", failure: "auth", createdAt: "2026-11-15T07:00:00Z", finishedAt: "2026-11-15T07:32:00Z", output: "SECRET-OUTPUT", requestedBy: "x" },
-  { id: "bbb222", kind: "research", title: "Tollbit", brief: SECRET_BRIEF, status: "done", createdAt: "2026-11-15T06:00:00Z", finishedAt: "2026-11-15T06:10:00Z", pr: "#7", requestedBy: "x" },
+  { id: "aaa111", kind: "engineer", title: "Fly deploy", brief: SECRET_BRIEF, status: "failed", failure: "auth", createdAt: "2026-11-15T07:00:00Z", finishedAt: "2026-11-15T07:32:00Z", output: "SECRET-OUTPUT", requestedBy: "tg:99887766" },
+  { id: "bbb222", kind: "research", title: "Tollbit", brief: SECRET_BRIEF, status: "done", createdAt: "2026-11-15T06:00:00Z", finishedAt: "2026-11-15T06:10:00Z", pr: "#7", requestedBy: "tg:99887766" },
 ] as never[];
 const store = { allJobs: () => [...jobs], getJob: (id: string) => jobs.find((j) => (j as { id: string }).id === id), readOutput: () => "THE REPORT", queueHold: () => ({ kind: "auth", jobId: "aaa111", since: "2026-11-15T07:32:00Z" }) } as never;
 
@@ -39,7 +39,7 @@ async function serve(token: string | undefined, opts: { chatEnabled?: boolean; a
   const chat = new BridgeChat({ ask: opts.ask ?? (async (t) => { asked.push(t); return `reply to: ${t}`; }), logFile, ...(opts.now ? { now: opts.now } : {}) });
   const app = express();
   app.use(express.json());
-  app.use(INSTINCT_PATH, instinctRouter({ store: (opts.store ?? store) as never, token, chat, chatEnabled: opts.chatEnabled ?? true, isAllowed: (x: string) => x === "99887766" }));
+  app.use(INSTINCT_PATH, instinctRouter({ store: (opts.store ?? store) as never, token, chat, chatEnabled: opts.chatEnabled ?? true, isAllowed: (x: string) => x === "99887766" || x === "tg:99887766" }));
   const server = await new Promise<import("node:http").Server>((r) => { const s = app.listen(0, () => r(s)); });
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${INSTINCT_PATH}`;
   return { base, chat, asked, close: () => server.close() };
@@ -320,8 +320,27 @@ test("the bridge module is wired to the chat and nothing else: no orchestrator, 
   assert.ok(!/orchestrator|JobRunner|OutboundGate|DnsGate|PurchaseGate|vault|process\.env|messenger/i.test(src.replace(/\/\*[\s\S]*?\*\//g, "")), "the bridge must not import or touch any gate, runner, messenger or secret");
 });
 
-test("status still shows the board and no brief or output", () => {
-  assert.equal(statusData(store).jobs.length, 2);
+test("status shows only Paul's and the bridge's jobs, and no brief or output", () => {
+  const mixed = { ...(store as object), allJobs: () => [
+    { id: "p1", kind: "research", title: "Paul job", brief: "b", status: "done", createdAt: "2026-11-15T06:00:00Z", requestedBy: "tg:99887766" },
+    { id: "o1", kind: "research", title: "Someone else", brief: "b", status: "done", createdAt: "2026-11-15T06:01:00Z", requestedBy: "tg:11111111" },
+    { id: "s1", kind: "research", title: "Schedule", brief: "b", status: "done", createdAt: "2026-11-15T06:02:00Z", requestedBy: "schedule" },
+    { id: "b1", kind: "research", title: "Bridge job", brief: "b", status: "done", createdAt: "2026-11-15T06:03:00Z", requestedBy: "instinct-bridge", origin: "instinct" },
+  ] } as never;
+  const ids = statusData(mixed, Date.now(), (x: string) => x === "99887766" || x === "tg:99887766").jobs.map((j: { id: string }) => j.id).sort();
+  assert.deepEqual(ids, ["b1", "p1"]);
+  assert.equal(statusData(mixed).jobs.length, 1, "with no allowed sender only the bridge's own job shows");
+});
+
+test("a secret in a bridge job report or the transcript is masked on the way out", async () => {
+  const leaky = { ...(store as object), readOutput: () => "found key sk-or-v1-0123456789abcdef0123456789abcdef and ghp_abcdefghijklmnopqrstuvwxyz0123456789" } as never;
+  const bridgeJob = { id: "b9", kind: "research", title: "t", brief: "b", status: "done", createdAt: "2026-11-15T06:00:00Z", requestedBy: "instinct-bridge", origin: "instinct" };
+  const s = await serve("tok", { store: { ...(leaky as object), getJob: () => bridgeJob } });
+  const body = JSON.stringify(await (await fetch(`${s.base}/jobs/b9`, { headers: auth("tok") })).json());
+  assert.ok(!body.includes("sk-or-v1-0123") && !body.includes("ghp_abcdef"), body);
+  s.chat.record("job", "result with ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+  assert.ok(!JSON.stringify(s.chat.transcript()).includes("ghp_abcdef"));
+  s.close();
 });
 
 
@@ -398,7 +417,7 @@ test("chat routes are 404 unless enabled; the read-only context routes need no m
   assert.equal((await fetch(`${s.base}/chat/abc`, h)).status, 404);
   assert.equal((await fetch(`${s.base}/context`, { headers: auth("tok") })).status, 200);
   assert.equal((await fetch(`${s.base}/context`)).status, 401);
-  assert.equal((await fetch(`${s.base}/context/aaa111`, { headers: auth("tok") })).status, 404, "a job not started by Paul is not shown");
+  assert.equal((await fetch(`${s.base}/context/nope999`, { headers: auth("tok") })).status, 404, "an unknown job is not shown");
   assert.deepEqual(s.asked, [], "no model turn was started");
   s.close();
 });
