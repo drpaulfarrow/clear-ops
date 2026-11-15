@@ -290,7 +290,7 @@ export class JobRunner {
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage"> = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
@@ -300,6 +300,7 @@ export class JobRunner {
       if (!BRIDGE_KINDS.includes(kind)) throw new Error(`The Instinct bridge cannot start a ${kind} job.`);
       delete extra.permits;
       extra.origin = "instinct";
+      delete extra.triggerMessage;
     } else delete extra.origin;
     if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds" || p === "send") : extra.permits;
     else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
