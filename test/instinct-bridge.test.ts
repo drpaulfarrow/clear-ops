@@ -12,7 +12,8 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-bridge-"));
-process.env.ALLOWED_TELEGRAM_IDS = "99887766";
+process.env.ALLOWED_TELEGRAM_IDS = "99887766,55554444";
+process.env.OVERSIGHT_SENDER_IDS = "tg:99887766";
 
 const { instinctRouter, statusData, INSTINCT_PATH } = await import("../src/instinct-bridge.js");
 const { BridgeChat, BRIDGE_TURNS_PER_DAY, BRIDGE_REPLY_TO, BRIDGE_SENDER, bridgeMessageWrapper, bridgeJobBrief } = await import("../src/instinct-chat.js");
@@ -420,4 +421,14 @@ test("chat routes are 404 unless enabled; the read-only context routes need no m
   assert.equal((await fetch(`${s.base}/context/nope999`, { headers: auth("tok") })).status, 404, "an unknown job is not shown");
   assert.deepEqual(s.asked, [], "no model turn was started");
   s.close();
+});
+
+test("oversight scope is the exact configured id, not every allowlisted sender", async () => {
+  const { isOversightSender, isAllowed: allowed } = await import("../src/config.js");
+  assert.equal(isOversightSender("tg:99887766"), true);
+  assert.equal(allowed("tg:55554444"), true, "on the general allowlist");
+  assert.equal(isOversightSender("tg:55554444"), false, "but not an oversight sender");
+  const job = (by: string) => ({ origin: undefined, requestedBy: by }) as never;
+  assert.equal(isPaulsJob(job("tg:55554444"), isOversightSender), false);
+  assert.equal(isPaulsJob(job("tg:99887766"), isOversightSender), true);
 });
