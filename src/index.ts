@@ -14,7 +14,7 @@ import { Scheduler } from "./scheduler.js";
 import { Store, type EaPermit, type JobPermit } from "./store.js";
 import { CloudApiMessenger, parseInbound, verifySignature, whatsappAttachment, type Messenger } from "./whatsapp.js";
 import { TelegramMessenger, TelegramPoller } from "./telegram.js";
-import { DiscordListener, inspectGuilds, readOwnerDm, soleDiscordOwner } from "./discord.js";
+import { DiscordListener, inspectGuilds, readJobThread, readOwnerDm, soleDiscordOwner } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
 import { isAllowed, isOversightSender } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
@@ -292,7 +292,7 @@ export function buildApp(deps: AppDeps) {
   // Paul's assistant (src/instinct-bridge.ts, src/instinct-chat.ts): an authenticated door for status and for
   // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach
   // Paul's own chat, approve anything, grant a permit or start anything but read-only research or write jobs.
-  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat, guilds: () => (discordRef.current ? inspectGuilds(discordRef.current.client as never, config.oversightSenderIds.find((x) => x.startsWith("dc:u:"))?.slice(5) ?? "") : Promise.resolve(undefined)), dmHistory: (limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); return discordRef.current && owner ? readOwnerDm(discordRef.current.client as never, owner, limit, before) : Promise.resolve(undefined); }, retryLogFile: path.join(config.dataDir, "bridge-retries.json"), retryAllow: config.instinctBridgeRetryAllow, retry: (id) => jobs.retry(id), retryBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no retry runs from here." : undefined) }));
+  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat, guilds: () => (discordRef.current ? inspectGuilds(discordRef.current.client as never, config.oversightSenderIds.find((x) => x.startsWith("dc:u:"))?.slice(5) ?? "") : Promise.resolve(undefined)), dmHistory: (limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); return discordRef.current && owner ? readOwnerDm(discordRef.current.client as never, owner, limit, before) : Promise.resolve(undefined); }, threadHistory: (threadId, limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); const c = discordRef.current?.client as never as { user?: { id: string } } | undefined; return discordRef.current && owner && c?.user?.id ? readJobThread(discordRef.current.client as never, { ownerUserId: owner, botUserId: c.user.id, guildId: config.bridgeThreadGuildId, parentId: config.bridgeThreadParentId }, threadId, limit, before) : Promise.resolve(undefined); }, retryLogFile: path.join(config.dataDir, "bridge-retries.json"), retryAllow: config.instinctBridgeRetryAllow, retry: (id) => jobs.retry(id), retryBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no retry runs from here." : undefined) }));
 
   // The home talk-button device (src/device.ts): paired by the owner typing /pair, text only, no tools. 404 unless DEVICE_ENABLED=true.
   app.use(DEVICE_PATH, deviceRouter({ registry: deviceRegistry, chat: deviceChat, enabled: config.deviceEnabled }));

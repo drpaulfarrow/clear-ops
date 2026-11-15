@@ -13,6 +13,7 @@
  *  - GET  /api/instinct/chat/:id     {status, reply} for that message.
  *  - GET  /api/instinct/jobs/:id     status, and the report once done, of a job this bridge started only.
  *  - GET  /api/instinct/transcript   what was said each way and the result lines of the bridge's jobs.
+ *  - GET  /api/instinct/context/:id/thread  (404 unless bound) read-only: one job thread of the configured guild and parent channel, Paul's and this bot's own messages only; other authors are counted, never read out.
  *  - GET  /api/instinct/discord/guilds  (404 unless a gateway is connected) read-only: guild and channel names, the
  *    bot's Manage Channels permission, whether the owner is guild owner or administrator. No messages, no token.
  *  - GET  /api/instinct/dm-history?limit=1..100&before=<message id>  (404 unless a gateway is connected) read-only, no
@@ -69,6 +70,8 @@ export interface InstinctBridgeDeps {
   /** Read-only guild look from the Discord gateway. Absent, or resolving to undefined (no gateway connected), means 404; a read that throws is a 502. */
   guilds?: () => Promise<unknown | undefined>;
   /** Read-only page of the owner's DM with the bot. Absent or resolving to undefined means 404; a throw is a 502. */
+  /** One job thread, by thread id taken from the job record. Undefined when it is not bound or not a job thread of the configured guild and parent. */
+  threadHistory?: (threadId: string, limit: number, before?: string) => Promise<({ readable: boolean; messages?: Array<{ text: string }> } & Record<string, unknown>) | undefined>;
   dmHistory?: (limit: number, before?: string) => Promise<{ messages: Array<{ text: string }> } & Record<string, unknown> | undefined>;
   /** Where the retry timestamps are kept, so the daily limit survives a restart. Without it they live in memory only. */
   retryLogFile?: string;
@@ -149,6 +152,29 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
     res.set("Cache-Control", "no-store").json(jobContextView(j, (x) => deps.store.readOutput(x)));
   });
 
+  router.get("/context/:id/thread", async (req, res) => {
+    if (!deps.threadHistory) return void res.sendStatus(404);
+    const isAllowed = deps.isAllowed ?? (() => false);
+    const j = deps.store.getJob(String(req.params.id));
+    if (!j || !isPaulsJob(j, isAllowed)) return void res.sendStatus(404);
+    const m = /^dc:c:(\d{15,25})$/.exec(j.replyTo ?? "");
+    if (!m) return void res.sendStatus(404);
+    const rawLimit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+    if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > DM_PAGE_MAX) return void res.status(400).json({ ok: false, error: `limit must be a whole number from 1 to ${DM_PAGE_MAX}` });
+    const before = req.query.before === undefined ? undefined : String(req.query.before);
+    if (before !== undefined && !/^\d{15,25}$/.test(before)) return void res.status(400).json({ ok: false, error: "before must be a message id" });
+    try {
+      const page = await deps.threadHistory(m[1]!, rawLimit, before);
+      if (page === undefined) return void res.sendStatus(404);
+      const messages = (page.messages ?? []).map((x) => {
+        const text = maskSecrets(String(x.text));
+        return { ...x, text: text.length > DM_TEXT_MAX ? text.slice(0, DM_TEXT_MAX) : text, ...(text.length > DM_TEXT_MAX ? { truncated: true } : {}) };
+      });
+      res.set("Cache-Control", "no-store").json({ jobId: j.id, ...page, ...(page.messages ? { messages } : {}) });
+    } catch {
+      res.status(502).json({ ok: false, error: "Discord could not be read just now." });
+    }
+  });
   router.post("/chat", (req, res) => {
     const r = deps.chat.submit((req.body as { text?: unknown } | undefined)?.text);
     if (!r.ok) return void res.status(r.status).json({ ok: false, error: r.error });

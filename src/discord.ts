@@ -308,6 +308,37 @@ export async function readOwnerDm(client: DmView, ownerUserId: string, limit: nu
   };
 }
 
+/** What `readJobThread` needs from the gateway client, so a test can use a plain object. */
+export interface ThreadReadView {
+  channels: { fetch(id: string): Promise<{ id: string; guildId?: string | null; parentId?: string | null; isThread?: () => boolean; messages?: { fetch(o: { limit: number; before?: string }): Promise<{ values(): Iterable<{ id: string; createdTimestamp: number; content?: string | null; author?: { id: string } | null; attachments?: { size: number } }> }> } } | null> };
+}
+
+/**
+ * Read-only look at ONE job thread, for the Instinct bridge. The thread id comes from the service's own job record
+ * (never from the request). It must be a thread inside the one configured guild whose parent is the one configured
+ * text channel, or nothing is read. Only the owner's messages and this bot's own are returned with text; any other
+ * author is counted and never read out. If Discord will not show the thread (for example it is archived) the result
+ * says so and nothing is worked around. Nothing is sent, written, unarchived or marked read.
+ */
+export async function readJobThread(client: ThreadReadView, bind: { ownerUserId: string; botUserId: string; guildId: string; parentId: string }, threadId: string, limit: number, before?: string) {
+  if (!bind.ownerUserId || !bind.botUserId || !bind.guildId || !bind.parentId || !/^\d{15,25}$/.test(threadId)) return undefined;
+  let channel;
+  try { channel = await client.channels.fetch(threadId); } catch { return { readable: false as const, reason: "Discord would not show this thread to the bot." }; }
+  if (!channel || channel.id !== threadId || !(channel.isThread?.() ?? false) || channel.guildId !== bind.guildId || channel.parentId !== bind.parentId || !channel.messages) return undefined;
+  let fetched;
+  try { fetched = await channel.messages.fetch({ limit, ...(before ? { before } : {}) }); } catch { return { readable: false as const, reason: "The thread's messages could not be read (it may be archived or hidden from the bot)." }; }
+  const rows = [...fetched.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+  let otherAuthorMessages = 0;
+  const messages: Array<{ id: string; at: string; from: "Paul" | "Clear Ops"; text: string; attachments: number }> = [];
+  for (const m of rows) {
+    const id = m.author?.id;
+    if (id === bind.ownerUserId) messages.push({ id: m.id, at: new Date(m.createdTimestamp).toISOString(), from: "Paul", text: m.content ?? "", attachments: m.attachments?.size ?? 0 });
+    else if (id === bind.botUserId) messages.push({ id: m.id, at: new Date(m.createdTimestamp).toISOString(), from: "Clear Ops", text: m.content ?? "", attachments: m.attachments?.size ?? 0 });
+    else otherAuthorMessages++;
+  }
+  return { readable: true as const, messages, otherAuthorMessages, ...(rows.length >= limit && rows[0] ? { nextBefore: rows[0].id } : {}) };
+}
+
 /** The one Discord user the owner-only reads may target. More than one `dc:u:` entry is ambiguous, so none is chosen. */
 export function soleDiscordOwner(senderIds: readonly string[]): string | undefined {
   const ids = [...new Set(senderIds.filter((x) => x.startsWith("dc:u:")).map((x) => x.slice(5)))];
