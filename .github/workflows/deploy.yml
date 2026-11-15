@@ -92,6 +92,7 @@ jobs:
           flyctl secrets set --app "$FLY_APP" --stage \
             ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
             OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}" \
+            OPENROUTER_DEVICE_API_KEY="${{ secrets.OPENROUTER_DEVICE_API_KEY }}" \
             OPENROUTER_HAIKU_MODEL="${{ vars.OPENROUTER_HAIKU_MODEL }}" \
             OPENROUTER_SONNET_MODEL="${{ vars.OPENROUTER_SONNET_MODEL }}" \
             OPENROUTER_OPUS_MODEL="${{ vars.OPENROUTER_OPUS_MODEL }}" \
