@@ -700,4 +700,4 @@ if (isMain) {
   jobs.startWatchdog();
   // One-off: copy every output already on the volume to the outputs repository. In the background; never blocks boot.
   void backfillOnce(store, outputs).catch((err) => console.warn(`outputs backfill: ${err instanceof Error ? err.message : err}`));
-  }
+}
