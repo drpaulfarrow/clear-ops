@@ -949,6 +949,18 @@ test("retrieval is a harness decision, budgeted in code and never run on a stron
   assert.match(jobs, /systemPrompt: SEARCH_KINDS\.includes\(job\.kind\) \? `\$\{spec\.prompt\}\\n\\n\$\{EVIDENCE_RULE\}` : spec\.prompt/, "the evidence rule is in every search-carrying worker's prompt");
   // Kinds that never search are left exactly as they were.
   assert.doesNotMatch(jobs, /SEARCH_KINDS\.includes\(job\.kind\)[^;]{0,40}\b(ea|dns|design|engineer|maintain)\b/, "no other kind runs the decision step");
+
+  // A decision step that still fails fails OPEN, never closed: the service runs one search built from
+  // the request itself rather than searching nothing, because when we are unsure we retrieve.
+  assert.match(r, /const failOpen = async \(detail: string, diagnostic\?: RetrievalDiagnostic\)/, "a failed decision fails open to one search");
+  assert.match(r, /return await failOpen\(detail, err instanceof DecisionAttemptError \? err\.diagnostic : undefined\)/, "the failure path runs the fallback rather than skipping retrieval");
+  assert.match(r, /export function fallbackQuery\(request: string\): string/, "the fallback query is built from the request itself");
+
+  // The call is asked for a schema, retried once and then given up on; a reply cut off at the cap is a
+  // failure, never an empty decision.
+  assert.match(r, /response_format: \{ type: "json_schema", json_schema: decisionSchema\(\) \}/, "the provider is asked to enforce the shape");
+  assert.match(r, /const attempts: Array<\{ structured: boolean; maxTokens: number \}> = \[/, "the call is retried once and then given up on");
+  assert.match(r, /hit the token cap before it wrote any JSON/, "a capped reply is a failure, never an empty decision");
 });
 
 test("the retrieval record holds the decision, never Paul's mail, calendar or uploads, and never a key", () => {
