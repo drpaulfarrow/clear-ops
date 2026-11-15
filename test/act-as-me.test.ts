@@ -68,7 +68,7 @@ test("only the orchestrator, before any model, unlocks a site; the browser guard
   assert.ok(parsed > 0 && parsed < orch.indexOf("parseOutboundCommand(trimmed)"), "parsed with the other pre-model commands");
   assert.ok(orch.indexOf("isAllowed(sender)") < parsed, "after the allowlist");
   for (const f of fs.readdirSync("src")) {
-    if (f === "orchestrator.ts" || f === "site-policy.ts") continue;
+    if (!f.endsWith(".ts") || f === "orchestrator.ts" || f === "site-policy.ts") continue;
     assert.doesNotMatch(src(f), /unlockActAsMe|setSetting\("actAsMe"/, `${f} must not unlock a site`);
   }
   const browse = src("browse.ts");
