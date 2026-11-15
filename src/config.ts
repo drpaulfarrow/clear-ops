@@ -246,6 +246,8 @@ export const config = {
   instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
   /** The home talk-button device (src/device.ts): off unless DEVICE_ENABLED=true.. */
   deviceEnabled: process.env.DEVICE_ENABLED === "true",
+  /** A separate, provider-capped OpenRouter key used only for device turns. Unset: device turns are refused (no fallback to OPENROUTER_API_KEY). */
+  deviceOpenrouterKey: process.env.OPENROUTER_DEVICE_API_KEY ?? "",
   /** The home device's own test budget in USD (provider money). Unset or 0: no device turn is allowed. */
   deviceTestBudgetUsd: Number(process.env.DEVICE_TEST_BUDGET_USD) > 0 ? Number(process.env.DEVICE_TEST_BUDGET_USD) : 0,
   /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */

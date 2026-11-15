@@ -33,7 +33,7 @@ import { addDays, fmt, londonYmd } from "./london.js";
 import { PAUL_STYLE, shortText, tidyReply } from "./messages.js";
 import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
-import { creditUrl, keyName, modelNote, providerName } from "./llm.js";
+import { creditUrl, keyName, modelNote, provider, providerName } from "./llm.js";
 import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
 import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { lockActAsMe, normaliseDomain, parseActAsMeCommand, SitePolicy, unlockActAsMe } from "./site-policy.js";
@@ -765,13 +765,17 @@ export class Orchestrator {
     const budget = this.deviceBudget;
     const refused = budget?.gate() ?? (budget ? undefined : "no test budget has been set for the device");
     if (refused) return `The device cannot answer: ${refused}.`;
+    // Device turns only ever use their own provider-capped key. No key, or a provider that cannot use one: refuse, never fall back to the main key.
+    const deviceKey = config.deviceOpenrouterKey;
+    if (provider() !== "openrouter" || !deviceKey) return "The device cannot answer: its separate capped key is not set.";
     if (this.deviceTurns++ % DEVICE_SESSION_TURNS === 0) this.store.clearSession("device:home");
     const abort = new AbortController();
-    const meter = (this.deviceMeter ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop })))(budget!.remaining(), () => abort.abort());
+    const meter = (this.deviceMeter ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop, apiKey: deviceKey })))(budget!.remaining(), () => abort.abort());
     let counted = false;
     try {
     const result = await this.run({
       costMeter: meter,
+      apiKey: deviceKey,
       abortController: abort,
       prompt: deviceMessageWrapper(text),
       systemPrompt: devicePrompt(),

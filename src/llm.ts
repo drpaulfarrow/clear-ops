@@ -99,12 +99,12 @@ export function resolveModel(model: string): string {
  * internally (subagents, the small fast model behind WebFetch summaries) mapped too, and no
  * non-essential traffic to Anthropic.
  */
-export function llmEnv(): Record<string, string> {
+export function llmEnv(apiKey?: string): Record<string, string> {
   if (provider() !== "openrouter") return {};
   const m = openrouterModels();
   return {
     ANTHROPIC_BASE_URL: OPENROUTER_BASE_URL,
-    ANTHROPIC_AUTH_TOKEN: config.openrouter.apiKey,
+    ANTHROPIC_AUTH_TOKEN: apiKey ?? config.openrouter.apiKey,
     ANTHROPIC_API_KEY: "",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: m.haiku,
     ANTHROPIC_DEFAULT_SONNET_MODEL: m.sonnet,
@@ -126,10 +126,11 @@ export const DIRECT_STRIPPED = [
   "ANTHROPIC_SMALL_FAST_MODEL",
   "CLAUDE_CODE_SUBAGENT_MODEL",
   "OPENROUTER_API_KEY",
+  "OPENROUTER_DEVICE_API_KEY",
 ];
 
 /** Variables removed from the worker environment in OpenRouter mode (llmEnv supplies what is needed). */
-export const LLM_STRIPPED = ["OPENROUTER_API_KEY", "OPENROUTER_PRICES"];
+export const LLM_STRIPPED = ["OPENROUTER_API_KEY", "OPENROUTER_DEVICE_API_KEY", "OPENROUTER_PRICES"];
 
 /** Price rows for the models in use, for the SDK's managed modelPricing setting. */
 export function modelPrices(): Record<string, Price> {

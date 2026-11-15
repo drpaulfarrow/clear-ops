@@ -213,7 +213,7 @@ const clean = (s: unknown, max: number) =>
 /** Never let a key into an error message. */
 export function scrub(text: string): string {
   let out = text;
-  for (const k of [config.search.braveKey, config.search.exaKey, config.openrouter.apiKey, process.env.ANTHROPIC_API_KEY ?? ""]) {
+  for (const k of [config.search.braveKey, config.search.exaKey, config.openrouter.apiKey, config.deviceOpenrouterKey, process.env.ANTHROPIC_API_KEY ?? ""]) {
     if (k) out = out.split(k).join("***");
   }
   return out;

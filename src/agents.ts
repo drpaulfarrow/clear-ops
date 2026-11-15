@@ -20,6 +20,8 @@ import type { CostMeter } from "./realcost.js";
 
 export interface RunOptions {
   prompt: string;
+  /** OpenRouter key for this run only (the home device's separate capped key). Unset: the configured key. */
+  apiKey?: string;
   /** Images to show the model with the prompt (the founder's screenshots), base64 encoded. */
   images?: Array<{ mediaType: string; data: string }>;
   systemPrompt: string;
@@ -162,7 +164,7 @@ export const sdkRunner: AgentRunner = async (o) => {
           // Extra settings for this run only: the npm development-mode variables a kind that builds
           // needs (src/jobs.ts), never the chief's or a read-only kind's environment.
           ...(o.env ?? {}),
-          ...(direct ? {} : llmEnv()),
+          ...(direct ? {} : llmEnv(o.apiKey)),
           CLAUDE_CONFIG_DIR: path.join(config.dataDir, "claude"),
           CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
           CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "4",
