@@ -244,6 +244,9 @@ export const config = {
   oversightSenderIds: (process.env.OVERSIGHT_SENDER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   /** Failed job ids (six hex characters, comma separated) the bridge may rerun. Empty means no retry route. */
   instinctBridgeRetryAllow: (process.env.BRIDGE_RETRY_ALLOW ?? "").split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[a-f0-9]{6}$/.test(x)),
+  /** Job-thread history reads are bound to exactly this guild and this parent text channel. Either unset: the route is closed. */
+  bridgeThreadGuildId: /^\d{15,25}$/.test(process.env.BRIDGE_THREAD_GUILD_ID ?? "") ? (process.env.BRIDGE_THREAD_GUILD_ID as string) : "",
+  bridgeThreadParentId: /^\d{15,25}$/.test(process.env.BRIDGE_THREAD_PARENT_ID ?? "") ? (process.env.BRIDGE_THREAD_PARENT_ID as string) : "",
   /** The bridge chat routes start paid model turns; off unless BRIDGE_CHAT_ENABLED is exactly "true". */
   instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
   /** A separate, provider-capped OpenRouter key used only for bridge chat turns. Unset: chat turns are refused (no fallback to OPENROUTER_API_KEY). */
