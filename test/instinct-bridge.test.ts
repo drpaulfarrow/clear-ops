@@ -426,6 +426,24 @@ test("context: only jobs requested by an allowed sender, never the bridge's own 
   assert.equal(isPaulsJob(bridge, isAllowed), false);
 });
 
+test("context: a commissioned job with the bare owner id is visible, any other bare-id job is not", () => {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-scope-")));
+  const owner = "1564629778697551972";
+  const allowed = (s: string) => s === `dc:u:${owner}`;
+  const bare = store.createJob("engineer", "b", owner, "self", undefined, { commission: "x" });
+  const prefixed = store.createJob("engineer", "b", `dc:u:${owner}`, "self", undefined, { commission: "x" });
+  const noMarker = store.createJob("engineer", "b", owner, "self");
+  const otherRepo = store.createJob("engineer", "b", owner, "product", undefined, { commission: "x" });
+  const otherId = store.createJob("engineer", "b", "1564629778697551973", "self", undefined, { commission: "x" });
+  const viaBridge = store.createJob("engineer", "b", owner, "self", undefined, { commission: "x", origin: "instinct" });
+  assert.equal(isPaulsJob(bare, allowed), true);
+  assert.equal(isPaulsJob(prefixed, allowed), true);
+  assert.equal(isPaulsJob(noMarker, allowed), false);
+  assert.equal(isPaulsJob(otherRepo, allowed), false);
+  assert.equal(isPaulsJob(otherId, allowed), false);
+  assert.equal(isPaulsJob(viaBridge, allowed), false);
+});
+
 test("chat routes are 404 unless enabled; the read-only context routes need no model and ask nothing", async () => {
   const s = await serve("tok", { chatEnabled: false });
   const h = { headers: { ...auth("tok"), "content-type": "application/json" } };
