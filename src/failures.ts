@@ -214,9 +214,9 @@ export function failureAction(kind: FailureKind, ids: string[]): string {
   const retry = ids.length === 1 ? `retry ${ids[0]}` : "retry <id>";
   switch (kind) {
     case "credit":
-      return `Please top up the ${providerName()} credit at ${creditUrl()}, then send /resume and I will rerun them and restart the queue.`;
+      return `Please top up the ${providerName()} credit at ${creditUrl()}, then I carry on by myself as soon as it answers again (or send /resume to do it now).`;
     case "auth":
-      return `Please check the ${keyName()} in the workforce secrets is valid, then send /resume and I will rerun them and restart the queue.`;
+      return `Please check the ${keyName()} in the workforce secrets is valid, then I carry on by myself as soon as it answers again (or send /resume to do it now).`;
     case "rate_limit":
     case "overloaded":
       return `Nothing needed from you beyond waiting a few minutes; send ${retry} to run it again.`;
