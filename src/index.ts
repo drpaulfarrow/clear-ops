@@ -46,6 +46,7 @@ import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
 import { defaultProbes, HealthProbes } from "./health.js";
+import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
 import fs from "node:fs";
 
 export interface AppDeps {
@@ -256,6 +257,20 @@ export function buildApp(deps: AppDeps) {
   // What the deploy waits on (.github/workflows/deploy.yml): how many workers are running right now.
   // A count only, nothing about the jobs themselves.
   app.get("/busy", (_req, res) => res.json({ running: jobs.activeCount() }));
+
+  // Paul's assistant (src/instinct-bridge.ts): a bearer-token status read and a labelled note to Paul's own
+  // chat. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot start, approve or change anything.
+  app.use(
+    INSTINCT_PATH,
+    instinctRouter({
+      store: deps.store,
+      token: config.instinctBridgeToken,
+      notifyPaul: (text) => {
+        const to = config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? config.allowedNumbers[0];
+        if (to) void deps.messenger.send(to, text).catch(() => undefined);
+      },
+    }),
+  );
 
 
   // Meta webhook verification handshake
@@ -685,4 +700,4 @@ if (isMain) {
   jobs.startWatchdog();
   // One-off: copy every output already on the volume to the outputs repository. In the background; never blocks boot.
   void backfillOnce(store, outputs).catch((err) => console.warn(`outputs backfill: ${err instanceof Error ? err.message : err}`));
-}
+  }
