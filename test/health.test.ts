@@ -345,7 +345,7 @@ test("a failed check, a stalled job and a held queue each make the verdict a pla
   const byHold = boardHealth({ store: held, now: NOW });
   assert.equal(byHold.level, "warn");
   assert.match(byHold.headline, /held after a credit failure/);
-  assert.match(byHold.live, /the engineering queue is held until \/resume/);
+  assert.match(byHold.live, /the engineering queue is held until the provider answers again \(checked automatically\) or \/resume/);
   // With no checks in this process the page says so rather than implying everything is fine.
   assert.equal(byHold.checks.length, 0);
   assert.match(byHold.checksLine, /not running in this process/);

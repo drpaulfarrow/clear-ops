@@ -16,6 +16,7 @@ import { londonYmd } from "./london.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner, RunResult } from "./agents.js";
 import { describeWorkerTool, JobProgress, type JobProgressOptions } from "./status.js";
+import { nextCheckAt, type Canary, type CanaryProvider } from "./auto-resume.js";
 import { BRIDGE_READ_DENY, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
@@ -236,6 +237,9 @@ export class JobRunner {
   private readonly spend: SpendMeter;
   /** The running commentary in each job's thread (src/status.ts JobProgress). */
   private readonly progressOpts: JobProgressOptions;
+  /** The auto-resume check (src/auto-resume.ts), and how many checks this hold has failed. */
+  private readonly canary?: Canary;
+  private autoResume = { holdSince: "", attempts: 0, lastAt: 0, busy: false };
   /**
    * Builds the meter that counts one job's real cost (src/realcost.ts): the sum of what the provider
    * charged for its calls, which is the only money a job's own cap is ever counted in.
@@ -268,8 +272,11 @@ export class JobRunner {
       progress?: JobProgressOptions;
       costWatch?: CostWatchFactory;
       setup?: PreparedCopies;
+      /** Whether the provider answers again after a credit or key hold (src/auto-resume.ts); off in tests unless given. */
+      canary?: Canary;
     } = {},
   ) {
+    this.canary = opts.canary;
     this.costWatch = opts.costWatch ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop }));
     this.progressOpts = opts.progress ?? {};
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
@@ -503,6 +510,39 @@ export class JobRunner {
     await this.releaseCapped();
     for (const key of this.lockKeys()) await this.startNext(key);
     return { retried: retried.map((j) => this.store.getJob(j.id) ?? j), skipped, released: !!hold };
+  }
+
+  /**
+   * While a credit or key hold lasts, checks on a backing-off timer (2, 5, 10, 15, then every 30
+   * minutes) whether the provider the failed job used would now answer a real one-token request, and
+   * when it does, resumes exactly as /resume does and tells Paul in one sentence. Exported for tests.
+   */
+  async tryAutoResume(): Promise<boolean> {
+    const hold = this.store.queueHold();
+    if (!hold || !this.canary || this.autoResume.busy) return false;
+    if (this.autoResume.holdSince !== hold.since) this.autoResume = { holdSince: hold.since, attempts: 0, lastAt: Date.parse(hold.since) || this.now(), busy: false };
+    if (this.now() < nextCheckAt(this.autoResume.lastAt, this.autoResume.attempts)) return false;
+    this.autoResume.busy = true;
+    try {
+      const held = this.store.getJob(hold.jobId);
+      const which: CanaryProvider = held && runRoute(held, "haiku").provider === "anthropic" ? "anthropic" : provider() === "openrouter" ? "openrouter" : "anthropic";
+      const answer = await this.canary(which);
+      this.autoResume.lastAt = this.now();
+      if (!answer.ok) {
+        this.autoResume.attempts++;
+        return false;
+      }
+      // Still the same hold (Paul may have sent /resume meanwhile): carry on as /resume would.
+      if (this.store.queueHold()?.since !== hold.since) return false;
+      const { retried } = await this.resume();
+      const name = which === "openrouter" ? "OpenRouter" : "Anthropic";
+      const reran = retried.length ? `, so I carried on and reran ${retried.length === 1 ? "the job that failed" : `the ${retried.length} jobs that failed`}` : ", so I carried on";
+      const to = held?.replyTo ?? held?.requestedBy;
+      if (to) await this.messenger.send(to, `${name} is answering again${reran}. No need to send /resume.`).catch(() => undefined);
+      return true;
+    } finally {
+      this.autoResume.busy = false;
+    }
   }
 
   /** Jobs that failed on the hold's cause during this outage (or on credit or a key in the last day). */
@@ -781,7 +821,7 @@ export class JobRunner {
       // The queues are held after a credit or key failure: wait for /resume rather than fail again.
       this.store.updateJob(job.id, { status: "queued", resumed, waitingFor: hold.jobId, queuePos: this.nextQueuePos() });
       this.free(key, job.id);
-      await say(orphan ? `${lead}, so I put it back in the queue, which is paused until you send /resume because ${failureReason(hold)}.` : `${lead} The engineering queue is paused because ${failureReason(hold)}, so it waits; send /resume once that is fixed.`);
+      await say(orphan ? `${lead}, so I put it back in the queue, which is paused until you send /resume because ${failureReason(hold)}.` : `${lead} The engineering queue is paused because ${failureReason(hold)}, so it waits; I carry on by myself once that is fixed, or send /resume.`);
       return;
     }
     if (key && holder) {
@@ -1197,6 +1237,8 @@ export class JobRunner {
     try {
       // Once a minute: the provider's own spend figure, so the cap and /spend stay current.
       await this.refreshSpend().catch(() => undefined);
+      // A credit or key hold lifts itself once the provider really answers again (Paul's call, 15 Nov 2026).
+      await this.tryAutoResume().catch((err) => console.warn(`auto-resume check failed: ${err instanceof Error ? err.message : err}`));
       const now = this.now();
       for (const [id, live] of [...this.live]) {
         if (live.stop || live.waiting || live.waitingForCopy || live.finishing) continue;

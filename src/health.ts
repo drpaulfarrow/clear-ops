@@ -492,7 +492,7 @@ export function boardHealth(source: HealthSource): BoardHealth {
   );
   live.push(queued.length === 0 ? "nothing queued" : queued.length === 1 ? "1 job queued" : `${queued.length} jobs queued`);
   if (source.liveness) live.push(stalled.length === 0 ? "nothing stalled" : stalled.length === 1 ? "1 job stalled" : `${stalled.length} jobs stalled`);
-  live.push(hold ? "the engineering queue is held until /resume" : "the queue is not held");
+  live.push(hold ? "the engineering queue is held until the provider answers again (checked automatically) or /resume" : "the queue is not held");
 
   const problems: string[] = [];
   for (const c of failed) problems.push(`${c.name} ${c.detail}`);

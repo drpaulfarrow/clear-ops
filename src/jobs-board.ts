@@ -452,7 +452,7 @@ export function renderBoard(board: Board, token: string): string {
         })
         .join("")
     : `<p class="empty">No scheduled jobs.</p>`;
-  const paused = board.paused ? `<div class="warn">The engineering queues are held until you send /resume.</div>` : "";
+  const paused = board.paused ? `<div class="warn">The engineering queues are held after a credit or key failure. They carry on by themselves once the provider answers again; /resume does it now.</div>` : "";
   const refresh = `${BOARD_REFRESH_SECONDS}; url=${BOARD_PATH}?t=${escapeHtml(token)}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="${refresh}"><title>Workforce jobs</title><style>${STYLE}</style></head><body>
 <h1>Workforce jobs</h1>
