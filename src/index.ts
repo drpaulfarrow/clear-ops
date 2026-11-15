@@ -281,7 +281,7 @@ export function buildApp(deps: AppDeps) {
   // Paul's assistant (src/instinct-bridge.ts, src/instinct-chat.ts): an authenticated door for status and for
   // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach
   // Paul's own chat, approve anything, grant a permit or start anything but read-only research or write jobs.
-  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat }));
+  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed, chatEnabled: config.instinctBridgeChat }));
 
   // Meta webhook verification handshake
   app.get("/webhook", (req, res) => {

@@ -240,6 +240,8 @@ export const config = {
   uploadsDir: path.resolve(process.env.UPLOADS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "uploads")),
   /** Shared secret for the Instinct bridge (src/instinct-bridge.ts). Empty means the bridge is off. */
   instinctBridgeToken: process.env.INSTINCT_BRIDGE_TOKEN ?? "",
+  /** The bridge chat routes start paid model turns; off unless BRIDGE_CHAT_ENABLED is exactly "true". */
+  instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
   /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
   uploadMaxMb: Number(process.env.UPLOAD_MAX_MB ?? 20),
   /**

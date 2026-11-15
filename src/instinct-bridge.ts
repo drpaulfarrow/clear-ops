@@ -8,7 +8,8 @@
  *
  *  - GET  /api/instinct/status       what the board already shows: queue hold and the latest jobs (no briefs,
  *    outputs, paths, spend or secrets).
- *  - POST /api/instinct/chat         {"text"} to the chief as Paul's assistant, answered 202 with an id.
+ *  - GET  /api/instinct/context[/:id] read-only, no model: jobs Paul started, his captured message, capped report.
+ *  - POST /api/instinct/chat (404 unless BRIDGE_CHAT_ENABLED=true; paid model turn)         {"text"} to the chief as Paul's assistant, answered 202 with an id.
  *  - GET  /api/instinct/chat/:id     {status, reply} for that message.
  *  - GET  /api/instinct/jobs/:id     status, and the report once done, of a job this bridge started only.
  *  - GET  /api/instinct/transcript   what was said each way and the result lines of the bridge's jobs.
@@ -25,6 +26,7 @@ import { jobTitle } from "./titles.js";
 import type { Store } from "./store.js";
 import type { BridgeChat } from "./instinct-chat.js";
 import { bridgeJobView } from "./instinct-chat.js";
+import { CONTEXT_LIST_MAX, isPaulsJob, jobContextView } from "./bridge-context.js";
 
 export const INSTINCT_PATH = "/api/instinct";
 const OUTPUT_MAX_CHARS = 60_000;
@@ -37,6 +39,10 @@ export interface InstinctBridgeDeps {
   chat: BridgeChat;
   /** The shared secret; the bridge is off when empty. */
   token?: string;
+  /** Who counts as Paul's own sender (for the read-only context routes). */
+  isAllowed?: (sender: string) => boolean;
+  /** The model-backed chat routes. Off unless set: the read-only routes need no model and cost nothing. */
+  chatEnabled?: boolean;
   now?: () => number;
 }
 
@@ -95,6 +101,22 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
 
   router.get("/status", (_req, res) => {
     res.set("Cache-Control", "no-store").json(statusData(deps.store, now()));
+  });
+
+  // Chat routes start a paid model turn, so they answer 404 unless explicitly enabled.
+  router.use(["/chat", "/chat/:id"], (_req, res, next) => (deps.chatEnabled ? next() : void res.sendStatus(404)));
+
+  // Read-only, no model: jobs Paul started himself, with his captured message, the brief (not his words) and a capped report.
+  router.get("/context", (_req, res) => {
+    const isAllowed = deps.isAllowed ?? (() => false);
+    const list = deps.store.allJobs().filter((j) => isPaulsJob(j, isAllowed)).slice(-CONTEXT_LIST_MAX).map((j) => ({ ...jobContextView(j, (x) => deps.store.readOutput(x)), output: undefined }));
+    res.set("Cache-Control", "no-store").json({ jobs: list });
+  });
+  router.get("/context/:id", (req, res) => {
+    const isAllowed = deps.isAllowed ?? (() => false);
+    const j = deps.store.getJob(String(req.params.id));
+    if (!j || !isPaulsJob(j, isAllowed)) return void res.sendStatus(404);
+    res.set("Cache-Control", "no-store").json(jobContextView(j, (x) => deps.store.readOutput(x)));
   });
 
   router.post("/chat", (req, res) => {
