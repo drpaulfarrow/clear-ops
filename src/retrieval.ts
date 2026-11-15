@@ -25,10 +25,11 @@
  * when the provider supports it, routed to an endpoint that really takes it and with reasoning turned
  * off (reasoning tokens are counted inside max_tokens, so a reasoning model can spend the whole reply
  * thinking and come back empty at the cap), with a plain bare-JSON parse as the fallback, and it is
- * retried once and then given up on. A decision step that still fails fails OPEN, never closed: the service runs one
- * search built from the request itself rather than searching nothing, because the rule the brief states
- * is that when we are unsure we retrieve (Paul's brief, point 5, 13 November 2026). Only when that
- * fallback search also fails or returns nothing is the honest "no search could be run" block shown.
+ * retried once and then given up on. A decision step that still fails fails OPEN, never closed: the
+ * service runs one search built from the request itself rather than searching nothing, because the rule
+ * the brief states is that when we are unsure we retrieve (Paul's brief, point 5, 13 November 2026).
+ * Only when that fallback search also fails or returns nothing is the honest "no search could be run"
+ * block shown.
  *
  * What a failed decision leaves behind is shape, never content: the model, how many attempts were made,
  * the provider's status and finish reason, and how long the reply was. The model's raw reply is never
