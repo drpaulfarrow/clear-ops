@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-dev-"));
 process.env.ALLOWED_TELEGRAM_IDS = "99887766,55554444";
+process.env.ALLOWED_DISCORD_IDS = "42";
 process.env.OVERSIGHT_SENDER_IDS = "tg:99887766";
 process.env.DEVICE_ENABLED = "true";
 
@@ -232,6 +233,18 @@ test("/whoami tells an allowlisted sender its own id, only in a direct chat, and
   const n = h.sent.length;
   await h.orch.handle("tg:11112222", "/whoami", { replyTo: "tg:11112222" });
   assert.equal(h.sent.length, n, "an unlisted sender gets no reply");
+});
+
+test("/whoami answers in a Discord DM (channel id differs from user id) but not in a server channel", async () => {
+  const h = orchHarness();
+  await h.orch.handle("dc:u:42", "/whoami", { replyTo: "dc:c:900", direct: true });
+  assert.match(h.sent.at(-1)!, /sees you as dc:u:42/);
+  await h.orch.handle("dc:u:42", "/whoami", { replyTo: "dc:c:901" });
+  assert.match(h.sent.at(-1)!, /direct message/);
+  assert.ok(!h.sent.at(-1)!.includes("42"));
+  const n = h.sent.length;
+  await h.orch.handle("dc:u:7", "/whoami", { replyTo: "dc:c:902", direct: true });
+  assert.equal(h.sent.length, n, "an unlisted sender still gets no reply, even in a DM");
 });
 
 test("a device run carries the SDK guard, not the global runaway figure", async () => {

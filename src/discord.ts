@@ -220,7 +220,7 @@ export class DiscordListener {
   /** Exposed for tests: route one message without the gateway. */
   async onMessage(
     m: Pick<Message, "author" | "content" | "channelId" | "id"> & {
-      channel?: { send?: (t: string) => Promise<unknown> };
+      channel?: { send?: (t: string) => Promise<unknown>; type?: ChannelType };
       attachments?: { values(): Iterable<DiscordFile> };
     },
   ): Promise<void> {
@@ -235,6 +235,6 @@ export class DiscordListener {
       }
       return;
     }
-    await this.handle(from, m.content ?? "", { replyTo, messageId: m.id, ...(files.length ? { attachments: files.map((f) => discordAttachment(f)) } : {}) });
+    await this.handle(from, m.content ?? "", { replyTo, messageId: m.id, ...(m.channel?.type === ChannelType.DM ? { direct: true } : {}), ...(files.length ? { attachments: files.map((f) => discordAttachment(f)) } : {}) });
   }
 }
