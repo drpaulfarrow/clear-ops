@@ -126,6 +126,25 @@ test("discord guild look: 404 without a gateway, read-only shape with one, never
   assert.ok(!JSON.stringify(r).toLowerCase().includes("token"));
 });
 
+test("discord guild look works on real discord.js Collections (Maps), not only arrays", async () => {
+  const { inspectGuilds } = await import("../src/discord.js");
+  const { Collection, PermissionFlagsBits, ChannelType } = await import("discord.js");
+  const channels = new Collection<string, { id: string; name: string; type: number; parentId: string | null }>();
+  channels.set("c1", { id: "c1", name: "general", type: ChannelType.GuildText, parentId: null });
+  const guild = {
+    id: "g1", name: "Paul HQ", ownerId: "42",
+    members: { me: { permissions: { has: (p: bigint) => p === PermissionFlagsBits.ManageChannels } }, fetch: async () => ({ permissions: { has: () => false } }) },
+    channels: { cache: channels },
+  };
+  const guilds = new Collection<string, typeof guild>();
+  guilds.set("g1", guild);
+  const r = await inspectGuilds({ guilds: { cache: guilds } }, "42");
+  assert.equal(r.guilds.length, 1);
+  assert.equal(r.guilds[0]!.name, "Paul HQ");
+  assert.equal(r.guilds[0]!.botCanManageChannels, true);
+  assert.deepEqual(r.guilds[0]!.channels, [{ id: "c1", name: "general", kind: "text", parentId: null }]);
+});
+
 test("the daily retry limit survives a restart (counted before the job is touched)", async () => {
   const logFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rl-")), "bridge-retries.json");
   const a = await serve({ allow: ["aaa111", "bbb222"], perDay: 1, logFile });
