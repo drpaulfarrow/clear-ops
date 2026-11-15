@@ -764,6 +764,8 @@ export class Orchestrator {
    * prompt, and the session restarts every 8 turns so history cannot grow without limit.
    */
   async askAsDevice(text: string): Promise<string> {
+    // One exact spoken intent is answered from the job store with no model call, no ledger entry and no key.
+    if (DEVICE_STATUS_INTENT.test(text.trim())) return deviceStatusReply(this.store.allJobs().filter((j) => isPaulsJob(j, isOversightSender)), queueHeldNow(this.store));
     const budget = this.deviceBudget;
     const refused = budget?.gate() ?? (budget ? undefined : "no test budget has been set for the device");
     if (refused) return `The device cannot answer: ${refused}.`;
@@ -797,7 +799,7 @@ export class Orchestrator {
     budget!.add(cost.usd + (cost.source === "unavailable" || unpriced > 0 ? Math.max(1, unpriced) * DEVICE_UNPRICED_TURN_USD : 0));
     counted = true;
     if (abort.signal.aborted) return "The device test budget ran out during that answer.";
-    if (result.error) return chiefFailureText(result.error);
+    if (result.error) return result.error.kind === "budget" ? DEVICE_GUARD_TEXT : chiefFailureText(result.error);
     if (result.sessionId) this.store.setSession("device:home", result.sessionId);
     return tidyReply(result.text) || "(no reply)";
     } finally {
@@ -1317,6 +1319,22 @@ export function repoLabel(alias: string): string {
   if (alias === "product") return "product";
   const r = repoRegistry.find(alias);
   return r?.slug ? `${alias} (${r.slug})` : alias;
+}
+
+/** The one spoken request the device answers without a model: status of his jobs, in these words and no others. */
+export const DEVICE_STATUS_INTENT = /^(?:hey,?\s+)?(?:can you\s+)?(?:please\s+)?(?:tell me\s+)?(?:the\s+)?status of (?:all of )?my jobs(?:\s+please)?[.?!]?$/i;
+/** Said when the SDK's per-answer safety limit stopped a device answer: a retry of the same question does the same. */
+export const DEVICE_GUARD_TEXT = "The safety limit on one spoken answer stopped it before it finished. Asking the same question again will do the same, so please ask something shorter or use your usual chat.";
+const queueHeldNow = (store: { queueHold(): unknown }) => !!store.queueHold();
+/** Read-only reply built from the store: counts and the most recent titles, no ids, no briefs, no model. */
+export function deviceStatusReply(jobs: Job[], held: boolean): string {
+  const by = (st: string) => jobs.filter((j) => j.status === st);
+  const running = by("running"), queued = by("queued"), failed = by("failed");
+  const recent = [...jobs].sort((a, b) => (b.finishedAt ?? b.startedAt ?? b.createdAt).localeCompare(a.finishedAt ?? a.startedAt ?? a.createdAt)).slice(0, 3).map((j) => `${jobTitle(j)}, ${j.status}`);
+  const parts = [`${running.length} running, ${queued.length} waiting, ${by("done").length} done and ${failed.length} failed.`];
+  if (held) parts.push("The queue is paused.");
+  if (recent.length) parts.push(`Latest: ${recent.join("; ")}.`);
+  return parts.join(" ");
 }
 
 /** What Paul sees when the chief itself could not run (no credit, a rejected key, the API down). */
