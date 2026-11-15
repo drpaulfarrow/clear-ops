@@ -33,13 +33,13 @@ const jobs = [
 ] as never[];
 const store = { allJobs: () => [...jobs], getJob: (id: string) => jobs.find((j) => (j as { id: string }).id === id), readOutput: () => "THE REPORT", queueHold: () => ({ kind: "auth", jobId: "aaa111", since: "2026-11-15T07:32:00Z" }) } as never;
 
-async function serve(token: string | undefined, opts: { ask?: (t: string) => Promise<string>; store?: unknown; now?: () => number } = {}) {
+async function serve(token: string | undefined, opts: { chatEnabled?: boolean; ask?: (t: string) => Promise<string>; store?: unknown; now?: () => number } = {}) {
   const logFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-blog-")), "log.jsonl");
   const asked: string[] = [];
   const chat = new BridgeChat({ ask: opts.ask ?? (async (t) => { asked.push(t); return `reply to: ${t}`; }), logFile, ...(opts.now ? { now: opts.now } : {}) });
   const app = express();
   app.use(express.json());
-  app.use(INSTINCT_PATH, instinctRouter({ store: (opts.store ?? store) as never, token, chat }));
+  app.use(INSTINCT_PATH, instinctRouter({ store: (opts.store ?? store) as never, token, chat, chatEnabled: opts.chatEnabled ?? true, isAllowed: (x: string) => x === "99887766" }));
   const server = await new Promise<import("node:http").Server>((r) => { const s = app.listen(0, () => r(s)); });
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${INSTINCT_PATH}`;
   return { base, chat, asked, close: () => server.close() };
@@ -389,4 +389,16 @@ test("context: only jobs requested by an allowed sender, never the bridge's own 
   assert.equal(isPaulsJob(paul, isAllowed), true);
   assert.equal(isPaulsJob(stranger, isAllowed), false);
   assert.equal(isPaulsJob(bridge, isAllowed), false);
+});
+
+test("chat routes are 404 unless enabled; the read-only context routes need no model and ask nothing", async () => {
+  const s = await serve("tok", { chatEnabled: false });
+  const h = { headers: { ...auth("tok"), "content-type": "application/json" } };
+  assert.equal((await fetch(`${s.base}/chat`, { method: "POST", body: JSON.stringify({ text: "hi" }), ...h })).status, 404);
+  assert.equal((await fetch(`${s.base}/chat/abc`, h)).status, 404);
+  assert.equal((await fetch(`${s.base}/context`, { headers: auth("tok") })).status, 200);
+  assert.equal((await fetch(`${s.base}/context`)).status, 401);
+  assert.equal((await fetch(`${s.base}/context/aaa111`, { headers: auth("tok") })).status, 404, "a job not started by Paul is not shown");
+  assert.deepEqual(s.asked, [], "no model turn was started");
+  s.close();
 });
