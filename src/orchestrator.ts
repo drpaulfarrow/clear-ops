@@ -3,6 +3,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { BRIDGE_JOBS_PER_DAY, bridgeJobView, BRIDGE_KINDS_LIST, BRIDGE_REPLY_TO, BRIDGE_SENDER, bridgeMessageWrapper, bridgePrompt, bridgeJobBrief } from "./instinct-chat.js";
 import { bookingLink, config, isAllowed, isOversightSender } from "./config.js";
+import { DEVICE_MAX_STEPS, DEVICE_SESSION_TURNS, DEVICE_RUN_GUARD_USD, DEVICE_UNPRICED_TURN_USD, type DeviceBudget, deviceMessageWrapper, devicePrompt, type DeviceRegistry } from "./device.js";
 import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
 import { ACTION_KINDS, actionExecutors, lockKey, type JobRunner } from "./jobs.js";
@@ -37,6 +38,7 @@ import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
 import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { lockActAsMe, normaliseDomain, parseActAsMeCommand, SitePolicy, unlockActAsMe } from "./site-policy.js";
 import { safeVaultDomains, vault, cardVault } from "./vault.js";
+import { RealCostMeter } from "./realcost.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
@@ -207,6 +209,17 @@ export class Orchestrator {
     if (spend) return this.messenger.send(from, await this.spendText(spend[1]?.toLowerCase()));
     if (/^\/status$/i.test(trimmed)) return this.messenger.send(from, this.githubStatus ? await this.githubStatus().catch(() => "GitHub: could not check just now.") : "No GitHub check is configured.");
     if (/^\/resume$/i.test(trimmed)) return this.messenger.send(from, await this.resumeJobs());
+    // Which sender id the service sees for this account, so the owner can be listed in OVERSIGHT_SENDER_IDS.
+    // Only an allowlisted sender (checked above) gets an answer, and only about itself, only in a direct chat.
+    if (/^\/whoami$/i.test(trimmed)) return this.messenger.send(from, from === sender ? `The service sees you as ${sender}.` : "Send /whoami to me in a direct message, not in a shared channel.");
+    // Home device pairing: only an owner channel (OVERSIGHT_SENDER_IDS), typed here, never from the bridge or the device.
+    const pair = trimmed.match(/^\/pair\s+([A-Za-z0-9-]{4,12})$/i);
+    if (pair || /^\/unpair$/i.test(trimmed)) {
+      if (!this.devices || !config.deviceEnabled) return this.messenger.send(from, "The home device is not switched on.");
+      if (!isOversightSender(sender)) return this.messenger.send(from, "Only Paul's own owner channel can pair or unpair a device, and this one is not set as that.");
+      if (!pair) return this.messenger.send(from, `Unpaired. ${this.devices.unpairAll()} device(s) signed out.`);
+      return this.messenger.send(from, this.devices.approve(pair[1]) ? "Paired. The device can now send short text to the chief, which can answer but cannot start, approve or change anything. /unpair signs it out." : "That code is wrong, expired, or the device limit is reached. Nothing was paired.");
+    }
     const retry = trimmed.match(/^\/?retry\s+((?:[a-f0-9]{6}[\s,]*)+)$/i);
     if (retry) return this.messenger.send(from, await this.resumeJobs(retry[1].split(/[\s,]+/).filter(Boolean)));
     if (/^\/pending$/i.test(trimmed)) return this.messenger.send(from, this.pendingText());
@@ -733,6 +746,60 @@ export class Orchestrator {
    * server Paul's chief has, and no file tools at all. The service, not the model, adds the line saying
    * who wrote it.
    */
+  /** Set by the entry point when the home device is switched on. */
+  devices?: DeviceRegistry;
+
+  private deviceTurns = 0;
+  /** Set with `devices`. Without it a device turn is refused. */
+  deviceBudget?: DeviceBudget;
+  /** For tests: the meter a device turn uses. */
+  deviceMeter?: (capUsd: number, stop: () => void) => import("./realcost.js").JobCostWatch;
+
+  /**
+   * The home talk-button device (src/device.ts): Paul's own phone, paired by him, speaking through the same
+   * labelled door as the bridge. It gets the bridge's fixed tool set (web search and fetch and three read-only ops tools: job status, output, and the context of jobs Paul started; start_job is left out in code, so it launches no worker and spends nothing but its own chat turn), never Paul's own chief tools. So it can answer, look things up and check on his jobs; it cannot approve, send, buy, deploy, merge, resume, cancel, schedule or touch
+   * the vault. Approval words are not parsed. Cost is bounded in code: at most 6 model steps per turn, a short
+   * prompt, and the session restarts every 8 turns so history cannot grow without limit.
+   */
+  async askAsDevice(text: string): Promise<string> {
+    const budget = this.deviceBudget;
+    const refused = budget?.gate() ?? (budget ? undefined : "no test budget has been set for the device");
+    if (refused) return `The device cannot answer: ${refused}.`;
+    if (this.deviceTurns++ % DEVICE_SESSION_TURNS === 0) this.store.clearSession("device:home");
+    const abort = new AbortController();
+    const meter = (this.deviceMeter ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop })))(budget!.remaining(), () => abort.abort());
+    let counted = false;
+    try {
+    const result = await this.run({
+      costMeter: meter,
+      abortController: abort,
+      prompt: deviceMessageWrapper(text),
+      systemPrompt: devicePrompt(),
+      model: config.models.chief,
+      resume: this.store.getSession("device:home"),
+      allowedTools: ["WebSearch", "WebFetch", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
+      tools: ["WebSearch", "WebFetch"],
+      disallowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write", "NotebookEdit", "Task"],
+      additionalDirectories: [],
+      mcpServers: { ops: this.bridgeOpsServer({ startJobs: false }), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+      maxTurns: DEVICE_MAX_STEPS,
+      maxBudgetUsd: DEVICE_RUN_GUARD_USD,
+    });
+    const cost = await meter.settle();
+    // Count what the provider charged; a call it would not price is counted at an assumed figure (not a bound).
+    const unpriced = Math.max(0, cost.calls - cost.read);
+    budget!.add(cost.usd + (cost.source === "unavailable" || unpriced > 0 ? Math.max(1, unpriced) * DEVICE_UNPRICED_TURN_USD : 0));
+    counted = true;
+    if (abort.signal.aborted) return "The device test budget ran out during that answer.";
+    if (result.error) return chiefFailureText(result.error);
+    if (result.sessionId) this.store.setSession("device:home", result.sessionId);
+    return tidyReply(result.text) || "(no reply)";
+    } finally {
+      meter.stop();
+      if (!counted) budget!.add(DEVICE_UNPRICED_TURN_USD);
+    }
+  }
+
   async askAsInstinct(text: string): Promise<string> {
     const result = await this.run({
       prompt: bridgeMessageWrapper(text),
@@ -759,7 +826,7 @@ export class Orchestrator {
    * only show jobs the bridge itself started. Nothing here approves, schedules, cancels, remembers, sends,
    * or touches the vault, Google, DNS, uploads or the engineering queue.
    */
-  private bridgeOpsServer() {
+  private bridgeOpsServer(opts: { startJobs?: boolean } = { startJobs: true }) {
     const store = this.store;
     const jobs = this.jobs;
     const mine = (id: string) => {
@@ -833,7 +900,7 @@ export class Orchestrator {
           },
           { annotations: { readOnlyHint: true } },
         ),
-      ],
+      ].filter((t) => opts.startJobs !== false || t.name !== "start_job"),
     });
   }
 

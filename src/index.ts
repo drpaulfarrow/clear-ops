@@ -47,6 +47,7 @@ import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex,
 import { UptimeLog } from "./uptime.js";
 import { defaultProbes, HealthProbes } from "./health.js";
 import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
+import { DeviceBudget, DEVICE_PATH, DEVICE_TEXT_MAX_CHARS, DEVICE_TURNS_PER_DAY, DeviceRegistry, deviceRouter } from "./device.js";
 import { BridgeChat, BRIDGE_REPLY_TO } from "./instinct-chat.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -229,6 +230,11 @@ export function buildApp(deps: AppDeps) {
   const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
   scheduler.boot();
   bridgeChat = new BridgeChat({ ask: (text) => orchestrator.askAsInstinct(text), logFile: path.join(config.dataDir, "instinct-bridge.jsonl") });
+  const deviceRegistry = new DeviceRegistry(path.join(config.dataDir, "devices.json"));
+  orchestrator.devices = deviceRegistry;
+  const deviceBudget = new DeviceBudget(path.join(config.dataDir, "device-budget.json"), () => config.deviceTestBudgetUsd);
+  orchestrator.deviceBudget = deviceBudget;
+  const deviceChat = new BridgeChat({ ask: (text) => orchestrator.askAsDevice(text), logFile: path.join(config.dataDir, "device-chat.jsonl"), turnsPerDay: DEVICE_TURNS_PER_DAY, maxChars: DEVICE_TEXT_MAX_CHARS, gate: () => deviceBudget.gate() });
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
   // Cleo, the voice brain: hands spoken requests to the chief as if typed in the voice channel's chat.
@@ -282,6 +288,9 @@ export function buildApp(deps: AppDeps) {
   // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach
   // Paul's own chat, approve anything, grant a permit or start anything but read-only research or write jobs.
   app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat }));
+
+  // The home talk-button device (src/device.ts): paired by the owner typing /pair, text only, no tools. 404 unless DEVICE_ENABLED=true.
+  app.use(DEVICE_PATH, deviceRouter({ registry: deviceRegistry, chat: deviceChat, enabled: config.deviceEnabled }));
 
   // Meta webhook verification handshake
   app.get("/webhook", (req, res) => {

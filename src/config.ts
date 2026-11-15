@@ -244,6 +244,10 @@ export const config = {
   oversightSenderIds: (process.env.OVERSIGHT_SENDER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   /** The bridge chat routes start paid model turns; off unless BRIDGE_CHAT_ENABLED is exactly "true". */
   instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
+  /** The home talk-button device (src/device.ts): off unless DEVICE_ENABLED=true.. */
+  deviceEnabled: process.env.DEVICE_ENABLED === "true",
+  /** The home device's own test budget in USD (provider money). Unset or 0: no device turn is allowed. */
+  deviceTestBudgetUsd: Number(process.env.DEVICE_TEST_BUDGET_USD) > 0 ? Number(process.env.DEVICE_TEST_BUDGET_USD) : 0,
   /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
   uploadMaxMb: Number(process.env.UPLOAD_MAX_MB ?? 20),
   /**

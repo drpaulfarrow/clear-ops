@@ -74,6 +74,11 @@ export interface BridgeChatDeps {
   /** JSON lines, appended; created on first use. */
   logFile: string;
   now?: () => number;
+  /** Overrides for a narrower caller (the home device); the defaults are the bridge's. */
+  turnsPerDay?: number;
+  maxChars?: number;
+  /** Checked before every turn; a string refuses it (403) with that reason. */
+  gate?: () => string | undefined;
 }
 
 export type Submitted = { ok: true; id: string } | { ok: false; status: number; error: string };
@@ -121,9 +126,13 @@ export class BridgeChat {
   submit(raw: unknown): Submitted {
     const text = typeof raw === "string" ? raw.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim() : "";
     if (!text) return { ok: false, status: 400, error: "text is required" };
-    if (text.length > BRIDGE_TEXT_MAX_CHARS) return { ok: false, status: 413, error: `text is over ${BRIDGE_TEXT_MAX_CHARS} characters` };
+    const maxChars = this.deps.maxChars ?? BRIDGE_TEXT_MAX_CHARS;
+    if (text.length > maxChars) return { ok: false, status: 413, error: `text is over ${maxChars} characters` };
     if (this.busy) return { ok: false, status: 409, error: "a turn is already in progress" };
-    if (this.turnsToday() >= BRIDGE_TURNS_PER_DAY) return { ok: false, status: 429, error: `routine limit of ${BRIDGE_TURNS_PER_DAY} turns in 24 hours reached` };
+    const perDay = this.deps.turnsPerDay ?? BRIDGE_TURNS_PER_DAY;
+    if (this.turnsToday() >= perDay) return { ok: false, status: 429, error: `routine limit of ${perDay} turns in 24 hours reached` };
+    const refused = this.deps.gate?.();
+    if (refused) return { ok: false, status: 403, error: refused };
     const id = randomBytes(6).toString("hex");
     this.busy = true;
     this.replies.set(id, { status: "pending" });
