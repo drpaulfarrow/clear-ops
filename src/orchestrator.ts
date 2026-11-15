@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { BRIDGE_JOBS_PER_DAY, bridgeJobView, BRIDGE_KINDS_LIST, BRIDGE_REPLY_TO, BRIDGE_SENDER, bridgeMessageWrapper, bridgePrompt, bridgeJobBrief } from "./instinct-chat.js";
-import { bookingLink, config, isAllowed } from "./config.js";
+import { bookingLink, config, isAllowed, isOversightSender } from "./config.js";
 import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
 import { ACTION_KINDS, actionExecutors, lockKey, type JobRunner } from "./jobs.js";
@@ -815,9 +815,9 @@ export class Orchestrator {
             const view = (j: Job) => jobContextView(j, (x) => store.readOutput(x));
             if (id) {
               const j = store.getJob(id);
-              return { content: [{ type: "text", text: j && isPaulsJob(j, isAllowed) ? JSON.stringify(view(j), null, 2) : `No job ${id} started by Paul.` }] };
+              return { content: [{ type: "text", text: j && isPaulsJob(j, isOversightSender) ? JSON.stringify(view(j), null, 2) : `No job ${id} started by Paul.` }] };
             }
-            const list = store.allJobs().filter((j) => isPaulsJob(j, isAllowed)).slice(-CONTEXT_LIST_MAX).map((j) => ({ ...view(j), output: undefined }));
+            const list = store.allJobs().filter((j) => isPaulsJob(j, isOversightSender)).slice(-CONTEXT_LIST_MAX).map((j) => ({ ...view(j), output: undefined }));
             return { content: [{ type: "text", text: list.length ? JSON.stringify(list, null, 2) : "No jobs started by Paul yet." }] };
           },
           { annotations: { readOnlyHint: true } },

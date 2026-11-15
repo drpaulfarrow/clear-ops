@@ -240,6 +240,8 @@ export const config = {
   uploadsDir: path.resolve(process.env.UPLOADS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "uploads")),
   /** Shared secret for the Instinct bridge (src/instinct-bridge.ts). Empty means the bridge is off. */
   instinctBridgeToken: process.env.INSTINCT_BRIDGE_TOKEN ?? "",
+  /** Exact sender ids (as stored on a job, e.g. "tg:123", "dc:u:123" or a number) whose jobs the bridge's read routes may show. Empty (the default) shows only the bridge's own jobs. */
+  oversightSenderIds: (process.env.OVERSIGHT_SENDER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   /** The bridge chat routes start paid model turns; off unless BRIDGE_CHAT_ENABLED is exactly "true". */
   instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
   /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
@@ -383,6 +385,11 @@ export function bookingLink(store?: { settings(): { eaBookingLink?: string } }):
 /** Everyone the workforce will answer, across channels. */
 export function isAllowed(from: string): boolean {
   return config.allowedNumbers.includes(from) || config.allowedTelegramIds.includes(from) || config.allowedDiscordIds.includes(from);
+}
+
+/** Who the bridge's read routes treat as the owner: only ids listed in OVERSIGHT_SENDER_IDS, never the whole allowlist. */
+export function isOversightSender(from: string): boolean {
+  return config.oversightSenderIds.includes(from);
 }
 
 /** Validate what production needs. Tests and the simulator skip this. */
