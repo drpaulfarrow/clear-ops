@@ -238,6 +238,8 @@ export const config = {
    * Override with UPLOADS_DIR; it must not sit inside REPO_DIR or SELF_REPO_DIR.
    */
   uploadsDir: path.resolve(process.env.UPLOADS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "uploads")),
+  /** Shared secret for the Instinct bridge (src/instinct-bridge.ts). Empty means the bridge is off. */
+  instinctBridgeToken: process.env.INSTINCT_BRIDGE_TOKEN ?? "",
   /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
   uploadMaxMb: Number(process.env.UPLOAD_MAX_MB ?? 20),
   /**
