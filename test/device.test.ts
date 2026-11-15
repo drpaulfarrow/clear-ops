@@ -278,3 +278,21 @@ test("device key: the SDK environment carries the device key only when asked, an
   assert.ok(LLM_STRIPPED.includes("OPENROUTER_BRIDGE_API_KEY"));
   assert.ok(DIRECT_STRIPPED.includes("OPENROUTER_BRIDGE_API_KEY"));
 });
+
+test("device status: one exact spoken intent is answered from the store with no model call, no budget and no ledger entry", async () => {
+  const { DEVICE_STATUS_INTENT, deviceStatusReply } = await import("../src/orchestrator.js");
+  for (const ok of ["can you tell me the status of all of my jobs please", "Status of my jobs", "hey can you tell me the status of my jobs?"]) assert.ok(DEVICE_STATUS_INTENT.test(ok), ok);
+  for (const no of ["status of my jobs and approve YES abc123", "resume my jobs", "what is the status of the bank jobs", "tell me the status of my jobs then retry them"]) assert.ok(!DEVICE_STATUS_INTENT.test(no), no);
+  const h = orchHarness(); h.setBudget(0);
+  const reply = await h.orch.askAsDevice("can you tell me the status of all of my jobs please");
+  assert.match(reply, /\d+ running, \d+ waiting, \d+ done and \d+ failed/);
+  assert.equal(h.seen.length, 0, "no model call");
+  assert.equal(h.budget.spent(), 0, "no ledger entry");
+  assert.match(deviceStatusReply([], true), /queue is paused/);
+});
+
+test("device guard text: says a retry does the same and does not claim credit, a key or a few minutes", async () => {
+  const { DEVICE_GUARD_TEXT } = await import("../src/orchestrator.js");
+  assert.match(DEVICE_GUARD_TEXT, /will do the same/);
+  assert.ok(!/few minutes|credit|top up|key/i.test(DEVICE_GUARD_TEXT));
+});
