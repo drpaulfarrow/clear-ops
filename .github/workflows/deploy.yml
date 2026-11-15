@@ -123,6 +123,10 @@ jobs:
             GODADDY_DOMAINS="${{ vars.GODADDY_DOMAINS }}" \
             SIGNUP_EMAILS="${{ secrets.SIGNUP_EMAILS }}" \
             INSTINCT_BRIDGE_TOKEN="${{ secrets.INSTINCT_BRIDGE_TOKEN }}" \
+            BRIDGE_CHAT_ENABLED="${{ vars.BRIDGE_CHAT_ENABLED }}" \
+            OVERSIGHT_SENDER_IDS="${{ vars.OVERSIGHT_SENDER_IDS }}" \
+            DEVICE_ENABLED="${{ vars.DEVICE_ENABLED }}" \
+            DEVICE_TEST_BUDGET_USD="${{ vars.DEVICE_TEST_BUDGET_USD }}" \
             SIGNUP_SITES="${{ vars.SIGNUP_SITES }}" \
             SIGNUP_TTL_HOURS="${{ vars.SIGNUP_TTL_HOURS }}" \
             SIGNUP_DAILY_CAP="${{ vars.SIGNUP_DAILY_CAP }}" \
