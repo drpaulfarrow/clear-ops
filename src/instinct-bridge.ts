@@ -13,12 +13,20 @@
  *  - GET  /api/instinct/chat/:id     {status, reply} for that message.
  *  - GET  /api/instinct/jobs/:id     status, and the report once done, of a job this bridge started only.
  *  - GET  /api/instinct/transcript   what was said each way and the result lines of the bridge's jobs.
+ *  - GET  /api/instinct/discord/guilds  (404 unless a gateway is connected) read-only: guild and channel names, the
+ *    bot's Manage Channels permission, whether the owner is guild owner or administrator. No messages, no token.
+ *  - POST /api/instinct/retry        {"id"} rerun ONE failed job, only if its id is in BRIDGE_RETRY_ALLOW (empty by
+ *    default, so the route is a 404), only while the daily spend cap is not reached, at most BRIDGE_RETRY_PER_DAY
+ *    a day, counted in a log that is written before the retry runs; an unreadable or unwritable log refuses the
+ *    retry instead of running it. It never lifts the queue hold and never runs resume; every other queued job stays where it is.
  *
  * What it cannot do, by construction: reach Paul's own conversation, parse an approval word, start any
- * job but a read-only research or write job, grant a permit, schedule, cancel, resume, read a secret, an
+ * job but a read-only research or write job, grant a permit, schedule, cancel, resume, retry a job that is not
+ * on the owner's allowlist, read a secret, an
  * upload or the data directory, or act as Paul anywhere.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { Request, Response, Router as ExpressRouter } from "express";
 import { Router } from "express";
 import { failureLabel } from "./failures.js";
@@ -44,6 +52,19 @@ export interface InstinctBridgeDeps {
   /** The model-backed chat routes. Off unless set: the read-only routes need no model and cost nothing. */
   chatEnabled?: boolean;
   now?: () => number;
+  /**
+   * Scoped retry. Both must be set for the route to exist: `retryAllow` is the owner's list of failed job ids
+   * the bridge may rerun (empty means 404), `retry` reruns one job by id the way the owner's own retry
+   * command does. `retryBlocked` says why a retry must not run now (the daily spend cap), or returns undefined.
+   */
+  retryAllow?: readonly string[];
+  retry?: (id: string) => { id: string; status: string };
+  retryBlocked?: () => string | undefined;
+  retryPerDay?: number;
+  /** Read-only guild look from the Discord gateway. Absent, or resolving to undefined (no gateway connected), means 404; a read that throws is a 502. */
+  guilds?: () => Promise<unknown | undefined>;
+  /** Where the retry timestamps are kept, so the daily limit survives a restart. Without it they live in memory only. */
+  retryLogFile?: string;
 }
 
 function sameToken(given: string, expected: string): boolean {
@@ -138,6 +159,69 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
     if (!j || j.origin !== "instinct") return void res.sendStatus(404);
     const out = j.status === "done" ? deps.store.readOutput(j.id) : undefined;
     res.set("Cache-Control", "no-store").json({ ...bridgeJobView(j), ...(out ? { output: maskSecrets(out.slice(0, OUTPUT_MAX_CHARS)) } : {}) });
+  });
+
+  router.get("/discord/guilds", async (_req, res) => {
+    if (!deps.guilds) return void res.sendStatus(404);
+    try {
+      const g = await deps.guilds();
+      if (g === undefined) return void res.sendStatus(404);
+      res.set("Cache-Control", "no-store").json(g);
+    } catch {
+      res.status(502).json({ ok: false, error: "Discord could not be read just now." });
+    }
+  });
+
+  const retried: number[] = [];
+  // The log must be trustworthy before any retry runs. Missing file means none yet; anything else wrong
+  // (unreadable, not a list of numbers) closes the route until the owner looks at it.
+  let retryLogBroken = false;
+  if (deps.retryLogFile) {
+    try {
+      const saved = JSON.parse(readFileSync(deps.retryLogFile, "utf8")) as unknown;
+      if (!Array.isArray(saved) || !saved.every((x) => typeof x === "number" && Number.isFinite(x))) retryLogBroken = true;
+      else retried.push(...(saved as number[]).sort((a, b) => a - b));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") retryLogBroken = true;
+    }
+  }
+  /** Writes the list to a temporary file and renames it over the log, so a crash leaves the old or the new one, never half. */
+  const persistRetries = (): boolean => {
+    if (!deps.retryLogFile) return true;
+    try {
+      const tmp = `${deps.retryLogFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify(retried));
+      renameSync(tmp, deps.retryLogFile);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  router.post("/retry", (req, res) => {
+    const allow = deps.retryAllow ?? [];
+    if (!deps.retry || allow.length === 0) return void res.sendStatus(404);
+    const id = String((req.body as { id?: unknown } | undefined)?.id ?? "").trim().toLowerCase();
+    if (!/^[a-f0-9]{6}$/.test(id) || !allow.includes(id)) return void res.status(403).json({ ok: false, error: "That job is not on the retry allowlist." });
+    const job = deps.store.getJob(id);
+    if (!job) return void res.status(404).json({ ok: false, error: "No such job." });
+    if (job.status !== "failed") return void res.status(409).json({ ok: false, error: `That job is ${job.status}, not failed.` });
+    if (recent(retried, 24 * 3_600_000) >= (deps.retryPerDay ?? 2)) return void res.status(429).json({ ok: false, error: "Retry limit for today reached." });
+    const blocked = deps.retryBlocked?.();
+    if (blocked) return void res.status(423).json({ ok: false, error: blocked });
+    if (retryLogBroken) return void res.status(503).json({ ok: false, error: "The retry log is unreadable, so no retry runs until the owner checks it." });
+    try {
+      // Count and save it before the job is touched; if it cannot be saved, nothing runs.
+      retried.push(now());
+      if (!persistRetries()) {
+        retried.pop();
+        return void res.status(503).json({ ok: false, error: "The retry could not be recorded, so it did not run." });
+      }
+      const r = deps.retry(id);
+      res.status(202).json({ ok: true, id: r.id, status: r.status });
+    } catch (err) {
+      res.status(409).json({ ok: false, error: err instanceof Error ? err.message : "Retry refused." });
+    }
   });
 
   router.get("/transcript", (_req, res) => {

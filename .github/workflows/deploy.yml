@@ -125,6 +125,7 @@ jobs:
             SIGNUP_EMAILS="${{ secrets.SIGNUP_EMAILS }}" \
             INSTINCT_BRIDGE_TOKEN="${{ secrets.INSTINCT_BRIDGE_TOKEN }}" \
             BRIDGE_CHAT_ENABLED="${{ vars.BRIDGE_CHAT_ENABLED }}" \
+            BRIDGE_RETRY_ALLOW="${{ vars.BRIDGE_RETRY_ALLOW }}" \
             OVERSIGHT_SENDER_IDS="${{ vars.OVERSIGHT_SENDER_IDS }}" \
             DEVICE_ENABLED="${{ vars.DEVICE_ENABLED }}" \
             DEVICE_TEST_BUDGET_USD="${{ vars.DEVICE_TEST_BUDGET_USD }}" \

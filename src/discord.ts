@@ -1,4 +1,4 @@
-import { ChannelType, Client, GatewayIntentBits, Partials, ThreadAutoArchiveDuration, type Message, type TextBasedChannel } from "discord.js";
+import { ChannelType, Client, GatewayIntentBits, PermissionFlagsBits, Partials, ThreadAutoArchiveDuration, type Message, type TextBasedChannel } from "discord.js";
 import { config } from "./config.js";
 import { chunk, type Messenger } from "./whatsapp.js";
 import type { HandleContext } from "./orchestrator.js";
@@ -237,4 +237,40 @@ export class DiscordListener {
     }
     await this.handle(from, m.content ?? "", { replyTo, messageId: m.id, ...(m.channel?.type === ChannelType.DM ? { direct: true } : {}), ...(files.length ? { attachments: files.map((f) => discordAttachment(f)) } : {}) });
   }
+}
+
+/** What `inspectGuilds` needs from the gateway client, so a test can use a plain object. */
+export interface GuildView {
+  id: string;
+  name: string;
+  ownerId: string;
+  members: { me?: { permissions: { has(p: bigint): boolean } } | null; fetch(id: string): Promise<{ permissions: { has(p: bigint): boolean } }> };
+  channels: { cache: Iterable<{ id: string; name: string; type: number; parentId: string | null }> };
+}
+
+/**
+ * Read-only look at where the bot is, for the Instinct bridge: guild names and ids, channel and category names,
+ * whether the bot may manage channels, and whether the owner is the guild owner or an administrator. No
+ * messages, no token, no member lists, nothing written.
+ */
+export async function inspectGuilds(client: { guilds: { cache: Iterable<GuildView> } }, ownerUserId: string) {
+  const out = [];
+  for (const g of client.guilds.cache) {
+    let ownerIsAdmin: boolean | null = null;
+    try {
+      ownerIsAdmin = (await g.members.fetch(ownerUserId)).permissions.has(PermissionFlagsBits.Administrator);
+    } catch {
+      ownerIsAdmin = null; // not a member, or Discord would not say
+    }
+    const chans = [...g.channels.cache].map((c) => ({ id: c.id, name: c.name, kind: c.type === ChannelType.GuildCategory ? "category" : c.type === ChannelType.GuildText ? "text" : "other", parentId: c.parentId }));
+    out.push({
+      id: g.id,
+      name: g.name,
+      ownerIsOwner: g.ownerId === ownerUserId,
+      ownerIsAdministrator: ownerIsAdmin,
+      botCanManageChannels: g.members.me?.permissions.has(PermissionFlagsBits.ManageChannels) ?? null,
+      channels: chans,
+    });
+  }
+  return { guilds: out };
 }

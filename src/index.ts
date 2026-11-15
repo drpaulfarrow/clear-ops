@@ -14,7 +14,7 @@ import { Scheduler } from "./scheduler.js";
 import { Store, type EaPermit, type JobPermit } from "./store.js";
 import { CloudApiMessenger, parseInbound, verifySignature, whatsappAttachment, type Messenger } from "./whatsapp.js";
 import { TelegramMessenger, TelegramPoller } from "./telegram.js";
-import { DiscordListener } from "./discord.js";
+import { DiscordListener, inspectGuilds } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
 import { isAllowed, isOversightSender } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
@@ -140,6 +140,9 @@ function purchasePage(a: PurchaseAction, token: string, screenshot?: string): st
 }
 
 /** Builds the Express app. Dependencies are injectable so tests can run it without the network. */
+/** The Discord gateway, once main() has started it, for the bridge's read-only guild look. */
+const discordRef: { current?: DiscordListener } = {};
+
 export function buildApp(deps: AppDeps) {
   // Paul's login vault and the card vault: the service's own singletons, unless a test injects ones with
   // a pinned clock, which is how the one-time links' expiry is exercised through the pages themselves.
@@ -287,7 +290,7 @@ export function buildApp(deps: AppDeps) {
   // Paul's assistant (src/instinct-bridge.ts, src/instinct-chat.ts): an authenticated door for status and for
   // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach
   // Paul's own chat, approve anything, grant a permit or start anything but read-only research or write jobs.
-  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat }));
+  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat, guilds: () => (discordRef.current ? inspectGuilds(discordRef.current.client as never, config.oversightSenderIds.find((x) => x.startsWith("dc:u:"))?.slice(5) ?? "") : Promise.resolve(undefined)), retryLogFile: path.join(config.dataDir, "bridge-retries.json"), retryAllow: config.instinctBridgeRetryAllow, retry: (id) => jobs.retry(id), retryBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no retry runs from here." : undefined) }));
 
   // The home talk-button device (src/device.ts): paired by the owner typing /pair, text only, no tools. 404 unless DEVICE_ENABLED=true.
   app.use(DEVICE_PATH, deviceRouter({ registry: deviceRegistry, chat: deviceChat, enabled: config.deviceEnabled }));
@@ -672,6 +675,7 @@ if (isMain) {
   if (config.channels.includes("telegram")) routes.push({ prefix: "tg:", messenger: new TelegramMessenger() });
   if (config.channels.includes("discord")) {
     discord = new DiscordListener((from, text, ctx) => orchestrator.handle(from, text, ctx), isAllowed);
+    discordRef.current = discord;
     routes.push({ prefix: "dc:", messenger: discord.messenger() });
   }
   const messenger = new RouterMessenger(routes, config.channels.includes("whatsapp") ? new CloudApiMessenger() : undefined);
