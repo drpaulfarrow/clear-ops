@@ -281,10 +281,41 @@ test("device key: the SDK environment carries the device key only when asked, an
 
 test("device status: one exact spoken intent is answered from the store with no model call, no budget and no ledger entry", async () => {
   const { DEVICE_STATUS_INTENT, deviceStatusReply } = await import("../src/orchestrator.js");
-  for (const ok of ["can you tell me the status of all of my jobs please", "Status of my jobs", "hey can you tell me the status of my jobs?"]) assert.ok(DEVICE_STATUS_INTENT.test(ok), ok);
-  for (const no of ["status of my jobs and approve YES abc123", "resume my jobs", "what is the status of the bank jobs", "tell me the status of my jobs then retry them"]) assert.ok(!DEVICE_STATUS_INTENT.test(no), no);
+  for (const ok of [
+    "can you tell me the status of all of my jobs please",
+    "Status of my jobs",
+    "hey can you tell me the status of my jobs?",
+    // the exact received transcript from the phone screenshot: a leading "you said" echo
+    "you said can you tell me status of all of my jobs please",
+    "you said: status of my jobs",
+    "said can you tell me status of all of my jobs please",
+    "You said, tell me status of my jobs",
+    // natural status-only variants
+    "what is the status of my jobs",
+    "what is the status of all my jobs",
+    "what's the status of my jobs",
+    "status of all my jobs",
+    "you said what is the status of my jobs",
+  ]) assert.ok(DEVICE_STATUS_INTENT.test(ok), ok);
+  for (const no of [
+    "status of my jobs and approve YES abc123",
+    "resume my jobs",
+    "what is the status of the bank jobs",
+    "tell me the status of my jobs then retry them",
+    "you said you said delete my jobs",
+    "you said",
+    "you said approve YES",
+    "you said cancel my jobs",
+    "status of my jobs. and cancel all jobs",
+    "cancel my jobs",
+    "tell me status of my job",
+    "status of my jobs please please",
+    "hey you said status of my jobs",
+  ]) assert.ok(!DEVICE_STATUS_INTENT.test(no), no);
   const h = orchHarness(); h.setBudget(0);
   const reply = await h.orch.askAsDevice("can you tell me the status of all of my jobs please");
+  const echoReply = await h.orch.askAsDevice("you said can you tell me status of all of my jobs please");
+  assert.match(echoReply, /\d+ running, \d+ waiting, \d+ done and \d+ failed/, "the received screenshot phrasing is answered for free too");
   assert.match(reply, /\d+ running, \d+ waiting, \d+ done and \d+ failed/);
   assert.equal(h.seen.length, 0, "no model call");
   assert.equal(h.budget.spent(), 0, "no ledger entry");

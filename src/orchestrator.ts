@@ -1321,8 +1321,13 @@ export function repoLabel(alias: string): string {
   return r?.slug ? `${alias} (${r.slug})` : alias;
 }
 
-/** The one spoken request the device answers without a model: status of his jobs, in these words and no others. */
-export const DEVICE_STATUS_INTENT = /^(?:hey,?\s+)?(?:can you\s+)?(?:please\s+)?(?:tell me\s+)?(?:the\s+)?status of (?:all of )?my jobs(?:\s+please)?[.?!]?$/i;
+/**
+ * The one spoken request the device answers without a model: status of his jobs, in these words and no others.
+ * The speech-to-text transcript may carry a leading "you said"/"said" echo, so that lead-in is stripped here;
+ * the rest is still only a read-only status question ("what is", "can you tell me", "all of"/"all my jobs").
+ * Nothing else matches: no approvals, no execution words, no trailing instructions.
+ */
+export const DEVICE_STATUS_INTENT = /^(?:(?:you said|said)[:,]?\s+)?(?:hey,?\s+)?(?:what(?:'s| is)\s+)?(?:can you\s+)?(?:please\s+)?(?:tell me\s+)?(?:the\s+)?status of (?:all(?: of)? )?my jobs(?:\s+please)?[.?!]?$/i;
 /** Said when the SDK's per-answer safety limit stopped a device answer: a retry of the same question does the same. */
 export const DEVICE_GUARD_TEXT = "The safety limit on one spoken answer stopped it before it finished. Asking the same question again will do the same, so please ask something shorter or use your usual chat.";
 const queueHeldNow = (store: { queueHold(): unknown }) => !!store.queueHold();
