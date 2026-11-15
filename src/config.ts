@@ -246,6 +246,10 @@ export const config = {
   instinctBridgeRetryAllow: (process.env.BRIDGE_RETRY_ALLOW ?? "").split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[a-f0-9]{6}$/.test(x)),
   /** The bridge chat routes start paid model turns; off unless BRIDGE_CHAT_ENABLED is exactly "true". */
   instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
+  /** A separate, provider-capped OpenRouter key used only for bridge chat turns. Unset: chat turns are refused (no fallback to OPENROUTER_API_KEY). */
+  bridgeOpenrouterKey: process.env.OPENROUTER_BRIDGE_API_KEY ?? "",
+  /** Stop threshold for bridge chat turns, in the provider's money (USD). Unset or 0: no chat turn is allowed at all. */
+  bridgeChatBudgetUsd: Number(process.env.BRIDGE_CHAT_BUDGET_USD) > 0 ? Number(process.env.BRIDGE_CHAT_BUDGET_USD) : 0,
   /** The home talk-button device (src/device.ts): off unless DEVICE_ENABLED=true.. */
   deviceEnabled: process.env.DEVICE_ENABLED === "true",
   /** A separate, provider-capped OpenRouter key used only for device turns. Unset: device turns are refused (no fallback to OPENROUTER_API_KEY). */

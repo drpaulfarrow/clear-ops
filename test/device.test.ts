@@ -275,4 +275,6 @@ test("device key: the SDK environment carries the device key only when asked, an
   assert.equal(llmEnv("or-device-test-key").ANTHROPIC_AUTH_TOKEN, "or-device-test-key");
   assert.ok(LLM_STRIPPED.includes("OPENROUTER_DEVICE_API_KEY"));
   assert.ok(DIRECT_STRIPPED.includes("OPENROUTER_DEVICE_API_KEY"));
+  assert.ok(LLM_STRIPPED.includes("OPENROUTER_BRIDGE_API_KEY"));
+  assert.ok(DIRECT_STRIPPED.includes("OPENROUTER_BRIDGE_API_KEY"));
 });

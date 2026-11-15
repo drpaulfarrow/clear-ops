@@ -127,10 +127,11 @@ export const DIRECT_STRIPPED = [
   "CLAUDE_CODE_SUBAGENT_MODEL",
   "OPENROUTER_API_KEY",
   "OPENROUTER_DEVICE_API_KEY",
+  "OPENROUTER_BRIDGE_API_KEY",
 ];
 
 /** Variables removed from the worker environment in OpenRouter mode (llmEnv supplies what is needed). */
-export const LLM_STRIPPED = ["OPENROUTER_API_KEY", "OPENROUTER_DEVICE_API_KEY", "OPENROUTER_PRICES"];
+export const LLM_STRIPPED = ["OPENROUTER_API_KEY", "OPENROUTER_DEVICE_API_KEY", "OPENROUTER_BRIDGE_API_KEY", "OPENROUTER_PRICES"];
 
 /** Price rows for the models in use, for the SDK's managed modelPricing setting. */
 export function modelPrices(): Record<string, Price> {

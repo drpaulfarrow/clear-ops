@@ -232,7 +232,9 @@ export function buildApp(deps: AppDeps) {
   const scheduler = new Scheduler(deps.store, jobs);
   const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
   scheduler.boot();
-  bridgeChat = new BridgeChat({ ask: (text) => orchestrator.askAsInstinct(text), logFile: path.join(config.dataDir, "instinct-bridge.jsonl") });
+  const bridgeBudget = new DeviceBudget(path.join(config.dataDir, "bridge-chat-budget.json"), () => config.bridgeChatBudgetUsd, "the bridge chat");
+  orchestrator.bridgeBudget = bridgeBudget;
+  bridgeChat = new BridgeChat({ ask: (text) => orchestrator.askAsInstinct(text), logFile: path.join(config.dataDir, "instinct-bridge.jsonl"), gate: () => bridgeBudget.gate() });
   const deviceRegistry = new DeviceRegistry(path.join(config.dataDir, "devices.json"));
   orchestrator.devices = deviceRegistry;
   const deviceBudget = new DeviceBudget(path.join(config.dataDir, "device-budget.json"), () => config.deviceTestBudgetUsd);
