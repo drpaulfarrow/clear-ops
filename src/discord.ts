@@ -307,3 +307,9 @@ export async function readOwnerDm(client: DmView, ownerUserId: string, limit: nu
     ...(rows.length >= limit && rows[0] ? { nextBefore: rows[0].id } : {}),
   };
 }
+
+/** The one Discord user the owner-only reads may target. More than one `dc:u:` entry is ambiguous, so none is chosen. */
+export function soleDiscordOwner(senderIds: readonly string[]): string | undefined {
+  const ids = [...new Set(senderIds.filter((x) => x.startsWith("dc:u:")).map((x) => x.slice(5)))];
+  return ids.length === 1 && /^\d{15,25}$/.test(ids[0]!) ? ids[0] : undefined;
+}
