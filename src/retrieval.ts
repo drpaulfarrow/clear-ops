@@ -22,8 +22,10 @@
  * decision and what the web returned is ever considered, and only the decision is stored.
  *
  * The decision call itself is asked for structured output (a JSON schema, OpenRouter's response_format)
- * when the provider supports it, with a plain bare-JSON parse as the fallback, and it is retried once
- * and then given up on. A decision step that still fails fails OPEN, never closed: the service runs one
+ * when the provider supports it, routed to an endpoint that really takes it and with reasoning turned
+ * off (reasoning tokens are counted inside max_tokens, so a reasoning model can spend the whole reply
+ * thinking and come back empty at the cap), with a plain bare-JSON parse as the fallback, and it is
+ * retried once and then given up on. A decision step that still fails fails OPEN, never closed: the service runs one
  * search built from the request itself rather than searching nothing, because the rule the brief states
  * is that when we are unsure we retrieve (Paul's brief, point 5, 13 November 2026). Only when that
  * fallback search also fails or returns nothing is the honest "no search could be run" block shown.
@@ -412,8 +414,23 @@ async function decisionCall(request: string, fetcher: Fetcher, structured: boole
           ],
           max_tokens: maxTokens,
           temperature: 0,
-          // The provider enforces the shape rather than the prompt asking politely for it.
-          ...(structured ? { response_format: { type: "json_schema", json_schema: decisionSchema() } } : {}),
+          // The provider enforces the shape rather than the prompt asking politely for it, and it is
+          // routed only to an endpoint that really takes the parameters below. Both ride with the
+          // structured attempt alone: the plain fallback is left exactly as it was, with room from the
+          // start (DECISION_PLAIN_MAX_TOKENS) rather than a schema to be spent on.
+          ...(structured
+            ? {
+                response_format: { type: "json_schema", json_schema: decisionSchema() },
+                // Reasoning tokens are counted inside max_tokens, so a reasoning model (the default
+                // tier is one) can spend the whole decision reply thinking and come back empty with
+                // finish_reason "length": the documented cause of "the decision step did not return
+                // JSON" at a small cap, in exactly this configuration (research rank 1, 15 Nov 2026).
+                reasoning: { enabled: false },
+                // Without this the schema is a strong hint to whichever endpoint was picked, and an
+                // endpoint that does not really support it answers unconstrained.
+                provider: { require_parameters: true },
+              }
+            : {}),
         }),
         signal: ac.signal,
       });
@@ -529,17 +546,44 @@ async function modelDecide(request: string, fetcher: Fetcher): Promise<DecisionW
 /* ------------------------------------------------------------------------------- searches and pages */
 
 /**
+ * The harness's own wrappers around a request, which a query must not be built from: the note the chief
+ * is given about this turn's uploads, a voice request's own prefix, the machine sections of a generated
+ * brief (the report it is fixing, or the review of it) and the scheduler's own note.
+ */
+const PAUL_TURN = /\bPaul's messages?(?:\s*\([^)]*\))?:\s*/;
+const MACHINE_REPORT = /\n+(?:Engineer|Agent-?creator|Maintainer)'?s report\s*:/i;
+const REVIEW_SECTION = /\n+Maintainer'?s review \(job [0-9a-f]{6}\):/i;
+const SCHEDULED_NOTE = /\s*\(This is the scheduled run [0-9a-f]{6}\.\)\s*$/i;
+const VOICE_PREFIX = /^\s*Voice request from Paul[^:]*:\s*/i;
+
+/**
  * The query the fallback search runs when the decision step could not be made: the request itself,
- * shortened and stripped of the words that only ask for it. When in doubt we retrieve, so a request the
- * harness could not classify is searched rather than answered from memory.
+ * unwrapped from the harness's own wrappers, shortened and stripped of the words that only ask for it.
+ * When in doubt we retrieve, so a request the harness could not classify is searched rather than
+ * answered from memory, and the query should be the task rather than the machinery around it: a chat
+ * turn's upload note, a generated brief's machine sections and the scheduler's own note are dropped,
+ * and a fix-round brief is searched for the task it is fixing rather than for the review of it.
  */
 export function fallbackQuery(request: string): string {
-  const text = clean(request, MAX_QUERY_CHARS)
+  let text = String(request ?? "");
+  // A generated brief ends with the report it is fixing, or the review of it: not the task.
+  text = text.split(MACHINE_REPORT)[0];
+  text = text.split(REVIEW_SECTION)[0];
+  // A fix-round brief carries the task it is fixing, which is the subject; the instruction to fix it is not.
+  const original = text.split(/\nOriginal task:\n/)[1];
+  if (original) text = original;
+  text = text.replace(SCHEDULED_NOTE, "");
+  // A chat turn is the uploads note followed by Paul's own message: the message is the request.
+  const turns = text.split(PAUL_TURN);
+  if (turns.length > 1) text = turns[turns.length - 1];
+  text = text.replace(VOICE_PREFIX, "");
+  const query = clean(text, MAX_QUERY_CHARS)
     .replace(/^\s*(?:please\s+)?(?:can|could|would)\s+you\s+/i, "")
     .replace(/^\s*(?:please\s+)?(?:tell me|find out|find me|find|search for|search|look up|google)\s+/i, "")
+    .replace(/^["'“”]+|["'“”]+$/g, "")
     .replace(/[?.!,;:]+$/g, "")
     .trim();
-  return (text || clean(request, MAX_QUERY_CHARS)).slice(0, MAX_QUERY_CHARS).trim();
+  return (query || clean(request, MAX_QUERY_CHARS)).slice(0, MAX_QUERY_CHARS).trim();
 }
 
 async function defaultSearch(engine: RetrievalEngine, query: string): Promise<SearchResult[]> {
@@ -677,7 +721,10 @@ export async function retrieve(request: string, deps: RetrieveDeps = {}): Promis
    */
   const failOpen = async (detail: string, diagnostic?: RetrievalDiagnostic): Promise<RetrievalOutcome> => {
     const query = fallbackQuery(request);
-    const engine: RetrievalEngine = configured.includes("brave") ? "brave" : configured[0];
+    // The engine policy is code here as it is everywhere else: the fallback query is classified by the
+    // same rule the model's own queries are (engineFor), rather than always reaching for Brave.
+    const wanted = engineFor(query);
+    const engine: RetrievalEngine = configured.includes(wanted) ? wanted : configured[0];
     if (!query) {
       return build({ needsRetrieval: false, engine: "none", queries: [], reason: "the retrieval check failed", source: "error" }, detail, failureBlock(detail), diagnostic);
     }

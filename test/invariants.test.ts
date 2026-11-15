@@ -959,8 +959,12 @@ test("retrieval is a harness decision, budgeted in code and never run on a stron
   // The call is asked for a schema, retried once and then given up on; a reply cut off at the cap is a
   // failure, never an empty decision.
   assert.match(r, /response_format: \{ type: "json_schema", json_schema: decisionSchema\(\) \}/, "the provider is asked to enforce the shape");
+  assert.match(r, /reasoning: \{ enabled: false \}/, "reasoning is off in the structured attempt, so it cannot spend the reply at the cap");
+  assert.match(r, /provider: \{ require_parameters: true \}/, "the call goes only to an endpoint that really takes the schema");
   assert.match(r, /const attempts: Array<\{ structured: boolean; maxTokens: number \}> = \[/, "the call is retried once and then given up on");
   assert.match(r, /hit the token cap before it wrote any JSON/, "a capped reply is a failure, never an empty decision");
+  // The fallback search obeys the engine policy in code rather than always reaching for Brave.
+  assert.match(r, /const wanted = engineFor\(query\);[\s\S]{0,120}configured\.includes\(wanted\)/, "the fallback query is classified by the same engine policy");
 });
 
 test("the retrieval record holds the decision, never Paul's mail, calendar or uploads, and never a key", () => {

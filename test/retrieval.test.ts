@@ -245,6 +245,13 @@ test("the decision call is one short, tool-free completion on the cheap tier, as
   assert.deepEqual(body.response_format.json_schema.schema.required, ["needs_retrieval", "engine", "queries", "reason"]);
   assert.equal(body.response_format.json_schema.schema.properties.needs_retrieval.type, "boolean");
   assert.ok(body.response_format.json_schema.schema.properties.queries.maxItems <= config.retrieval.maxSearches + 1, "the schema's ceiling matches the budget");
+  // Reasoning is turned off, because reasoning tokens are counted inside max_tokens: a reasoning model
+  // (the default tier is one) can otherwise spend the whole decision reply thinking and come back empty
+  // with finish_reason "length", which is exactly the failure this change fixes (research rank 1).
+  assert.deepEqual(body.reasoning, { enabled: false }, "the structured attempt does not reason");
+  // And it is routed only to an endpoint that really takes the schema, rather than one that treats it as
+  // a strong hint (research rank 2).
+  assert.deepEqual(body.provider, { require_parameters: true }, "the call is routed to an endpoint that supports the schema");
   assert.equal(outcome.record.diagnostic, undefined, "an ordinary turn's record is exactly what it always was");
 });
 
@@ -279,6 +286,8 @@ test("a provider that refuses the schema is retried without it, and the refusal 
   assert.equal(calls.length, 2, "one retry, then stop");
   assert.ok(JSON.parse(calls[0].init.body).response_format, "the first attempt asked for structured output");
   assert.equal(JSON.parse(calls[1].init.body).response_format, undefined, "the retry does not");
+  assert.equal(JSON.parse(calls[1].init.body).reasoning, undefined, "the plain fallback is left exactly as it was");
+  assert.equal(JSON.parse(calls[1].init.body).provider, undefined, "and carries no routing constraint");
   assert.ok(JSON.parse(calls[1].init.body).max_tokens > JSON.parse(calls[0].init.body).max_tokens, "the retry is given more room than the cap that may have cut it off");
   assert.equal(outcome.record.decision.source, "model", "a retried decision is still the model's");
   const diag = outcome.record.diagnostic;
@@ -304,6 +313,8 @@ test("a provider that refuses the schema is retried without it, and the refusal 
   await R.retrieve("Summarise this note.", { fetcher: fetcher2 as never, now: NOW });
   assert.equal(again.length, 1);
   assert.equal(JSON.parse(again[0].init.body).response_format, undefined, "the schema is not asked for again");
+  assert.equal(JSON.parse(again[0].init.body).reasoning, undefined, "nor the reasoning control that goes with it");
+  assert.equal(JSON.parse(again[0].init.body).provider, undefined, "nor the routing constraint");
   R.resetSchemaSupport();
 });
 
@@ -466,6 +477,57 @@ test("the fallback query is the request itself, shortened, not a query invented 
   assert.equal(R.fallbackQuery("<b>Prebid</b> news"), "Prebid news");
   assert.equal(R.fallbackQuery("x".repeat(500)).length, 200, "capped");
   assert.equal(R.fallbackQuery("   "), "", "nothing to search for");
+});
+
+test("the fallback query is the task, unwrapped from the harness's own wrappers", () => {
+  // A chat turn arrives as the uploads note and then Paul's own message: the message is the request.
+  assert.equal(
+    R.fallbackQuery("Saved Connections.csv (1.2 MB).\n\nPaul's message: find the latest TollBit pricing page"),
+    "the latest TollBit pricing page",
+  );
+  // A voice note's transcript comes with the wrapper that says so, and its own quoting.
+  assert.equal(
+    R.fallbackQuery('Paul\'s message (transcribed from his voice note, so it may mishear names and numbers, but it is what he said): "what changed in SPUR this week"'),
+    "what changed in SPUR this week",
+  );
+  // A voice request from Discord arrives with the voice channel's own prefix.
+  assert.equal(R.fallbackQuery("Voice request from Paul in the ClearOps server: Prebid 10 release notes"), "Prebid 10 release notes");
+  // A generated brief ends with the report it is fixing: machinery, not the task.
+  assert.equal(
+    R.fallbackQuery("Fix the pricing copy\n\nEngineer's report:\nI changed three files and opened PR #12."),
+    "Fix the pricing copy",
+  );
+  // A fix-round brief carries the task it is fixing, and then the review of it: the task is the subject.
+  assert.equal(
+    R.fallbackQuery(
+      "Address the maintainer's review on the existing pull request https://github.com/x/y/pull/9 (automatic fix round 1 of 3).\n\nOriginal task:\nResearch SPUR's latest moves\n\nMaintainer's review (job a7a31a):\n# Maintainer review\nTwo things block the merge.",
+    ),
+    "Research SPUR's latest moves",
+  );
+  // A scheduled run's brief names the schedule at the end.
+  assert.equal(R.fallbackQuery("Check what changed at IAB Tech Lab\n\n(This is the scheduled run 8518b3.)"), "Check what changed at IAB Tech Lab");
+});
+
+test("the fallback search obeys the same engine policy as every other query", async () => {
+  withKeys();
+  const asked: Array<{ engine: string; query: string }> = [];
+  const outcome = await R.retrieve("Who are the competitors to TollBit, and what do they charge?", {
+    decide: async () => {
+      throw new Error("HTTP 500: upstream");
+    },
+    search: async (engine, query) => {
+      asked.push({ engine, query });
+      return [result("TollBit alternatives", "https://example.test/tollbit")];
+    },
+    fetchPage: noFetch,
+    now: NOW,
+  });
+  assert.equal(asked.length, 1, "one search, still inside the budget");
+  assert.equal(asked[0].engine, "exa", "an entity question goes to Exa, not always Brave");
+  assert.equal(outcome.record.searches[0].engine, "exa");
+  assert.equal(outcome.record.decision.engine, "exa", "the record says which engine really ran");
+  assert.equal(outcome.record.decision.source, "error", "and that it was the fallback, not the model");
+  assert.match(outcome.evidence, /one search built from the request itself/);
 });
 
 test("engine policy is code: Brave for news and releases, Exa for entities and lookalikes", () => {
