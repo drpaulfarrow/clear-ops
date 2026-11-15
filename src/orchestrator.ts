@@ -91,6 +91,8 @@ export interface HandleContext {
   messageId?: string;
   /** Files on the message. Downloaded only after the sender passes the allowlist. */
   attachments?: Attachment[];
+  /** True when the channel itself says this is a one-to-one chat with the sender (a Discord DM). */
+  direct?: boolean;
 }
 
 export class Orchestrator {
@@ -130,14 +132,14 @@ export class Orchestrator {
   handle(from: string, text: string, ctx: HandleContext = {}): Promise<void> {
     const replyTo = ctx.replyTo ?? from;
     const prev = this.queues.get(replyTo) ?? Promise.resolve();
-    const next = prev.then(() => this.handleOne(from, text, replyTo, ctx.messageId, ctx.attachments ?? [])).catch(async (err) => {
+    const next = prev.then(() => this.handleOne(from, text, replyTo, ctx.messageId, ctx.attachments ?? [], ctx.direct === true)).catch(async (err) => {
       await this.messenger.send(replyTo, `Something went wrong: ${err instanceof Error ? err.message : String(err)}`);
     });
     this.queues.set(replyTo, next);
     return next;
   }
 
-  private async handleOne(sender: string, text: string, from: string, messageId?: string, attachments: Attachment[] = []): Promise<void> {
+  private async handleOne(sender: string, text: string, from: string, messageId?: string, attachments: Attachment[] = [], direct = false): Promise<void> {
     // `sender` is who wrote; `from` is the conversation address replies and sessions are keyed by.
     if (!isAllowed(sender)) {
       console.warn(`Ignored message from unlisted sender ${sender}`);
@@ -211,7 +213,7 @@ export class Orchestrator {
     if (/^\/resume$/i.test(trimmed)) return this.messenger.send(from, await this.resumeJobs());
     // Which sender id the service sees for this account, so the owner can be listed in OVERSIGHT_SENDER_IDS.
     // Only an allowlisted sender (checked above) gets an answer, and only about itself, only in a direct chat.
-    if (/^\/whoami$/i.test(trimmed)) return this.messenger.send(from, from === sender ? `The service sees you as ${sender}.` : "Send /whoami to me in a direct message, not in a shared channel.");
+    if (/^\/whoami$/i.test(trimmed)) return this.messenger.send(from, from === sender || direct ? `The service sees you as ${sender}.` : "Send /whoami to me in a direct message, not in a shared channel.");
     // Home device pairing: only an owner channel (OVERSIGHT_SENDER_IDS), typed here, never from the bridge or the device.
     const pair = trimmed.match(/^\/pair\s+([A-Za-z0-9-]{4,12})$/i);
     if (pair || /^\/unpair$/i.test(trimmed)) {
