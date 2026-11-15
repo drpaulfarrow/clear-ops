@@ -119,9 +119,12 @@ const { Orchestrator } = await import("../src/orchestrator.js");
 const { Scheduler } = await import("../src/scheduler.js");
 const { JobRunner } = await import("../src/jobs.js");
 const { Store } = await import("../src/store.js");
+const { config } = await import("../src/config.js");
 import type { AgentRunner } from "../src/agents.js";
 
 function orchHarness() {
+  config.openrouter.apiKey = "or-main-test-key";
+  (config as any).deviceOpenrouterKey = "or-device-test-key";
   const store = new Store(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-devs-")), "s.json"));
   const sent: string[] = [];
   const messenger = { send: async (_to: string, t: string) => void sent.push(t) } as never;
