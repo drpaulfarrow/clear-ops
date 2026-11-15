@@ -226,7 +226,7 @@ test("behaviour: the bridge chief's tools start only read-only research or write
     const ops = o.mcpServers?.ops as { instance?: any } | undefined;
     if (ops && o.systemPrompt.includes("talking to Paul's assistant")) {
       const reg = ops.instance._registeredTools as Record<string, { callback?: Function; handler?: Function }>;
-      assert.deepEqual(Object.keys(reg).sort(), ["get_output", "job_status", "start_job"]);
+      assert.deepEqual(Object.keys(reg).sort(), ["get_job_context", "get_output", "job_status", "start_job"]);
       const call = async (name: string, args: unknown) => (await (reg[name].callback ?? reg[name].handler)!(args, {})) as { content: Array<{ text: string }>; isError?: boolean };
       for (const kind of ["engineer", "maintain", "ea", "dns", "create_agent", "analyse"]) {
         const r = await call("start_job", { kind, title: "Try it", brief: "x", permits: ["purchase", "send", "dns", "create_repo", "signup"] });
@@ -239,6 +239,9 @@ test("behaviour: the bridge chief's tools start only read-only research or write
       const st = await call("job_status", { id: paulJob.id });
       const out = await call("get_output", { id: paulJob.id });
       results.push(st.content[0].text, out.content[0].text);
+      // get_job_context is the one intentional widening: read-only, Paul's own jobs, no secrets, capped.
+      const ctx = await call("get_job_context", { id: paulJob.id });
+      results.push(ctx.content[0].text);
       return { text: "done", sessionId: "s" };
     }
     return { text: "worker report", costUsd: 0 };
@@ -249,7 +252,10 @@ test("behaviour: the bridge chief's tools start only read-only research or write
   assert.deepEqual(results.slice(0, 7), ["engineer:refused", "maintain:refused", "ea:refused", "dns:refused", "create_agent:refused", "analyse:refused", "research:started"]);
   assert.match(results[7], /No bridge job/);
   assert.match(results[8], /No output for bridge job/);
-  assert.ok(!results.join("").includes("PAULS-PRIVATE"));
+  assert.ok(!results.slice(0, 9).join("").includes("PAULS-PRIVATE"), "job_status and get_output still show only bridge jobs");
+  assert.match(results[9], /PAULS-PRIVATE-OUTPUT/, "get_job_context shows Paul's own job output");
+  assert.match(results[9], /not recorded/, "a job with no captured message says so");
+  assert.match(results[9], /not Paul's words/, "the brief is labelled as the chief's rewrite");
   const started = store.allJobs().filter((j) => j.origin === "instinct");
   assert.equal(started.length, 1);
   assert.equal(started[0].permits, undefined);
@@ -316,4 +322,71 @@ test("the bridge module is wired to the chat and nothing else: no orchestrator, 
 
 test("status still shows the board and no brief or output", () => {
   assert.equal(statusData(store).jobs.length, 2);
+});
+
+
+const { maskSecrets, jobContextView, isPaulsJob, CONTEXT_OUTPUT_MAX, CONTEXT_TRIGGER_MAX } = await import("../src/bridge-context.js");
+const { isAllowed } = await import("../src/config.js");
+
+test("context: Paul's own message is captured by the service for the turn that started the job, and not by the model or for later turns", async () => {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-trig-")));
+  const messenger = { send: async () => undefined } as never;
+  let turn = 0;
+  const runner: AgentRunner = async (o) => {
+    const ops = o.mcpServers?.ops as { instance?: any } | undefined;
+    if (ops && !o.systemPrompt.includes("talking to Paul's assistant") && ops.instance?._registeredTools?.start_job) {
+      turn++;
+      const reg = ops.instance._registeredTools;
+      // The model tries to supply its own "original message": the tool has no such input, so it is ignored.
+      await (reg.start_job.callback ?? reg.start_job.handler)({ kind: "research", title: `Turn ${turn} job`, brief: "chief-written brief", triggerMessage: { text: "FORGED", kind: "typed" } }, {});
+    }
+    return { text: "ok", costUsd: 0, sessionId: `s${turn}` };
+  };
+  const jobs = new JobRunner(store, messenger, runner);
+  const orch = new Orchestrator(store, messenger, jobs, new Scheduler(store, jobs), runner);
+  await orch.handle("tg:99887766", "Research how TollBit prices access, please", { messageId: "m-100" });
+  await orch.handle("tg:99887766", "And another thing: look at Prebid timeouts", { messageId: "m-101" });
+  const made = store.allJobs().filter((j) => j.origin !== "instinct");
+  assert.equal(made.length, 2);
+  assert.equal(made[0].triggerMessage?.text, "Research how TollBit prices access, please");
+  assert.equal(made[0].triggerMessage?.messageId, "m-100");
+  assert.equal(made[0].triggerMessage?.kind, "typed");
+  assert.equal(made[0].triggerMessage?.sender, "tg:99887766");
+  assert.equal(made[1].triggerMessage?.text, "And another thing: look at Prebid timeouts", "the second turn's job carries the second message only");
+  assert.ok(!JSON.stringify(made).includes("FORGED"));
+  // A job started later by the system (a review, a schedule) has none, and the bridge never carries one.
+  const later = jobs.start("research", "scheduled run", "tg:99887766", "product", "tg:99887766");
+  assert.equal(later.triggerMessage, undefined);
+  const viaBridge = jobs.start("research", "x", BRIDGE_SENDER, "product", BRIDGE_REPLY_TO, { origin: "instinct", triggerMessage: { text: "FORGED", kind: "typed", sender: "x", conversation: "x", receivedAt: "now" } });
+  assert.equal(viaBridge.triggerMessage, undefined);
+});
+
+test("context: view labels the sources, masks secrets, caps output and says when it is incomplete", () => {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-view-")));
+  const j = store.createJob("research", "brief with ghp_abcdefghijklmnopqrstuvwxyz123456 inside", "tg:99887766", "product", undefined, {
+    triggerMessage: { text: "my words ".repeat(400), kind: "typed", sender: "tg:99887766", conversation: "tg:99887766", messageId: "m-1", receivedAt: "2026-11-15T09:00:00Z" },
+  });
+  const long = "result line password=hunter2hunter2 and key sk-or-v1-0123456789abcdef0123456789\n" + "x ".repeat(CONTEXT_OUTPUT_MAX);
+  const v: any = jobContextView(j, () => long);
+  assert.equal(v.triggerMessage.truncated, true);
+  assert.ok(v.triggerMessage.text.length <= CONTEXT_TRIGGER_MAX);
+  assert.match(v.triggerMessage.source, /captured verbatim by the service/);
+  assert.match(v.brief.source, /not Paul's words/);
+  assert.ok(!JSON.stringify(v).includes("ghp_abcdefghijklmnopqrstuvwxyz"));
+  assert.ok(!v.output.text.includes("hunter2hunter2") && !v.output.text.includes("sk-or-v1-0123"));
+  assert.equal(v.output.truncated, true);
+  assert.match(v.output.note, /incomplete/);
+  const old: any = jobContextView(store.createJob("research", "b", "tg:99887766"), () => undefined);
+  assert.match(old.triggerMessage, /not recorded/);
+  assert.equal(maskSecrets("nothing secret here"), "nothing secret here");
+});
+
+test("context: only jobs requested by an allowed sender, never the bridge's own or another requester's", () => {
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-scope-")));
+  const paul = store.createJob("research", "b", "tg:99887766");
+  const stranger = store.createJob("research", "b", "tg:11111111");
+  const bridge = store.createJob("research", "b", BRIDGE_SENDER, "product", BRIDGE_REPLY_TO, { origin: "instinct" });
+  assert.equal(isPaulsJob(paul, isAllowed), true);
+  assert.equal(isPaulsJob(stranger, isAllowed), false);
+  assert.equal(isPaulsJob(bridge, isAllowed), false);
 });
