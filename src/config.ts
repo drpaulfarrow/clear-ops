@@ -242,6 +242,8 @@ export const config = {
   instinctBridgeToken: process.env.INSTINCT_BRIDGE_TOKEN ?? "",
   /** Exact sender ids (as stored on a job, e.g. "tg:123", "dc:u:123" or a number) whose jobs the bridge's read routes may show. Empty (the default) shows only the bridge's own jobs. */
   oversightSenderIds: (process.env.OVERSIGHT_SENDER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+  /** Failed job ids (six hex characters, comma separated) the bridge may rerun. Empty means no retry route. */
+  instinctBridgeRetryAllow: (process.env.BRIDGE_RETRY_ALLOW ?? "").split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[a-f0-9]{6}$/.test(x)),
   /** The bridge chat routes start paid model turns; off unless BRIDGE_CHAT_ENABLED is exactly "true". */
   instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
   /** The home talk-button device (src/device.ts): off unless DEVICE_ENABLED=true.. */
