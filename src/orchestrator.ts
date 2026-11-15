@@ -1,12 +1,15 @@
 import fs from "node:fs";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { bookingLink, config, isAllowed } from "./config.js";
+import { BRIDGE_JOBS_PER_DAY, bridgeJobView, BRIDGE_KINDS_LIST, BRIDGE_REPLY_TO, BRIDGE_SENDER, bridgeMessageWrapper, bridgePrompt, bridgeJobBrief } from "./instinct-chat.js";
+import { bookingLink, config, isAllowed, isOversightSender } from "./config.js";
+import { DEVICE_MAX_STEPS, DEVICE_SESSION_TURNS, DEVICE_RUN_GUARD_USD, DEVICE_UNPRICED_TURN_USD, type DeviceBudget, deviceMessageWrapper, devicePrompt, type DeviceRegistry } from "./device.js";
 import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
 import { ACTION_KINDS, actionExecutors, lockKey, type JobRunner } from "./jobs.js";
 import type { Scheduler } from "./scheduler.js";
-import type { Job, JobKind, JobTarget, Store } from "./store.js";
+import type { Job, JobKind, JobTarget, JobTrigger, Store } from "./store.js";
+import { CONTEXT_LIST_MAX, isPaulsJob, jobContextView } from "./bridge-context.js";
 import type { Messenger } from "./whatsapp.js";
 import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
 import { boardUrl } from "./jobs-board.js";
@@ -30,11 +33,12 @@ import { addDays, fmt, londonYmd } from "./london.js";
 import { PAUL_STYLE, shortText, tidyReply } from "./messages.js";
 import { failureLabel, failureReason, type RunFailure } from "./failures.js";
 import { threadMention } from "./channels.js";
-import { creditUrl, keyName, modelNote, providerName } from "./llm.js";
+import { creditUrl, keyName, modelNote, provider, providerName } from "./llm.js";
 import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
 import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { lockActAsMe, normaliseDomain, parseActAsMeCommand, SitePolicy, unlockActAsMe } from "./site-policy.js";
 import { safeVaultDomains, vault, cardVault } from "./vault.js";
+import { RealCostMeter } from "./realcost.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
@@ -205,6 +209,17 @@ export class Orchestrator {
     if (spend) return this.messenger.send(from, await this.spendText(spend[1]?.toLowerCase()));
     if (/^\/status$/i.test(trimmed)) return this.messenger.send(from, this.githubStatus ? await this.githubStatus().catch(() => "GitHub: could not check just now.") : "No GitHub check is configured.");
     if (/^\/resume$/i.test(trimmed)) return this.messenger.send(from, await this.resumeJobs());
+    // Which sender id the service sees for this account, so the owner can be listed in OVERSIGHT_SENDER_IDS.
+    // Only an allowlisted sender (checked above) gets an answer, and only about itself, only in a direct chat.
+    if (/^\/whoami$/i.test(trimmed)) return this.messenger.send(from, from === sender ? `The service sees you as ${sender}.` : "Send /whoami to me in a direct message, not in a shared channel.");
+    // Home device pairing: only an owner channel (OVERSIGHT_SENDER_IDS), typed here, never from the bridge or the device.
+    const pair = trimmed.match(/^\/pair\s+([A-Za-z0-9-]{4,12})$/i);
+    if (pair || /^\/unpair$/i.test(trimmed)) {
+      if (!this.devices || !config.deviceEnabled) return this.messenger.send(from, "The home device is not switched on.");
+      if (!isOversightSender(sender)) return this.messenger.send(from, "Only Paul's own owner channel can pair or unpair a device, and this one is not set as that.");
+      if (!pair) return this.messenger.send(from, `Unpaired. ${this.devices.unpairAll()} device(s) signed out.`);
+      return this.messenger.send(from, this.devices.approve(pair[1]) ? "Paired. The device can now send short text to the chief, which can answer but cannot start, approve or change anything. /unpair signs it out." : "That code is wrong, expired, or the device limit is reached. Nothing was paired.");
+    }
     const retry = trimmed.match(/^\/?retry\s+((?:[a-f0-9]{6}[\s,]*)+)$/i);
     if (retry) return this.messenger.send(from, await this.resumeJobs(retry[1].split(/[\s,]+/).filter(Boolean)));
     if (/^\/pending$/i.test(trimmed)) return this.messenger.send(from, this.pendingText());
@@ -229,7 +244,7 @@ export class Orchestrator {
       return this.messenger.send(from, out ?? `No output for job ${show[1]}.`);
     }
 
-    return this.askChief(sender, from, messageId, trimmed);
+    return this.askChief(sender, from, messageId, trimmed, undefined, { text: trimmed, kind: "typed" });
   }
 
   /** Save each attachment, confirm receipt, then tell the chief what arrived and let it see any images. */
@@ -253,7 +268,9 @@ export class Orchestrator {
     // answers what he said rather than only acknowledging a file it cannot otherwise read.
     const spoken = transcriptAsMessage(voice);
     const prompt = `${note}\n\n${text ? `Paul's message: ${text}` : spoken ?? "Paul sent no message with the file(s). Acknowledge briefly, say what each is in a line, and ask or act as the conversation suggests."}`;
-    return this.askChief(sender, from, messageId, prompt, images);
+    const spokenRaw = voice.map((v) => v.text).filter((t): t is string => !!t).join("\n");
+    const trigger = text ? { text, kind: "caption" as const } : spokenRaw ? { text: spokenRaw, kind: "voice_note_transcript" as const } : undefined;
+    return this.askChief(sender, from, messageId, prompt, images, trigger);
   }
 
   /**
@@ -284,7 +301,7 @@ export class Orchestrator {
     return out;
   }
 
-  private async askChief(sender: string, from: string, messageId: string | undefined, prompt: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
+  private async askChief(sender: string, from: string, messageId: string | undefined, prompt: string, images?: Array<{ mediaType: string; data: string }>, trigger?: Pick<JobTrigger, "text" | "kind">): Promise<void> {
     // The chief of staff answers. While it works, the founder sees a typing indicator
     // and one status line, edited in place from the chief's tool calls and removed when the reply is ready.
     const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
@@ -307,7 +324,7 @@ export class Orchestrator {
         allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
         tools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep"],
         // The chief gets the service's own search for quick answers; the browser is for workers only.
-        mcpServers: { ops: this.opsServer(sender, from, messageId), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+        mcpServers: { ops: this.opsServer(sender, from, messageId, trigger ? { ...trigger, sender, conversation: from, ...(messageId ? { messageId } : {}), receivedAt: new Date().toISOString() } : undefined), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
         maxTurns: 25,
         // The chief's own turn gets the same runaway guard as a job: not a cap, only a backstop. It has
         // no per-job cap, because nothing counts a real-dollar figure for a chat turn (a job's cap is
@@ -721,7 +738,177 @@ export class Orchestrator {
   }
 
   /** The chief's tools. Each call closes over the requester and conversation so results route back correctly. */
-  private opsServer(sender: string, from: string, messageId?: string) {
+  /**
+   * Paul's assistant (Instinct) talking to the chief through the authenticated bridge (src/instinct-chat.ts).
+   * This is a separate entry from handle(): the message never goes through handleOne, so no approval word
+   * (send, YES, buy, dns apply, signup apply, code, act as me) is ever parsed from it, and it never
+   * resumes Paul's own conversation. The chief here gets a fixed, small tool set (below), not the ops
+   * server Paul's chief has, and no file tools at all. The service, not the model, adds the line saying
+   * who wrote it.
+   */
+  /** Set by the entry point when the home device is switched on. */
+  devices?: DeviceRegistry;
+
+  private deviceTurns = 0;
+  /** Set with `devices`. Without it a device turn is refused. */
+  deviceBudget?: DeviceBudget;
+  /** For tests: the meter a device turn uses. */
+  deviceMeter?: (capUsd: number, stop: () => void) => import("./realcost.js").JobCostWatch;
+
+  /**
+   * The home talk-button device (src/device.ts): Paul's own phone, paired by him, speaking through the same
+   * labelled door as the bridge. It gets the bridge's fixed tool set (web search and fetch and three read-only ops tools: job status, output, and the context of jobs Paul started; start_job is left out in code, so it launches no worker and spends nothing but its own chat turn), never Paul's own chief tools. So it can answer, look things up and check on his jobs; it cannot approve, send, buy, deploy, merge, resume, cancel, schedule or touch
+   * the vault. Approval words are not parsed. Cost is bounded in code: at most 6 model steps per turn, a short
+   * prompt, and the session restarts every 8 turns so history cannot grow without limit.
+   */
+  async askAsDevice(text: string): Promise<string> {
+    const budget = this.deviceBudget;
+    const refused = budget?.gate() ?? (budget ? undefined : "no test budget has been set for the device");
+    if (refused) return `The device cannot answer: ${refused}.`;
+    // Device turns only ever use their own provider-capped key. No key, or a provider that cannot use one: refuse, never fall back to the main key.
+    const deviceKey = config.deviceOpenrouterKey;
+    if (provider() !== "openrouter" || !deviceKey) return "The device cannot answer: its separate capped key is not set.";
+    if (this.deviceTurns++ % DEVICE_SESSION_TURNS === 0) this.store.clearSession("device:home");
+    const abort = new AbortController();
+    const meter = (this.deviceMeter ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop, apiKey: deviceKey })))(budget!.remaining(), () => abort.abort());
+    let counted = false;
+    try {
+    const result = await this.run({
+      costMeter: meter,
+      apiKey: deviceKey,
+      abortController: abort,
+      prompt: deviceMessageWrapper(text),
+      systemPrompt: devicePrompt(),
+      model: config.models.chief,
+      resume: this.store.getSession("device:home"),
+      allowedTools: ["WebSearch", "WebFetch", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
+      tools: ["WebSearch", "WebFetch"],
+      disallowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write", "NotebookEdit", "Task"],
+      additionalDirectories: [],
+      mcpServers: { ops: this.bridgeOpsServer({ startJobs: false }), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+      maxTurns: DEVICE_MAX_STEPS,
+      maxBudgetUsd: DEVICE_RUN_GUARD_USD,
+    });
+    const cost = await meter.settle();
+    // Count what the provider charged; a call it would not price is counted at an assumed figure (not a bound).
+    const unpriced = Math.max(0, cost.calls - cost.read);
+    budget!.add(cost.usd + (cost.source === "unavailable" || unpriced > 0 ? Math.max(1, unpriced) * DEVICE_UNPRICED_TURN_USD : 0));
+    counted = true;
+    if (abort.signal.aborted) return "The device test budget ran out during that answer.";
+    if (result.error) return chiefFailureText(result.error);
+    if (result.sessionId) this.store.setSession("device:home", result.sessionId);
+    return tidyReply(result.text) || "(no reply)";
+    } finally {
+      meter.stop();
+      if (!counted) budget!.add(DEVICE_UNPRICED_TURN_USD);
+    }
+  }
+
+  async askAsInstinct(text: string): Promise<string> {
+    const result = await this.run({
+      prompt: bridgeMessageWrapper(text),
+      systemPrompt: bridgePrompt(),
+      model: config.models.chief,
+      resume: this.store.getSession(BRIDGE_REPLY_TO),
+      allowedTools: ["WebSearch", "WebFetch", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
+      tools: ["WebSearch", "WebFetch"],
+      disallowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write", "NotebookEdit", "Task"],
+      // No directories at all: the default would add every repository and the uploads folder.
+      additionalDirectories: [],
+      mcpServers: { ops: this.bridgeOpsServer(), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+      maxTurns: 15,
+      maxBudgetUsd: config.sdkRunawayBudgetUsd,
+    });
+    if (result.error) return chiefFailureText(result.error);
+    if (result.sessionId) this.store.setSession(BRIDGE_REPLY_TO, result.sessionId);
+    return tidyReply(result.text) || "(no reply)";
+  }
+
+  /**
+   * The only tools the bridge's chief has. start_job can only make a research or write job with no permits
+   * (JobRunner.start enforces that again), marked origin "instinct" by this code; job_status and get_output
+   * only show jobs the bridge itself started. Nothing here approves, schedules, cancels, remembers, sends,
+   * or touches the vault, Google, DNS, uploads or the engineering queue.
+   */
+  private bridgeOpsServer(opts: { startJobs?: boolean } = { startJobs: true }) {
+    const store = this.store;
+    const jobs = this.jobs;
+    const mine = (id: string) => {
+      const j = store.getJob(id);
+      return j && j.origin === "instinct" ? j : undefined;
+    };
+    return createSdkMcpServer({
+      name: "ops",
+      version: "1.0.0",
+      tools: [
+        tool(
+          "start_job",
+          `Start a ${BRIDGE_KINDS_LIST} job for Paul's assistant. Read-only: it can search the web and read the repositories, and writes a report. It cannot change anything, send anything or approve anything. Every job needs a short, specific title (five words or fewer). Limit: ${BRIDGE_JOBS_PER_DAY} per 24 hours.`,
+          {
+            kind: z.enum(["research", "write"]),
+            title: z.string(),
+            brief: z.string(),
+            depth: z.enum(["standard", "deep"]).optional(),
+          },
+          async ({ kind, title: rawTitle, brief, depth }) => {
+            const checked = validateTitle(rawTitle);
+            if ("error" in checked) return { content: [{ type: "text", text: `${checked.error} Nothing was started; call start_job again with a valid title.` }], isError: true };
+            const since = Date.now() - 24 * 3600_000;
+            const recent = store.allJobs().filter((j) => j.origin === "instinct" && Date.parse(j.createdAt) >= since).length;
+            if (recent >= BRIDGE_JOBS_PER_DAY) return { content: [{ type: "text", text: `Not started: ${recent} jobs from the bridge in the last 24 hours, the limit is ${BRIDGE_JOBS_PER_DAY}. Tell Paul's assistant to try later.` }], isError: true };
+            try {
+              const job = jobs.start(kind, bridgeJobBrief(brief), BRIDGE_SENDER, "product", BRIDGE_REPLY_TO, { title: checked.title, origin: "instinct", ...(kind === "research" && depth ? { depth } : {}) });
+              return { content: [{ type: "text", text: `Started: ${jobLabel(job)}. Read it with get_output when job_status says done.` }] };
+            } catch (err) {
+              return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true };
+            }
+          },
+        ),
+        tool(
+          "job_status",
+          "Status of one job this bridge started (by id), or of the bridge's own recent jobs.",
+          { id: z.string().optional() },
+          async ({ id }) => {
+            if (id) {
+              const j = mine(id);
+              return { content: [{ type: "text", text: j ? JSON.stringify(bridgeJobView(j), null, 2) : `No bridge job ${id}.` }] };
+            }
+            const list = store.allJobs().filter((j) => j.origin === "instinct").slice(-10).map(bridgeJobView);
+            return { content: [{ type: "text", text: list.length ? JSON.stringify(list, null, 2) : "No jobs started from the bridge yet." }] };
+          },
+          { annotations: { readOnlyHint: true } },
+        ),
+        tool(
+          "get_job_context",
+          "Read-only context for jobs Paul himself started (not only the bridge's): his own message from the chat turn where the job was started, verbatim and captured by the service, plus the chief's brief (labelled as not his words), status, failure and the saved report (capped, marked incomplete when cut, secrets masked). A job with no recorded message says so. Give an id, or omit it for his most recent jobs. This is how to judge whether a result matches what he meant.",
+          { id: z.string().optional() },
+          async ({ id }) => {
+            const view = (j: Job) => jobContextView(j, (x) => store.readOutput(x));
+            if (id) {
+              const j = store.getJob(id);
+              return { content: [{ type: "text", text: j && isPaulsJob(j, isOversightSender) ? JSON.stringify(view(j), null, 2) : `No job ${id} started by Paul.` }] };
+            }
+            const list = store.allJobs().filter((j) => isPaulsJob(j, isOversightSender)).slice(-CONTEXT_LIST_MAX).map((j) => ({ ...view(j), output: undefined }));
+            return { content: [{ type: "text", text: list.length ? JSON.stringify(list, null, 2) : "No jobs started by Paul yet." }] };
+          },
+          { annotations: { readOnlyHint: true } },
+        ),
+        tool(
+          "get_output",
+          "The saved report of a finished job this bridge started.",
+          { id: z.string() },
+          async ({ id }) => {
+            const j = mine(id);
+            const out = j ? store.readOutput(id) : undefined;
+            return { content: [{ type: "text", text: out ?? `No output for bridge job ${id}.` }] };
+          },
+          { annotations: { readOnlyHint: true } },
+        ),
+      ].filter((t) => opts.startJobs !== false || t.name !== "start_job"),
+    });
+  }
+
+  private opsServer(sender: string, from: string, messageId?: string, trigger?: JobTrigger) {
     const store = this.store;
     const jobs = this.jobs;
     const scheduler = this.scheduler;
@@ -789,7 +976,7 @@ export class Orchestrator {
               if (job.replyTo && job.replyTo !== from) await this.messenger.send(job.replyTo, `${what}: ${jobLabel(job)}. Reports will land here.`);
               return { content: [{ type: "text", text: `${what}: ${jobLabel(job)}.${continueLoop ? "" : where} Each round's spec goes to an engineer automatically; Paul hears at decisions and at the end.` }] };
             }
-            const job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}) });
+            const job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}), ...(trigger ? { triggerMessage: trigger } : {}) });
             const label = jobLabel(job);
             if (job.waitingFor && jobs.isHeld(job)) {
               const hold = jobs.hold();

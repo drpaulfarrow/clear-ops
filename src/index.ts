@@ -16,7 +16,7 @@ import { CloudApiMessenger, parseInbound, verifySignature, whatsappAttachment, t
 import { TelegramMessenger, TelegramPoller } from "./telegram.js";
 import { DiscordListener } from "./discord.js";
 import { RouterMessenger } from "./channels.js";
-import { isAllowed } from "./config.js";
+import { isAllowed, isOversightSender } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
 import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoCredentialLine, repoProblemsMessage } from "./bootstrap.js";
 import { githubAuth, startTokenRefresher } from "./github-auth.js";
@@ -46,7 +46,11 @@ import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
 import { defaultProbes, HealthProbes } from "./health.js";
+import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
+import { DeviceBudget, DEVICE_PATH, DEVICE_TEXT_MAX_CHARS, DEVICE_TURNS_PER_DAY, DeviceRegistry, deviceRouter } from "./device.js";
+import { BridgeChat, BRIDGE_REPLY_TO } from "./instinct-chat.js";
 import fs from "node:fs";
+import path from "node:path";
 
 export interface AppDeps {
   messenger: Messenger;
@@ -147,6 +151,23 @@ export function buildApp(deps: AppDeps) {
   // Live voice: the chief's and the jobs' messages pass a tap, so replies to the voice channel can be spoken (src/voice.ts).
   const tap = new VoiceTap();
   const tapped = tap.wrap(deps.messenger);
+  // Jobs started through the Instinct bridge report to a sink address no channel delivers: their result
+  // lines are written to the bridge transcript (src/instinct-chat.ts) and go nowhere else, Paul's chat included.
+  let bridgeChat: BridgeChat | undefined;
+  const channelMessenger = tapped;
+  const withBridgeSink: typeof tapped = new Proxy(channelMessenger, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        if (typeof args[0] === "string" && args[0] === BRIDGE_REPLY_TO) {
+          if (prop === "send" && typeof args[1] === "string") bridgeChat?.record("job", args[1]);
+          return Promise.resolve(undefined);
+        }
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
   const google =
     deps.google ??
     new GoogleAuth({ ...config.google, redirectUri: `${config.publicUrl}${GOOGLE_CALLBACK_PATH}`, dataDir: config.dataDir, fetch: deps.googleFetch });
@@ -204,10 +225,16 @@ export function buildApp(deps: AppDeps) {
   // Google connection above) or asks him in chat, and types it into the page itself (src/otp.ts). No
   // model, log, output or stored session ever holds a code, and Paul's own message goes once it is used.
   const otp = new OtpRelay({ messenger: deps.messenger, ...(deps.mailbox ? { mailbox: deps.mailbox } : { mailbox: new GmailCodeReader(googleApi) }) });
-  const jobs = new JobRunner(deps.store, tapped, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp });
+  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp });
   const scheduler = new Scheduler(deps.store, jobs);
   const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
   scheduler.boot();
+  bridgeChat = new BridgeChat({ ask: (text) => orchestrator.askAsInstinct(text), logFile: path.join(config.dataDir, "instinct-bridge.jsonl") });
+  const deviceRegistry = new DeviceRegistry(path.join(config.dataDir, "devices.json"));
+  orchestrator.devices = deviceRegistry;
+  const deviceBudget = new DeviceBudget(path.join(config.dataDir, "device-budget.json"), () => config.deviceTestBudgetUsd);
+  orchestrator.deviceBudget = deviceBudget;
+  const deviceChat = new BridgeChat({ ask: (text) => orchestrator.askAsDevice(text), logFile: path.join(config.dataDir, "device-chat.jsonl"), turnsPerDay: DEVICE_TURNS_PER_DAY, maxChars: DEVICE_TEXT_MAX_CHARS, gate: () => deviceBudget.gate() });
   // Schedules made before follow-ups existed pick up the current brief, on the same cron.
   upgradeEaSchedules(scheduler);
   // Cleo, the voice brain: hands spoken requests to the chief as if typed in the voice channel's chat.
@@ -257,6 +284,13 @@ export function buildApp(deps: AppDeps) {
   // A count only, nothing about the jobs themselves.
   app.get("/busy", (_req, res) => res.json({ running: jobs.activeCount() }));
 
+  // Paul's assistant (src/instinct-bridge.ts, src/instinct-chat.ts): an authenticated door for status and for
+  // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach
+  // Paul's own chat, approve anything, grant a permit or start anything but read-only research or write jobs.
+  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat }));
+
+  // The home talk-button device (src/device.ts): paired by the owner typing /pair, text only, no tools. 404 unless DEVICE_ENABLED=true.
+  app.use(DEVICE_PATH, deviceRouter({ registry: deviceRegistry, chat: deviceChat, enabled: config.deviceEnabled }));
 
   // Meta webhook verification handshake
   app.get("/webhook", (req, res) => {

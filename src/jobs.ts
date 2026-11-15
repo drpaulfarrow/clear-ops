@@ -16,7 +16,7 @@ import { londonYmd } from "./london.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner, RunResult } from "./agents.js";
 import { describeWorkerTool, JobProgress, type JobProgressOptions } from "./status.js";
-import { DEEP_RESEARCH_NOTE, detectDepth, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
+import { BRIDGE_READ_DENY, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
@@ -26,6 +26,7 @@ import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
+import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
@@ -33,6 +34,9 @@ import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "
 const exec = promisify(execFile);
 
 /** The kinds that build and test what they write, so their working copy is worth preparing (src/setup.ts). */
+/** The only kinds a job from the Instinct bridge may be: read the web and the repositories, write a report. */
+export const BRIDGE_KINDS: JobKind[] = ["research", "write"];
+
 const BUILDS = (kind: JobKind) => PR_KINDS.includes(kind) || kind === "maintain";
 
 /**
@@ -286,10 +290,18 @@ export class JobRunner {
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage"> = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
+    // A job from the Instinct bridge: only these kinds, never a permit, whatever the caller passed. The
+    // rule lives here, in the one function every job goes through, not in a prompt.
+    if (extra.origin === "instinct") {
+      if (!BRIDGE_KINDS.includes(kind)) throw new Error(`The Instinct bridge cannot start a ${kind} job.`);
+      delete extra.permits;
+      extra.origin = "instinct";
+      delete extra.triggerMessage;
+    } else delete extra.origin;
     if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds" || p === "send") : extra.permits;
     else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
     else if (kind === "engineer") extra.permits = extra.permits?.includes("create_repo") ? ["create_repo"] : undefined;
@@ -800,6 +812,8 @@ export class JobRunner {
     const at = new Date(now).toISOString();
     this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at });
     let web: WebTools | undefined;
+    // A bridge job's throwaway source copy (src/bridge-snapshot.ts), removed when the job ends.
+    let snapshot: string | undefined;
     let progress: JobProgress | undefined;
     let costMeter: JobCostWatch | undefined;
     try {
@@ -837,14 +851,20 @@ export class JobRunner {
       // leaves the worker to install for itself, as it did before.
       const prepared = BUILDS(job.kind) && copied.cwd ? await this.setup.prepare(copied.cwd, job.target).catch(() => undefined) : undefined;
       const deps = prepared && copied.cwd ? setupNote(prepared, copied.cwd) : "";
-      const spec = deps ? { ...copied, prompt: `${copied.prompt}\n\n${deps}` } : copied;
+      const bridged = job.origin === "instinct";
+      if (bridged) snapshot = snapshotRepos(repoRegistry.list().map((r) => ({ alias: r.alias, dir: r.dir })));
+      const specBase = deps ? { ...copied, prompt: `${copied.prompt}\n\n${deps}` } : copied;
+      // A bridge job is told about its snapshot, not the live checkouts it may not read.
+      const spec = bridged && snapshot ? { ...specBase, prompt: specBase.prompt.replace(repoPaths(), `Repositories: read-only source snapshots (no git history, no env files) are under ${snapshot}, one folder per repository (${repoRegistry.list().map((r) => r.alias).join(", ")}). Use Read, Glob and Grep with these absolute paths.`) } : specBase;
       const perJob = spec.perJob?.(id) ?? {};
       // Engineers building a design spec may read the designer's assets.
-      const dirs = perJob.additionalDirectories ?? (job.designLoop ? [...readableDirs(), designRoot()] : undefined);
+      // A job from the Instinct bridge reads its source snapshot and nothing else: not the live checkouts,
+      // the uploads folder or the data directory (secrets, stored state, outputs of other jobs).
+      const dirs = bridged ? [snapshot!] : perJob.additionalDirectories ?? (job.designLoop ? [...readableDirs(), designRoot()] : undefined);
       // Each kind's own tool servers only: a design job never gets the ea's Google server, and only a
       // design job gets the design server (it comes from the design spec alone).
       const fromService = job.kind === "design" ? undefined : this.toolsFor(job);
-      const extraTools = fromService ? Object.fromEntries(Object.entries(fromService).filter(([name]) => name !== "design")) : undefined;
+      const extraTools = fromService && !bridged ? Object.fromEntries(Object.entries(fromService).filter(([name]) => name !== "design")) : undefined;
       const ownTools = job.kind === "design" ? perJob.mcpServers : undefined;
       // The cv and advisor workers' own save tools, from their specs alone (toolsFor gives them nothing else).
       const cvTools = job.kind === "cv" || job.kind === "advisor" ? perJob.mcpServers : undefined;
@@ -853,10 +873,11 @@ export class JobRunner {
       // and a run the system started (a scheduled run) is refused a code outright (src/otp.ts).
       const codes = this.otp?.forJob({ id, replyTo: job.replyTo, scheduled: isScheduledRun(job.brief) });
       web = webToolsFor(job.kind, {
+        ...(bridged ? { noBrowse: true } : {}),
         browse: { policy: new SitePolicy(this.store, safeVaultDomains), vault, ...(codes ? { otp: codes } : {}), ...(job.permits?.includes("purchase") ? { purchasing: true } : {}) },
       });
       const notes = this.store.notes();
-      const standing = notes.length ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
+      const standing = notes.length && !bridged ? `\n\nStanding instructions from the founder:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
       const resume = job.resumed
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
@@ -911,12 +932,12 @@ export class JobRunner {
         prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
-        cwd: spec.cwd,
+        cwd: bridged && snapshot ? snapshot : spec.cwd,
         // Only a kind that builds gets the npm development-mode settings: the service runs
         // NODE_ENV=production, which would leave typescript and tsx out of a worker's own install.
         ...(BUILDS(job.kind) ? { env: workerBuildEnv(this.setup.npmCache()) } : {}),
         allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...web.allowed],
-        disallowedTools: spec.disallowedTools,
+        disallowedTools: bridged ? [...(spec.disallowedTools ?? []), ...BRIDGE_READ_DENY] : spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
         mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers, ...(buying ? { [PURCHASE_SERVER]: buying } : {}) } : undefined,
@@ -1065,6 +1086,7 @@ export class JobRunner {
       // reply that arrives afterwards settles nothing.
       await web?.close().catch(() => undefined);
       this.otp?.dropJob(id);
+      removeSnapshot(snapshot);
       // A worker that would not let go after a stop was already finished without it; nothing more here.
       const mine = this.live.get(id) === live;
       if (mine) {

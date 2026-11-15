@@ -238,6 +238,18 @@ export const config = {
    * Override with UPLOADS_DIR; it must not sit inside REPO_DIR or SELF_REPO_DIR.
    */
   uploadsDir: path.resolve(process.env.UPLOADS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "uploads")),
+  /** Shared secret for the Instinct bridge (src/instinct-bridge.ts). Empty means the bridge is off. */
+  instinctBridgeToken: process.env.INSTINCT_BRIDGE_TOKEN ?? "",
+  /** Exact sender ids (as stored on a job, e.g. "tg:123", "dc:u:123" or a number) whose jobs the bridge's read routes may show. Empty (the default) shows only the bridge's own jobs. */
+  oversightSenderIds: (process.env.OVERSIGHT_SENDER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+  /** The bridge chat routes start paid model turns; off unless BRIDGE_CHAT_ENABLED is exactly "true". */
+  instinctBridgeChat: process.env.BRIDGE_CHAT_ENABLED === "true",
+  /** The home talk-button device (src/device.ts): off unless DEVICE_ENABLED=true.. */
+  deviceEnabled: process.env.DEVICE_ENABLED === "true",
+  /** A separate, provider-capped OpenRouter key used only for device turns. Unset: device turns are refused (no fallback to OPENROUTER_API_KEY). */
+  deviceOpenrouterKey: process.env.OPENROUTER_DEVICE_API_KEY ?? "",
+  /** The home device's own test budget in USD (provider money). Unset or 0: no device turn is allowed. */
+  deviceTestBudgetUsd: Number(process.env.DEVICE_TEST_BUDGET_USD) > 0 ? Number(process.env.DEVICE_TEST_BUDGET_USD) : 0,
   /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
   uploadMaxMb: Number(process.env.UPLOAD_MAX_MB ?? 20),
   /**
@@ -379,6 +391,11 @@ export function bookingLink(store?: { settings(): { eaBookingLink?: string } }):
 /** Everyone the workforce will answer, across channels. */
 export function isAllowed(from: string): boolean {
   return config.allowedNumbers.includes(from) || config.allowedTelegramIds.includes(from) || config.allowedDiscordIds.includes(from);
+}
+
+/** Who the bridge's read routes treat as the owner: only ids listed in OVERSIGHT_SENDER_IDS, never the whole allowlist. */
+export function isOversightSender(from: string): boolean {
+  return config.oversightSenderIds.includes(from);
 }
 
 /** Validate what production needs. Tests and the simulator skip this. */
