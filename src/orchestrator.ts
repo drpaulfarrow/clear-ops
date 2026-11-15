@@ -7,7 +7,8 @@ import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
 import { ACTION_KINDS, actionExecutors, lockKey, type JobRunner } from "./jobs.js";
 import type { Scheduler } from "./scheduler.js";
-import type { Job, JobKind, JobTarget, Store } from "./store.js";
+import type { Job, JobKind, JobTarget, JobTrigger, Store } from "./store.js";
+import { CONTEXT_LIST_MAX, isPaulsJob, jobContextView } from "./bridge-context.js";
 import type { Messenger } from "./whatsapp.js";
 import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
 import { boardUrl } from "./jobs-board.js";
@@ -230,7 +231,7 @@ export class Orchestrator {
       return this.messenger.send(from, out ?? `No output for job ${show[1]}.`);
     }
 
-    return this.askChief(sender, from, messageId, trimmed);
+    return this.askChief(sender, from, messageId, trimmed, undefined, { text: trimmed, kind: "typed" });
   }
 
   /** Save each attachment, confirm receipt, then tell the chief what arrived and let it see any images. */
@@ -254,7 +255,9 @@ export class Orchestrator {
     // answers what he said rather than only acknowledging a file it cannot otherwise read.
     const spoken = transcriptAsMessage(voice);
     const prompt = `${note}\n\n${text ? `Paul's message: ${text}` : spoken ?? "Paul sent no message with the file(s). Acknowledge briefly, say what each is in a line, and ask or act as the conversation suggests."}`;
-    return this.askChief(sender, from, messageId, prompt, images);
+    const spokenRaw = voice.map((v) => v.text).filter((t): t is string => !!t).join("\n");
+    const trigger = text ? { text, kind: "caption" as const } : spokenRaw ? { text: spokenRaw, kind: "voice_note_transcript" as const } : undefined;
+    return this.askChief(sender, from, messageId, prompt, images, trigger);
   }
 
   /**
@@ -285,7 +288,7 @@ export class Orchestrator {
     return out;
   }
 
-  private async askChief(sender: string, from: string, messageId: string | undefined, prompt: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
+  private async askChief(sender: string, from: string, messageId: string | undefined, prompt: string, images?: Array<{ mediaType: string; data: string }>, trigger?: Pick<JobTrigger, "text" | "kind">): Promise<void> {
     // The chief of staff answers. While it works, the founder sees a typing indicator
     // and one status line, edited in place from the chief's tool calls and removed when the reply is ready.
     const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
@@ -308,7 +311,7 @@ export class Orchestrator {
         allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
         tools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep"],
         // The chief gets the service's own search for quick answers; the browser is for workers only.
-        mcpServers: { ops: this.opsServer(sender, from, messageId), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+        mcpServers: { ops: this.opsServer(sender, from, messageId, trigger ? { ...trigger, sender, conversation: from, ...(messageId ? { messageId } : {}), receivedAt: new Date().toISOString() } : undefined), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
         maxTurns: 25,
         // The chief's own turn gets the same runaway guard as a job: not a cap, only a backstop. It has
         // no per-job cap, because nothing counts a real-dollar figure for a chat turn (a job's cap is
@@ -805,6 +808,21 @@ export class Orchestrator {
           { annotations: { readOnlyHint: true } },
         ),
         tool(
+          "get_job_context",
+          "Read-only context for jobs Paul himself started (not only the bridge's): his own message from the chat turn where the job was started, verbatim and captured by the service, plus the chief's brief (labelled as not his words), status, failure and the saved report (capped, marked incomplete when cut, secrets masked). A job with no recorded message says so. Give an id, or omit it for his most recent jobs. This is how to judge whether a result matches what he meant.",
+          { id: z.string().optional() },
+          async ({ id }) => {
+            const view = (j: Job) => jobContextView(j, (x) => store.readOutput(x));
+            if (id) {
+              const j = store.getJob(id);
+              return { content: [{ type: "text", text: j && isPaulsJob(j, isAllowed) ? JSON.stringify(view(j), null, 2) : `No job ${id} started by Paul.` }] };
+            }
+            const list = store.allJobs().filter((j) => isPaulsJob(j, isAllowed)).slice(-CONTEXT_LIST_MAX).map((j) => ({ ...view(j), output: undefined }));
+            return { content: [{ type: "text", text: list.length ? JSON.stringify(list, null, 2) : "No jobs started by Paul yet." }] };
+          },
+          { annotations: { readOnlyHint: true } },
+        ),
+        tool(
           "get_output",
           "The saved report of a finished job this bridge started.",
           { id: z.string() },
@@ -819,7 +837,7 @@ export class Orchestrator {
     });
   }
 
-  private opsServer(sender: string, from: string, messageId?: string) {
+  private opsServer(sender: string, from: string, messageId?: string, trigger?: JobTrigger) {
     const store = this.store;
     const jobs = this.jobs;
     const scheduler = this.scheduler;
@@ -887,7 +905,7 @@ export class Orchestrator {
               if (job.replyTo && job.replyTo !== from) await this.messenger.send(job.replyTo, `${what}: ${jobLabel(job)}. Reports will land here.`);
               return { content: [{ type: "text", text: `${what}: ${jobLabel(job)}.${continueLoop ? "" : where} Each round's spec goes to an engineer automatically; Paul hears at decisions and at the end.` }] };
             }
-            const job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}) });
+            const job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}), ...(trigger ? { triggerMessage: trigger } : {}) });
             const label = jobLabel(job);
             if (job.waitingFor && jobs.isHeld(job)) {
               const hold = jobs.hold();
