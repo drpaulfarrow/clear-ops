@@ -26,7 +26,7 @@ import { jobTitle } from "./titles.js";
 import type { Store } from "./store.js";
 import type { BridgeChat } from "./instinct-chat.js";
 import { bridgeJobView } from "./instinct-chat.js";
-import { CONTEXT_LIST_MAX, isPaulsJob, jobContextView } from "./bridge-context.js";
+import { CONTEXT_LIST_MAX, isPaulsJob, jobContextView, maskSecrets } from "./bridge-context.js";
 
 export const INSTINCT_PATH = "/api/instinct";
 const OUTPUT_MAX_CHARS = 60_000;
@@ -52,10 +52,12 @@ function sameToken(given: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-export function statusData(store: InstinctBridgeDeps["store"], now = Date.now()) {
+/** Only jobs Paul started or the bridge started: another initiator's job titles are not shown. */
+export function statusData(store: InstinctBridgeDeps["store"], now = Date.now(), isAllowed: (sender: string) => boolean = () => false) {
   const hold = store.queueHold();
   const jobs = store
     .allJobs()
+    .filter((j) => j.origin === "instinct" || isPaulsJob(j, isAllowed))
     .sort((a, b) => (b.finishedAt ?? b.startedAt ?? b.createdAt).localeCompare(a.finishedAt ?? a.startedAt ?? a.createdAt))
     .slice(0, STATUS_JOBS)
     .map((j) => ({
@@ -100,7 +102,7 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
   });
 
   router.get("/status", (_req, res) => {
-    res.set("Cache-Control", "no-store").json(statusData(deps.store, now()));
+    res.set("Cache-Control", "no-store").json(statusData(deps.store, now(), deps.isAllowed));
   });
 
   // Chat routes start a paid model turn, so they answer 404 unless explicitly enabled.
@@ -135,7 +137,7 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
     const j = deps.store.getJob(String(req.params.id));
     if (!j || j.origin !== "instinct") return void res.sendStatus(404);
     const out = j.status === "done" ? deps.store.readOutput(j.id) : undefined;
-    res.set("Cache-Control", "no-store").json({ ...bridgeJobView(j), ...(out ? { output: out.slice(0, OUTPUT_MAX_CHARS) } : {}) });
+    res.set("Cache-Control", "no-store").json({ ...bridgeJobView(j), ...(out ? { output: maskSecrets(out.slice(0, OUTPUT_MAX_CHARS)) } : {}) });
   });
 
   router.get("/transcript", (_req, res) => {

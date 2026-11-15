@@ -20,6 +20,7 @@ import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import type { Job } from "./store.js";
 import { jobTitle } from "./titles.js";
+import { maskSecrets } from "./bridge-context.js";
 
 export const BRIDGE_TURNS_PER_DAY = 20;
 export const BRIDGE_JOBS_PER_DAY = 6;
@@ -99,7 +100,7 @@ export class BridgeChat {
   }
 
   record(dir: BridgeEntry["dir"], text: string, id = randomBytes(4).toString("hex")): void {
-    const entry: BridgeEntry = { ts: new Date(this.now()).toISOString(), id, dir, text };
+    const entry: BridgeEntry = { ts: new Date(this.now()).toISOString(), id, dir, text: maskSecrets(text) };
     try {
       fs.appendFileSync(this.deps.logFile, JSON.stringify(entry) + "\n");
     } catch (err) {
