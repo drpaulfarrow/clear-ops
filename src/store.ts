@@ -83,6 +83,8 @@ export interface Job {
   awaitDeploy?: boolean;
   /** Executive-assistant jobs: what it may change (drafts, holds). Absent means read only. */
   permits?: JobPermit[];
+  /** Set by the service, never by a model: this job was started through the Instinct bridge (src/instinct-chat.ts). It runs with a narrower read boundary and no permits. */
+  origin?: "instinct";
   /** Research jobs: "deep" gets more turns and budget and writes a long, structured report. */
   depth?: "standard" | "deep";
   createdAt: string;

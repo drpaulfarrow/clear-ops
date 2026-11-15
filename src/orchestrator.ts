@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { BRIDGE_JOBS_PER_DAY, bridgeJobView, BRIDGE_KINDS_LIST, BRIDGE_REPLY_TO, BRIDGE_SENDER, bridgeMessageWrapper, bridgePrompt, bridgeJobBrief } from "./instinct-chat.js";
 import { bookingLink, config, isAllowed } from "./config.js";
 import type { AgentRunner } from "./agents.js";
 import { JOB_KINDS } from "./agents.js";
@@ -721,6 +722,103 @@ export class Orchestrator {
   }
 
   /** The chief's tools. Each call closes over the requester and conversation so results route back correctly. */
+  /**
+   * Paul's assistant (Instinct) talking to the chief through the authenticated bridge (src/instinct-chat.ts).
+   * This is a separate entry from handle(): the message never goes through handleOne, so no approval word
+   * (send, YES, buy, dns apply, signup apply, code, act as me) is ever parsed from it, and it never
+   * resumes Paul's own conversation. The chief here gets a fixed, small tool set (below), not the ops
+   * server Paul's chief has, and no file tools at all. The service, not the model, adds the line saying
+   * who wrote it.
+   */
+  async askAsInstinct(text: string): Promise<string> {
+    const result = await this.run({
+      prompt: bridgeMessageWrapper(text),
+      systemPrompt: bridgePrompt(),
+      model: config.models.chief,
+      resume: this.store.getSession(BRIDGE_REPLY_TO),
+      allowedTools: ["WebSearch", "WebFetch", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
+      tools: ["WebSearch", "WebFetch"],
+      disallowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write", "NotebookEdit", "Task"],
+      // No directories at all: the default would add every repository and the uploads folder.
+      additionalDirectories: [],
+      mcpServers: { ops: this.bridgeOpsServer(), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+      maxTurns: 15,
+      maxBudgetUsd: config.sdkRunawayBudgetUsd,
+    });
+    if (result.error) return chiefFailureText(result.error);
+    if (result.sessionId) this.store.setSession(BRIDGE_REPLY_TO, result.sessionId);
+    return tidyReply(result.text) || "(no reply)";
+  }
+
+  /**
+   * The only tools the bridge's chief has. start_job can only make a research or write job with no permits
+   * (JobRunner.start enforces that again), marked origin "instinct" by this code; job_status and get_output
+   * only show jobs the bridge itself started. Nothing here approves, schedules, cancels, remembers, sends,
+   * or touches the vault, Google, DNS, uploads or the engineering queue.
+   */
+  private bridgeOpsServer() {
+    const store = this.store;
+    const jobs = this.jobs;
+    const mine = (id: string) => {
+      const j = store.getJob(id);
+      return j && j.origin === "instinct" ? j : undefined;
+    };
+    return createSdkMcpServer({
+      name: "ops",
+      version: "1.0.0",
+      tools: [
+        tool(
+          "start_job",
+          `Start a ${BRIDGE_KINDS_LIST} job for Paul's assistant. Read-only: it can search the web and read the repositories, and writes a report. It cannot change anything, send anything or approve anything. Every job needs a short, specific title (five words or fewer). Limit: ${BRIDGE_JOBS_PER_DAY} per 24 hours.`,
+          {
+            kind: z.enum(["research", "write"]),
+            title: z.string(),
+            brief: z.string(),
+            depth: z.enum(["standard", "deep"]).optional(),
+          },
+          async ({ kind, title: rawTitle, brief, depth }) => {
+            const checked = validateTitle(rawTitle);
+            if ("error" in checked) return { content: [{ type: "text", text: `${checked.error} Nothing was started; call start_job again with a valid title.` }], isError: true };
+            const since = Date.now() - 24 * 3600_000;
+            const recent = store.allJobs().filter((j) => j.origin === "instinct" && Date.parse(j.createdAt) >= since).length;
+            if (recent >= BRIDGE_JOBS_PER_DAY) return { content: [{ type: "text", text: `Not started: ${recent} jobs from the bridge in the last 24 hours, the limit is ${BRIDGE_JOBS_PER_DAY}. Tell Paul's assistant to try later.` }], isError: true };
+            try {
+              const job = jobs.start(kind, bridgeJobBrief(brief), BRIDGE_SENDER, "product", BRIDGE_REPLY_TO, { title: checked.title, origin: "instinct", ...(kind === "research" && depth ? { depth } : {}) });
+              return { content: [{ type: "text", text: `Started: ${jobLabel(job)}. Read it with get_output when job_status says done.` }] };
+            } catch (err) {
+              return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true };
+            }
+          },
+        ),
+        tool(
+          "job_status",
+          "Status of one job this bridge started (by id), or of the bridge's own recent jobs.",
+          { id: z.string().optional() },
+          async ({ id }) => {
+            if (id) {
+              const j = mine(id);
+              return { content: [{ type: "text", text: j ? JSON.stringify(bridgeJobView(j), null, 2) : `No bridge job ${id}.` }] };
+            }
+            const list = store.allJobs().filter((j) => j.origin === "instinct").slice(-10).map(bridgeJobView);
+            return { content: [{ type: "text", text: list.length ? JSON.stringify(list, null, 2) : "No jobs started from the bridge yet." }] };
+          },
+          { annotations: { readOnlyHint: true } },
+        ),
+        tool(
+          "get_output",
+          "The saved report of a finished job this bridge started.",
+          { id: z.string() },
+          async ({ id }) => {
+            const j = mine(id);
+            const out = j ? store.readOutput(id) : undefined;
+            return { content: [{ type: "text", text: out ?? `No output for bridge job ${id}.` }] };
+          },
+          { annotations: { readOnlyHint: true } },
+        ),
+      ],
+    });
+  }
+
   private opsServer(sender: string, from: string, messageId?: string) {
     const store = this.store;
     const jobs = this.jobs;

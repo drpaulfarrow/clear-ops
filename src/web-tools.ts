@@ -26,7 +26,7 @@ export interface WebTools {
   session?: BrowseSession;
 }
 
-export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: BrowseDeps; inspect?: InspectDeps } = {}): WebTools {
+export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: BrowseDeps; inspect?: InspectDeps; /** No browser at all (a job started through the Instinct bridge): search and fetch only. */ noBrowse?: boolean } = {}): WebTools {
   const servers: Record<string, McpServerConfig> = {};
   const allowed: string[] = [];
   const notes: string[] = [];
@@ -41,7 +41,7 @@ export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: B
       `Search: prefer ${engines.includes("brave") ? "web_search (Brave) for current facts and news" : ""}${engines.length === 2 ? ", and " : ""}${engines.includes("exa") ? "exa_search for finding companies, people, papers and similar pages" : ""} over the built-in WebSearch, which may not work on every model. Open and read a source before citing it.`,
     );
   }
-  if (BROWSE_KINDS.includes(kind) && config.browse.enabled) {
+  if (BROWSE_KINDS.includes(kind) && config.browse.enabled && !deps.noBrowse) {
     session = new BrowseSession(deps.browse);
     servers[BROWSE_SERVER] = browseServer(session);
     allowed.push(...BROWSE_TOOLS);
