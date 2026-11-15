@@ -243,6 +243,8 @@ export const config = {
   /** Exact sender ids (as stored on a job, e.g. "tg:123", "dc:u:123" or a number) whose jobs the bridge's read routes may show. Empty (the default) shows only the bridge's own jobs. */
   oversightSenderIds: (process.env.OVERSIGHT_SENDER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   /** Failed job ids (six hex characters, comma separated) the bridge may rerun. Empty means no retry route. */
+  /** One-use commissions the bridge may start: "id:sha256-of-brief" pairs. Empty means the route is a 404. */
+  instinctBridgeCommissions: Object.fromEntries((process.env.BRIDGE_COMMISSION_ALLOW ?? "").split(/[\s,]+/).map((x) => x.trim().toLowerCase().split(":")).filter((p) => p.length === 2 && /^[a-z0-9-]{3,40}$/.test(p[0]!) && /^[a-f0-9]{64}$/.test(p[1]!))) as Record<string, string>,
   instinctBridgeRetryAllow: (process.env.BRIDGE_RETRY_ALLOW ?? "").split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[a-f0-9]{6}$/.test(x)),
   /** Job-thread history reads are bound to exactly this guild and this parent text channel. Either unset: the route is closed. */
   bridgeThreadGuildId: /^\d{15,25}$/.test(process.env.BRIDGE_THREAD_GUILD_ID ?? "") ? (process.env.BRIDGE_THREAD_GUILD_ID as string) : "",

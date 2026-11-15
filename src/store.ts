@@ -95,6 +95,8 @@ export interface Job {
   permits?: JobPermit[];
   /** Set by the service, never by a model: this job was started through the Instinct bridge (src/instinct-chat.ts). It runs with a narrower read boundary and no permits. */
   origin?: "instinct";
+  /** Set by the service for a one-use bridge commission (src/instinct-bridge.ts): no automatic review or merge follows it. */
+  commission?: string;
   /**
    * Set by the service, never by a model: Paul's own message in the chat turn where the chief started this
    * job, verbatim, with where and when it arrived. Absent for jobs from before this existed, schedules,

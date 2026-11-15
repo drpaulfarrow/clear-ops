@@ -67,6 +67,15 @@ export interface InstinctBridgeDeps {
   retry?: (id: string) => { id: string; status: string };
   retryBlocked?: () => string | undefined;
   retryPerDay?: number;
+  /**
+   * One-use commissions. `commissionAllow` maps a brief id to the sha256 the brief must have, `commissionBrief` reads
+   * the retained text, `commission` starts one job from it. Empty allow means 404. `commissionBlocked` says why not now.
+   */
+  commissionAllow?: Readonly<Record<string, string>>;
+  commissionBrief?: (id: string) => string | undefined;
+  commission?: (id: string, brief: string) => { id: string; status: string };
+  commissionBlocked?: () => string | undefined;
+  commissionLogFile?: string;
   /** Read-only guild look from the Discord gateway. Absent, or resolving to undefined (no gateway connected), means 404; a read that throws is a 502. */
   guilds?: () => Promise<unknown | undefined>;
   /** Read-only page of the owner's DM with the bot. Absent or resolving to undefined means 404; a throw is a 502. */
@@ -250,6 +259,56 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
     }
   };
 
+  // Commissions already started: brief id -> job id ("pending" while one is being created). A pending entry is never
+  // retried, so a crash between the two writes closes that commission instead of risking a second job.
+  let commissions: Record<string, string> = {};
+  let commissionLogBroken = false;
+  if (deps.commissionLogFile) {
+    try {
+      const saved = JSON.parse(readFileSync(deps.commissionLogFile, "utf8")) as unknown;
+      if (!saved || typeof saved !== "object" || Array.isArray(saved) || !Object.values(saved).every((v) => typeof v === "string")) commissionLogBroken = true;
+      else commissions = saved as Record<string, string>;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") commissionLogBroken = true;
+    }
+  }
+  const persistCommissions = (): boolean => {
+    if (!deps.commissionLogFile) return false;
+    try {
+      const tmp = `${deps.commissionLogFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify(commissions));
+      renameSync(tmp, deps.commissionLogFile);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  router.post("/commission", (req, res) => {
+    const allow = deps.commissionAllow ?? {};
+    if (!deps.commission || !deps.commissionBrief || Object.keys(allow).length === 0) return void res.sendStatus(404);
+    const id = String((req.body as { briefId?: unknown } | undefined)?.briefId ?? "").trim().toLowerCase();
+    if (!/^[a-z0-9-]{3,40}$/.test(id) || !Object.prototype.hasOwnProperty.call(allow, id)) return void res.status(403).json({ ok: false, error: "That brief is not on the commission allowlist." });
+    if (commissionLogBroken) return void res.status(503).json({ ok: false, error: "The commission log is unreadable, so nothing starts until the owner checks it." });
+    if (Object.prototype.hasOwnProperty.call(commissions, id)) return void res.status(409).json({ ok: false, error: "That commission was already used.", jobId: commissions[id] });
+    const blocked = deps.commissionBlocked?.();
+    if (blocked) return void res.status(423).json({ ok: false, error: blocked });
+    const text = deps.commissionBrief(id);
+    if (text === undefined) return void res.status(404).json({ ok: false, error: "The retained brief is missing." });
+    if (createHash("sha256").update(text).digest("hex") !== allow[id]) return void res.status(409).json({ ok: false, error: "The retained brief does not match its pinned hash." });
+    commissions[id] = "pending";
+    if (!persistCommissions()) {
+      delete commissions[id];
+      return void res.status(503).json({ ok: false, error: "The commission could not be recorded, so it did not start." });
+    }
+    try {
+      const r = deps.commission(id, text);
+      commissions[id] = r.id;
+      persistCommissions();
+      res.status(202).json({ ok: true, id: r.id, status: r.status });
+    } catch (err) {
+      res.status(409).json({ ok: false, error: err instanceof Error ? err.message : "Commission refused." });
+    }
+  });
   router.post("/retry", (req, res) => {
     const allow = deps.retryAllow ?? [];
     if (!deps.retry || allow.length === 0) return void res.sendStatus(404);
