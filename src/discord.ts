@@ -245,7 +245,7 @@ export interface GuildView {
   name: string;
   ownerId: string;
   members: { me?: { permissions: { has(p: bigint): boolean } } | null; fetch(id: string): Promise<{ permissions: { has(p: bigint): boolean } }> };
-  channels: { cache: Iterable<{ id: string; name: string; type: number; parentId: string | null }> };
+  channels: { cache: Iterable<{ id: string; name: string; type: number; parentId: string | null }> | { values(): Iterable<{ id: string; name: string; type: number; parentId: string | null }> } };
 }
 
 /**
@@ -253,16 +253,22 @@ export interface GuildView {
  * whether the bot may manage channels, and whether the owner is the guild owner or an administrator. No
  * messages, no token, no member lists, nothing written.
  */
-export async function inspectGuilds(client: { guilds: { cache: Iterable<GuildView> } }, ownerUserId: string) {
+/** discord.js caches are Maps, whose plain iteration yields [id, value] pairs; take the values. A plain array or set works too. */
+function cacheValues<T>(cache: Iterable<T> | { values(): Iterable<T> }): T[] {
+  const withValues = cache as { values?: () => Iterable<T> };
+  return [...(typeof withValues.values === "function" ? withValues.values() : (cache as Iterable<T>))];
+}
+
+export async function inspectGuilds(client: { guilds: { cache: Iterable<GuildView> | { values(): Iterable<GuildView> } } }, ownerUserId: string) {
   const out = [];
-  for (const g of client.guilds.cache) {
+  for (const g of cacheValues(client.guilds.cache)) {
     let ownerIsAdmin: boolean | null = null;
     try {
       ownerIsAdmin = (await g.members.fetch(ownerUserId)).permissions.has(PermissionFlagsBits.Administrator);
     } catch {
       ownerIsAdmin = null; // not a member, or Discord would not say
     }
-    const chans = [...g.channels.cache].map((c) => ({ id: c.id, name: c.name, kind: c.type === ChannelType.GuildCategory ? "category" : c.type === ChannelType.GuildText ? "text" : "other", parentId: c.parentId }));
+    const chans = cacheValues(g.channels.cache).map((c) => ({ id: c.id, name: c.name, kind: c.type === ChannelType.GuildCategory ? "category" : c.type === ChannelType.GuildText ? "text" : "other", parentId: c.parentId }));
     out.push({
       id: g.id,
       name: g.name,
