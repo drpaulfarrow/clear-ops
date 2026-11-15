@@ -197,7 +197,7 @@ export const DEVICE_RUN_GUARD_USD = 0.05;
  * device turns and touches no global limit or key.
  */
 export class DeviceBudget {
-  constructor(private readonly file: string, private readonly budgetUsd: () => number) {}
+  constructor(private readonly file: string, private readonly budgetUsd: () => number, private readonly label = "the device") {}
   private read(): number {
     try { const n = Number((JSON.parse(fs.readFileSync(this.file, "utf8")) as { spentUsd?: unknown }).spentUsd); return Number.isFinite(n) && n >= 0 ? n : 0; } catch { return 0; }
   }
@@ -205,8 +205,8 @@ export class DeviceBudget {
   remaining(): number { return Math.max(0, this.budgetUsd() - this.read()); }
   /** The reason a turn is refused, or undefined when there is budget left. */
   gate(): string | undefined {
-    if (!(this.budgetUsd() > 0)) return "no test budget has been set for the device";
-    return this.remaining() > 0 ? undefined : "the device test budget is used up";
+    if (!(this.budgetUsd() > 0)) return `no test budget has been set for ${this.label}`;
+    return this.remaining() > 0 ? undefined : `the test budget for ${this.label} is used up`;
   }
   add(usd: number): void {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });

@@ -806,24 +806,57 @@ export class Orchestrator {
     }
   }
 
+  /** Set by the entry point. Without it a bridge chat turn is refused. */
+  bridgeBudget?: DeviceBudget;
+  /** For tests: the meter a bridge chat turn uses. */
+  bridgeMeter?: (capUsd: number, stop: () => void) => import("./realcost.js").JobCostWatch;
+
+  /**
+   * Bridge chat turn. Paid, so it is closed unless three things are set: BRIDGE_CHAT_ENABLED, a test budget
+   * (BRIDGE_CHAT_BUDGET_USD) and a separate provider-capped key (OPENROUTER_BRIDGE_API_KEY). It never uses the
+   * main key, offers no start_job, and is metered per call against what is left of its own ledger, like a
+   * device turn. The ledger is a stop threshold, not a ceiling on money; only a limit set at the provider
+   * on that key is one, and even that is checked by the provider when a request starts.
+   */
   async askAsInstinct(text: string): Promise<string> {
-    const result = await this.run({
-      prompt: bridgeMessageWrapper(text),
-      systemPrompt: bridgePrompt(),
-      model: config.models.chief,
-      resume: this.store.getSession(BRIDGE_REPLY_TO),
-      allowedTools: ["WebSearch", "WebFetch", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
-      tools: ["WebSearch", "WebFetch"],
-      disallowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write", "NotebookEdit", "Task"],
-      // No directories at all: the default would add every repository and the uploads folder.
-      additionalDirectories: [],
-      mcpServers: { ops: this.bridgeOpsServer(), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
-      maxTurns: 15,
-      maxBudgetUsd: config.sdkRunawayBudgetUsd,
-    });
-    if (result.error) return chiefFailureText(result.error);
-    if (result.sessionId) this.store.setSession(BRIDGE_REPLY_TO, result.sessionId);
-    return tidyReply(result.text) || "(no reply)";
+    const budget = this.bridgeBudget;
+    const refused = budget ? budget.gate() : "no test budget has been set for the bridge chat";
+    if (refused) return `The bridge chat cannot answer: ${refused}.`;
+    const key = config.bridgeOpenrouterKey;
+    if (provider() !== "openrouter" || !key) return "The bridge chat cannot answer: its separate capped key is not set.";
+    const abort = new AbortController();
+    const meter = (this.bridgeMeter ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop, apiKey: key })))(budget!.remaining(), () => abort.abort());
+    let counted = false;
+    try {
+      const result = await this.run({
+        costMeter: meter,
+        apiKey: key,
+        abortController: abort,
+        prompt: bridgeMessageWrapper(text),
+        systemPrompt: bridgePrompt(),
+        model: config.models.chief,
+        resume: this.store.getSession(BRIDGE_REPLY_TO),
+        allowedTools: ["mcp__ops__*"],
+        tools: [],
+        disallowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "Bash", "Edit", "Write", "NotebookEdit", "Task"],
+        // No directories at all: the default would add every repository and the uploads folder.
+        additionalDirectories: [],
+        mcpServers: { ops: this.bridgeOpsServer({ startJobs: false }) },
+        maxTurns: DEVICE_MAX_STEPS,
+        maxBudgetUsd: DEVICE_RUN_GUARD_USD,
+      });
+      const cost = await meter.settle();
+      const unpriced = Math.max(0, cost.calls - cost.read);
+      budget!.add(cost.usd + (cost.source === "unavailable" || unpriced > 0 ? Math.max(1, unpriced) * DEVICE_UNPRICED_TURN_USD : 0));
+      counted = true;
+      if (abort.signal.aborted) return "The bridge chat test budget ran out during that answer.";
+      if (result.error) return chiefFailureText(result.error);
+      if (result.sessionId) this.store.setSession(BRIDGE_REPLY_TO, result.sessionId);
+      return tidyReply(result.text) || "(no reply)";
+    } finally {
+      meter.stop();
+      if (!counted) budget!.add(DEVICE_UNPRICED_TURN_USD);
+    }
   }
 
   /**
