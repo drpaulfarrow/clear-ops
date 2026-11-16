@@ -1,6 +1,6 @@
 # What the workforce can do, and how Paul uses it
 
-You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers quick questions itself and hands longer work to a worker that runs in the background and sends you one short message when it finishes. The full report is saved; say `show job <id>` for it.
+You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers quick questions itself and hands longer work to a worker that runs in the background and sends you one short message when it finishes. The full report is saved and its finish message carries a link to it, a page you can read on your phone; `show job <id>` gives the same link.
 
 ## The workers
 
@@ -36,7 +36,7 @@ You talk to one bot (Telegram, Discord or WhatsApp). A chief of staff answers qu
 
 ## Commands
 
-`/jobs` `/board` (a link to the read-only jobs board page, behind your password) `/reports` (a link to your saved reports, every finished job's output as a page you can read on your phone, behind your password) `/password` (a private one-time link to set or change the password that opens the browser pages; type it there, never in chat, and setting it signs out every device) `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared), `buy cancel <id>`, `code <id> <the code>` (the code a site sent you, put into the sign-in page that is waiting for it), `/whoami` (in a DM: the id this service sees you as, handy when adding an allowlist secret), `/pair <code>` and `/unpair` (the home talk-button phone), and `act as me on <site>`, `stop acting as me on <site>`, `act as me` (let agents sign in and act as you on one of your own sites). Each approval command is for one item, you send it yourself, and it expires.
+`/jobs` `/board` (a link to the read-only jobs board page, behind your password) `/reports` (a link to your saved reports, every finished job's output and the decks and one-pagers as pages you can read on your phone, behind your password) `/password` (a private one-time link to set or change the password that opens the browser pages; type it there, never in chat, and setting it signs out every device) `/status` `/pending` `/spend [yesterday]` `/uploads` `/followups` `/booking <link>` `/google` `/resume` `/reset` `/help`, plus `show job <id>`, `retry <id>`, `cancel <id>` (outbound items), `done <id>`, `snooze <id> <when>`, `YES <id>`, `send <id>`, `dns apply <id>`, `dns cancel <id>`, `signup apply <id>`, `signup cancel <id>`, `buy <id>` (approve the order a job prepared), `buy cancel <id>`, `code <id> <the code>` (the code a site sent you, put into the sign-in page that is waiting for it), `/whoami` (in a DM: the id this service sees you as, handy when adding an allowlist secret), `/pair <code>` and `/unpair` (the home talk-button phone), and `act as me on <site>`, `stop acting as me on <site>`, `act as me` (let agents sign in and act as you on one of your own sites). Each approval command is for one item, you send it yourself, and it expires.
 
 ## Things only you do
 
