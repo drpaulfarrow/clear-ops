@@ -92,12 +92,13 @@ export const config = {
     /**
      * More managed repositories: comma-separated `alias=owner/name` (optionally `|another name` Paul
      * uses for it). Defaults to his personal site (alias "site"), the second project he wants pull
-     * requests to (alias "doubleshift") and his private, isolated test copy of the Doubleshift source
+     * requests to (alias "doubleshift"), his private, isolated test copy of the Doubleshift source
      * (alias "doubleshift-test"), which is separate from the production app-doubleshift repository and
-     * has its GitHub Actions deliberately disabled. Repositories the workforce creates are kept in the
-     * store, not here.
+     * has its GitHub Actions deliberately disabled, and the private source of his voice-phone Android
+     * app (alias "clearops-device"), which the workers read as material and none of them builds or
+     * installs. Repositories the workforce creates are kept in the store, not here.
      */
-    extra: process.env.MANAGED_REPOS || "site=drpaulfarrow/drpaulfarrowcom|drpaulfarrow.com,doubleshift=shftd2-pre/app-doubleshift,doubleshift-test=drpaulfarrow/doubleshift-test",
+    extra: process.env.MANAGED_REPOS || "site=drpaulfarrow/drpaulfarrowcom|drpaulfarrow.com,doubleshift=shftd2-pre/app-doubleshift,doubleshift-test=drpaulfarrow/doubleshift-test,clearops-device=drpaulfarrow/clearops-device",
     /** The GitHub account new repositories are created under. */
     owner: process.env.REPO_OWNER || "drpaulfarrow",
   },
