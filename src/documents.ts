@@ -18,6 +18,11 @@
  * repository's own zip reader (`readZipEntry` in src/uploads.ts) rather than a new dependency, and
  * saved as a `.txt` beside the .docx. That .txt is the path a worker reads; the receipt names it.
  *
+ * A PDF gets the same treatment without a line of code here: the uploads store reads its text out as
+ * it is saved (src/pdf-extract.ts, off the main thread) and writes the companion itself, and this
+ * receipt names it, hashes its bytes and carries the store's note when the text could only be read in
+ * part, or not at all.
+ *
  * Nothing here reads a document back: the bridge adds to the uploads store and never reads it out.
  */
 import { appendFileSync } from "node:fs";
@@ -238,9 +243,9 @@ export class DocumentIngest {
   }
 
   /** Validate one request and save it, or throw a DocumentError with a message safe to show Paul. */
-  ingest(input: unknown): DocumentReceipt {
+  async ingest(input: unknown): Promise<DocumentReceipt> {
     try {
-      return this.accept((input ?? {}) as DocumentRequest);
+      return await this.accept((input ?? {}) as DocumentRequest);
     } catch (err) {
       if (err instanceof DocumentError) {
         this.log({ ok: false, name: typeof (input as DocumentRequest | undefined)?.name === "string" ? String((input as DocumentRequest).name).slice(0, NAME_MAX) : undefined, reason: err.message });
@@ -251,7 +256,7 @@ export class DocumentIngest {
     }
   }
 
-  private accept(body: DocumentRequest): DocumentReceipt {
+  private async accept(body: DocumentRequest): Promise<DocumentReceipt> {
     const bad = unsafeNameReason(body.name);
     if (bad) throw new DocumentError(bad);
     const name = body.name as string;
@@ -284,7 +289,9 @@ export class DocumentIngest {
     const callerNote = typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, NOTE_MAX) : undefined;
     let saved: SavedUpload;
     try {
-      saved = this.uploads.save(name, bytes, declared, callerNote);
+      // Awaiting this also awaits a PDF's text being read out beside it (src/uploads.ts), off the main
+      // thread, so the receipt below can name the companion file it wrote.
+      saved = await this.uploads.save(name, bytes, declared, callerNote);
     } catch (err) {
       throw new DocumentError(err instanceof UploadError ? err.message : "the document could not be saved");
     }
@@ -295,16 +302,20 @@ export class DocumentIngest {
       try {
         // Beside the .docx, under the original name, so the two share a stem and the store's own
         // naming keeps them from ever overwriting an earlier upload.
-        const t = this.uploads.save(`${name}.txt`, data, "text/plain");
+        const t = await this.uploads.save(`${name}.txt`, data, "text/plain");
         textFile = { name: t.name, path: t.path, chars: text.length, sha256: sha256(data) };
       } catch {
         // The document itself is saved: a missing companion file is reported, never hidden.
         textFile = undefined;
       }
+    } else if (saved.text) {
+      // A PDF: the uploads store read its text out and wrote it beside the file, so the companion is
+      // the one it wrote - the name, the size and the bytes it hashed are its own.
+      textFile = { name: saved.text.name, path: saved.text.path, chars: saved.text.chars, sha256: saved.text.sha256 };
     }
     let note: string | undefined;
     if (text !== undefined) note = text.trim() ? undefined : "no text could be read from the document (it may hold only images)";
-    else if (byName === "pdf" || byType === "pdf") note = "a PDF is saved as it is; text is not extracted from PDFs";
+    else if (byName === "pdf" || byType === "pdf") note = saved.note;
     else if (byName === "unknown" && byType === "unknown") note = "this type is saved as it is; no text was extracted from it";
 
     const receipt: DocumentReceipt = {

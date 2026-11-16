@@ -3,13 +3,20 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-pdf-"));
+// These tests are about this service's own reader, word for word, so the installed parser is pinned
+// out of the way: a CI runner has pdftotext, a development machine here does not, and the assertions
+// below must mean the same thing on both. The parser's own half is test/pdf-extract.test.ts.
+process.env.PDFTOTEXT_PATH = "/nonexistent/pdftotext-for-the-reader-tests";
 
-const { pdfText, pdfTextNote, isPdfData, countWords, parseToUnicode } = await import("../src/pdf.js");
+const { pdfText, pdfTextNote, isPdfData, countWords, parseToUnicode, readerLimitsFor } = await import("../src/pdf.js");
 const { Uploads, describeUploads, receiptText } = await import("../src/uploads.js");
+const { extractPdfText, findPdftotext } = await import("../src/pdf-extract.js");
+import type { Attachment, SavedUpload } from "../src/uploads.js";
 
 /**
  * The fixtures are built here, from scratch, without any of the reader's own code: a PDF written by
@@ -283,11 +290,13 @@ test("the ToUnicode reader reads both CMap sections", () => {
 const fixedDate = () => new Date("2026-11-16T09:00:00Z");
 const freshDir = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-pdfdir-")), "uploads");
 const modeOf = (p: string) => fs.statSync(p).mode & 0o777;
+const uploadsIn = (dir: string) => new Uploads(dir, { maxBytes: 8_000_000, maxArchiveEntries: 100, maxArchiveBytes: 1000 }, fixedDate);
+/** The real path a chat attachment takes, which is what a test here should drive. */
+const attachment = (name: string, data: Buffer, mimeType?: string): Attachment => ({ name, mimeType, size: data.length, download: async () => data });
 
-test("saving a PDF writes its text beside it, owner-only, under the same date and stem", () => {
+test("an uploaded PDF gets its text beside it, owner-only, under the same date and stem", async () => {
   const dir = freshDir();
-  const uploads = new Uploads(dir, { maxBytes: 8_000_000, maxArchiveEntries: 100, maxArchiveBytes: 1000 }, fixedDate);
-  const saved = uploads.save("book-submission.pdf", SIMPLE, "application/pdf");
+  const saved = await uploadsIn(dir).ingest(attachment("book-submission.pdf", SIMPLE, "application/pdf"));
 
   assert.equal(saved.name, "2026-11-16-book-submission.pdf");
   assert.ok(saved.text, "the extraction should be recorded on the saved upload");
@@ -305,10 +314,9 @@ test("saving a PDF writes its text beside it, owner-only, under the same date an
   assert.match(receiptText([saved], []), /text read: 9 words/);
 });
 
-test("a scan writes no companion file and is reported plainly instead", () => {
+test("a scan writes no companion file and is reported plainly instead", async () => {
   const dir = freshDir();
-  const uploads = new Uploads(dir, { maxBytes: 8_000_000, maxArchiveEntries: 100, maxArchiveBytes: 1000 }, fixedDate);
-  const saved = uploads.save("scan.pdf", SCAN, "application/pdf");
+  const saved = await uploadsIn(dir).ingest(attachment("scan.pdf", SCAN, "application/pdf"));
 
   assert.equal(saved.text, undefined);
   assert.match(saved.note ?? "", /no text layer/);
@@ -317,11 +325,28 @@ test("a scan writes no companion file and is reported plainly instead", () => {
   assert.match(receiptText([saved], []), /no text layer/);
 });
 
-test("a second upload of the same name gets its own companion, never overwriting an earlier one", () => {
+test("a read that a limit stopped is said to Paul too, not only to the chief", () => {
+  // The chief's line always carried the note; Paul's receipt used to drop it whenever there was text.
+  const partial: SavedUpload = {
+    name: "2026-11-16-book.pdf",
+    path: "/nowhere/2026-11-16-book.pdf",
+    originalName: "book.pdf",
+    mimeType: "application/pdf",
+    size: 2048,
+    text: { name: "2026-11-16-book.pdf.txt", path: "/nowhere/2026-11-16-book.pdf.txt", chars: 900, words: 150, sha256: "x" },
+    note: "the read stopped at this service's limit, so the text covers only part of the file",
+  };
+  const receipt = receiptText([partial], []);
+  assert.match(receipt, /text read: 150 words/);
+  assert.match(receipt, /only part of the file/);
+  assert.match(describeUploads([partial], [], 0), /only part of the file/);
+});
+
+test("a second upload of the same name gets its own companion, never overwriting an earlier one", async () => {
   const dir = freshDir();
-  const uploads = new Uploads(dir, { maxBytes: 8_000_000, maxArchiveEntries: 100, maxArchiveBytes: 1000 }, fixedDate);
-  const first = uploads.save("book.pdf", SIMPLE, "application/pdf");
-  const second = uploads.save("book.pdf", SIMPLE, "application/pdf");
+  const uploads = uploadsIn(dir);
+  const first = await uploads.ingest(attachment("book.pdf", SIMPLE, "application/pdf"));
+  const second = await uploads.ingest(attachment("book.pdf", SIMPLE, "application/pdf"));
   assert.equal(first.text?.name, "2026-11-16-book.pdf.txt");
   assert.equal(second.name, "2026-11-16-book-2.pdf");
   assert.equal(second.text?.name, "2026-11-16-book-2.pdf.txt");
@@ -331,11 +356,109 @@ test("a second upload of the same name gets its own companion, never overwriting
   assert.deepEqual(gone.deleted.sort(), ["2026-11-16-book.pdf", "2026-11-16-book.pdf.txt"]);
 });
 
-test("a chat upload that is not a PDF is untouched by any of this", () => {
+test("a companion written under a name of its own is deleted with the PDF too", async () => {
   const dir = freshDir();
-  const uploads = new Uploads(dir, { maxBytes: 8_000_000, maxArchiveEntries: 100, maxArchiveBytes: 1000 }, fixedDate);
-  const saved = uploads.save("notes.txt", Buffer.from("hello"), "text/plain");
+  const uploads = uploadsIn(dir);
+  const first = await uploads.ingest(attachment("book.pdf", SIMPLE, "application/pdf"));
+  // Something is already sitting on the second PDF's companion name, so its own text lands on
+  // <name>-2.txt. A version that left that behind would leave a copy of the document on the volume.
+  fs.writeFileSync(path.join(dir, "2026-11-16-book-2.pdf.txt"), "not this PDF's text", { mode: 0o600 });
+  const second = await uploads.ingest(attachment("book.pdf", SIMPLE, "application/pdf"));
+  assert.equal(first.text?.name, "2026-11-16-book.pdf.txt");
+  assert.equal(second.text?.name, "2026-11-16-book-2.pdf-2.txt");
+  const gone = uploads.delete("2026-11-16-book-2.pdf");
+  assert.deepEqual(gone.deleted.sort(), ["2026-11-16-book-2.pdf", "2026-11-16-book-2.pdf-2.txt", "2026-11-16-book-2.pdf.txt"]);
+  assert.equal(fs.existsSync(path.join(dir, "2026-11-16-book-2.pdf-2.txt")), false, "no copy of the text is left behind");
+  // The first upload is untouched, companion and all.
+  assert.match(fs.readFileSync(path.join(dir, "2026-11-16-book.pdf.txt"), "utf8"), /Hello world/);
+});
+
+test("the companion records the hash of its own bytes, so a sender can check what was stored", async () => {
+  const saved = await uploadsIn(freshDir()).ingest(attachment("book.pdf", SIMPLE, "application/pdf"));
+  const bytes = fs.readFileSync(saved.text!.path);
+  assert.equal(saved.text!.sha256, createHash("sha256").update(bytes).digest("hex"));
+  assert.equal(saved.text!.chars, bytes.toString("utf8").length);
+});
+
+test("a chat upload that is not a PDF is untouched by any of this", async () => {
+  const dir = freshDir();
+  const saved = await uploadsIn(dir).ingest(attachment("notes.txt", Buffer.from("hello"), "text/plain"));
   assert.equal(saved.text, undefined);
   assert.equal(saved.note, undefined);
   assert.deepEqual(fs.readdirSync(dir), ["2026-11-16-notes.txt"]);
+});
+
+/* ------------------- reading a PDF is bounded and off the main thread ------------------- */
+
+test("the reader's budgets scale with the file, so a small file can never ask for bomb-scale work", () => {
+  const tiny = readerLimitsFor(10_000, 1_000_000);
+  const ordinary = readerLimitsFor(1_600_000, 1_000_000);
+  assert.equal(tiny.maxChars, 1_000_000);
+  assert.ok(tiny.maxSteps! >= 200_000, "a tiny file still gets a workable budget");
+  assert.ok(tiny.maxStreamBytes! < ordinary.maxStreamBytes!, "and a smaller one than a real document");
+  assert.ok(ordinary.maxStreamBytes! <= 64 * 1024 * 1024);
+  assert.ok(readerLimitsFor(200 * 1024 * 1024, 1000).maxStreamBytes! <= 64 * 1024 * 1024, "capped, never unbounded");
+  assert.ok(readerLimitsFor(200 * 1024 * 1024, 1000).maxSteps! <= 6_000_000);
+  // A file that is not a whole number of bytes (or is nonsense) is still bounded.
+  assert.ok(readerLimitsFor(Number.NaN, 10).maxSteps! >= 200_000);
+});
+
+test("a stream that inflates far beyond the file is stopped at the budget the file's own size allows", () => {
+  // 8 MB of text in a file of a few kilobytes: a decompression bomb, which the size-scaled budget
+  // stops without the reader ever holding 8 MB.
+  const bomb = buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    streamOf(`BT /F1 12 Tf 72 700 Td (${"a".repeat(8 * 1024 * 1024)}) Tj ET\n`),
+  ]);
+  assert.ok(bomb.length < 64 * 1024, `the file itself stays tiny (${bomb.length} bytes)`);
+  const limits = readerLimitsFor(bomb.length, 100);
+  const result = pdfText(bomb, limits);
+  assert.ok(result.chars <= 100, "the character cap holds");
+  assert.ok(result.truncated, "and it is not called a whole read");
+  // The whole stream was over budget, so there is no text to show - and that is said, not dressed up as
+  // "this file has no text layer".
+  assert.equal(result.text, "");
+  assert.match(result.reason ?? "", /not read within this reader's limits/);
+  assert.doesNotMatch(result.reason ?? "", /no text layer/);
+});
+
+test("the reader is not run on the service's own thread, so the loop keeps turning while it works", async () => {
+  // A document heavy enough that the read is real work: sixty pages of sixty lines.
+  const pages = Array.from({ length: 60 }, (_, p) =>
+    `BT /F1 12 Tf 72 700 Td ${Array.from({ length: 60 }, (_, i) => `(page${p}word${i} filler filler filler) Tj 0 -12 Td`).join(" ")} ET\n`,
+  );
+  const heavy = buildPdfNumbered([
+    { num: 1, body: "<< /Type /Catalog /Pages 2 0 R >>" },
+    { num: 2, body: `<< /Type /Pages /Kids [${pages.map((_, i) => `${3 + i} 0 R`).join(" ")}] /Count ${pages.length} >>` },
+    ...pages.map((_, i) => ({
+      num: 3 + i,
+      body: `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 100 0 R >> >> /Contents ${200 + i} 0 R >>`,
+    })),
+    { num: 100, body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>" },
+    ...pages.map((text, i) => ({ num: 200 + i, body: streamOf(text) })),
+  ]);
+
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 10);
+  const started = Date.now();
+  const result = await extractPdfText(heavy, { maxChars: 4_000_000 }, { pdftotext: null });
+  const took = Date.now() - started;
+  clearInterval(timer);
+  assert.equal(result.source, "reader");
+  assert.equal(result.pages, pages.length);
+  assert.ok(result.words > 3000, `the whole document came back (${result.words} words)`);
+  assert.ok(ticks > 0, `the event loop ran while the PDF was read (${ticks} ticks in ${took} ms)`);
+});
+
+test("a file too large to read is refused plainly rather than read anyway", async () => {
+  const result = await extractPdfText(SIMPLE, {}, { maxBytes: 100 });
+  assert.equal(result.text, "");
+  assert.match(result.reason ?? "", /larger than/);
+});
+
+test("these tests are reading with this service's own reader, pinned so they mean the same everywhere", () => {
+  assert.equal(findPdftotext(), undefined, "the pinned path is not a pdftotext, so the reader is what runs");
 });

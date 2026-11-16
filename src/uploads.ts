@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import { repoRegistry } from "./repos.js";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { config } from "./config.js";
-import { isPdfData, pdfText, pdfTextNote } from "./pdf.js";
+import { isPdfData, pdfTextNote } from "./pdf.js";
+import { extractPdfText, type PdfExtraction } from "./pdf-extract.js";
 
 /**
  * Files the founder sends in chat (a LinkedIn Connections.csv, PDFs, screenshots, zip archives).
@@ -15,10 +17,15 @@ import { isPdfData, pdfText, pdfTextNote } from "./pdf.js";
  * executed. Deleting one is a chat command or a chief tool.
  *
  * Two kinds of file are also turned into something a worker can read with its ordinary tools. A zip is
- * unpacked beside itself. A PDF gets a plain-text companion (`<name>.txt`, src/pdf.ts) because its
- * page text sits inside compressed streams that neither Read nor grep can reach; where there is no
- * text to read - a scan - no companion is written and the reason is said plainly instead, so an empty
- * extraction is never mistaken for a success.
+ * unpacked beside itself. A PDF gets a plain-text companion (`<name>.txt`, src/pdf-extract.ts and
+ * src/pdf.ts) because its page text sits inside compressed streams that neither Read nor grep can
+ * reach; where there is no text to read - a scan - no companion is written and the reason is said
+ * plainly instead, so an empty extraction is never mistaken for a success.
+ *
+ * Reading that text is asynchronous and runs off the main thread (`extractPdfText`), because a PDF is
+ * a file a third party wrote and a slow one would otherwise stop the whole service: `/health`, `/busy`,
+ * the channel listeners and the minute watchdog. `save` waits for it, so an upload still arrives with
+ * its companion in the same turn.
  */
 
 /** One attachment on an inbound message. `download` is only called after the sender passed the allowlist. */
@@ -41,7 +48,7 @@ export interface SavedUpload {
   /** Set for zip archives. */
   extracted?: { dir: string; files: number; skipped: number; error?: string };
   /** Set for a PDF whose text was read out: the companion .txt saved beside it, which a worker reads. */
-  text?: { name: string; path: string; chars: number; words: number };
+  text?: { name: string; path: string; chars: number; words: number; sha256: string };
   /** What could not be read out of the file, in plain words for the chief and for Paul. */
   note?: string;
 }
@@ -194,11 +201,16 @@ export class Uploads {
       throw new UploadError("download failed");
     }
     if (data.length > this.limits.maxBytes) throw new UploadError(`too large (${formatSize(data.length)}; limit ${formatSize(this.limits.maxBytes)})`);
-    return this.save(a.name, data, a.mimeType, caption);
+    return await this.save(a.name, data, a.mimeType, caption);
   }
 
-  /** Write bytes as <date>-<sanitised name>, never overwriting; unpack zip archives beside it. */
-  save(originalName: string, data: Buffer, mimeType?: string, caption?: string): SavedUpload {
+  /**
+   * Write bytes as <date>-<sanitised name>, never overwriting; unpack zip archives beside it and read a
+   * PDF's text out beside it. Reading a PDF is asynchronous and off the main thread (src/pdf-extract.ts):
+   * it is the one step here that parses a file a third party wrote, and it must never hold the service's
+   * event loop while it works. Callers therefore await this, and the upload arrives complete.
+   */
+  async save(originalName: string, data: Buffer, mimeType?: string, caption?: string): Promise<SavedUpload> {
     // An empty file is never a saved upload: it is a download or a request that went wrong, and it is
     // reported as one rather than stored and called a success.
     if (!data.length) throw new UploadError("the file is empty (0 bytes)");
@@ -208,7 +220,7 @@ export class Uploads {
     const name = this.writeNew(`${date}-${clean}`, data);
     const saved: SavedUpload = { name, path: this.inside(name), originalName, mimeType: type, size: data.length, caption: caption || undefined };
     if (isZip(clean, type, data)) saved.extracted = this.extract(name, data);
-    else if (isPdfData(data)) this.attachPdfText(name, data, saved);
+    else if (isPdfData(data)) await this.attachPdfText(name, data, saved);
     return saved;
   }
 
@@ -233,15 +245,30 @@ export class Uploads {
    * and a plain reason is recorded on the upload instead, and a text that could not be written beside
    * the PDF (no room on the volume, say) is reported the same way. The PDF itself is always saved.
    */
-  private attachPdfText(name: string, data: Buffer, saved: SavedUpload): void {
-    const result = pdfText(data, { maxChars: PDF_TEXT_MAX_CHARS });
+  private async attachPdfText(name: string, data: Buffer, saved: SavedUpload): Promise<void> {
+    // Never throws: a read that fails comes back with a plain reason, and the PDF itself is saved
+    // either way. The try is here so that nothing unforeseen can turn a saved file into a lost one.
+    let result: PdfExtraction;
+    try {
+      result = await extractPdfText(data, { maxChars: PDF_TEXT_MAX_CHARS });
+    } catch {
+      saved.note = "the text could not be read out of the PDF";
+      return;
+    }
     saved.note = pdfTextNote(result);
     if (!result.text.trim()) return;
     try {
       // Beside the PDF, under its own saved name, so the two share a stem and the naming never
       // overwrites an earlier upload's companion.
-      const companion = this.writeNew(`${name}${TEXT_SUFFIX}`, Buffer.from(result.text, "utf8"));
-      saved.text = { name: companion, path: this.inside(companion), chars: result.chars, words: result.words };
+      const bytes = Buffer.from(result.text, "utf8");
+      const companion = this.writeNew(`${name}${TEXT_SUFFIX}`, bytes);
+      saved.text = {
+        name: companion,
+        path: this.inside(companion),
+        chars: result.chars,
+        words: result.words,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      };
     } catch {
       saved.note = [saved.note, "the text was read but could not be saved beside the PDF"].filter(Boolean).join("; ");
     }
@@ -330,8 +357,18 @@ export class Uploads {
       const extracted = match[0].name + EXTRACTED_SUFFIX;
       if (!match[0].isDir && entries.some((e) => e.isDir && e.name === extracted)) targets.push(extracted);
       // A PDF's text companion goes with it: it is derived from that file and never uploaded on its own.
-      const companion = match[0].name + TEXT_SUFFIX;
-      if (!match[0].isDir && entries.some((e) => !e.isDir && e.name === companion)) targets.push(companion);
+      // Under a name of its own too: nothing is ever overwritten here, so a companion whose exact name
+      // was already taken is written as <name>-2.txt, and leaving that behind would leave a copy of the
+      // document's text undeleted. (<name>.txt-2 is the older shape and is still swept up.)
+      const stem = match[0].name;
+      const companion = stem + TEXT_SUFFIX;
+      if (!match[0].isDir) {
+        for (const e of entries) {
+          if (e.isDir) continue;
+          const numbered = e.name.startsWith(stem) && /^-\d+\.txt$/.test(e.name.slice(stem.length));
+          if (e.name === companion || e.name.startsWith(`${companion}-`) || numbered) targets.push(e.name);
+        }
+      }
     }
     if (!targets.length) return { deleted: [], message: "There are no uploads." };
     for (const t of targets) {
@@ -416,7 +453,10 @@ export function receiptText(saved: SavedUpload[], failed: Array<{ name: string; 
   const parts: string[] = [];
   if (saved.length) {
     const list = saved
-      .map((u) => `${u.originalName} (${formatSize(u.size)}${u.extracted ? `, ${u.extracted.files} file(s) unpacked` : ""}${u.text ? `, text read: ${u.text.words} words` : ""}${!u.text && u.note ? `, ${u.note}` : ""})`)
+      .map(
+        (u) =>
+          `${u.originalName} (${formatSize(u.size)}${u.extracted ? `, ${u.extracted.files} file(s) unpacked` : ""}${u.text ? `, text read: ${u.text.words} words` : ""}${u.note ? `, ${u.note}` : ""})`,
+      )
       .join(", ");
     parts.push(`Saved ${list}.`);
   }

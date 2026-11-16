@@ -29,7 +29,11 @@ import { inflateRawSync, inflateSync } from "node:zlib";
 
 /** A name object (`/Pages`). Kept apart from a plain string so the parser can tell them apart. */
 class PdfName {
-  constructor(readonly name: string) {}
+  readonly name: string;
+
+  constructor(name: string) {
+    this.name = name;
+  }
 }
 
 /** An indirect reference (`12 0 R`). */
@@ -71,6 +75,8 @@ export interface PdfLimits {
   maxChars?: number;
   /** Model-free work budget: content-stream tokens and objects. */
   maxSteps?: number;
+  /** A single decompressed stream we will look at, as a guard against a decompression bomb. */
+  maxStreamBytes?: number;
 }
 
 const DEFAULT_PAGES = 2000;
@@ -79,6 +85,28 @@ const DEFAULT_STEPS = 6_000_000;
 /** A single decompressed stream we will look at, as a guard against a decompression bomb. */
 const MAX_STREAM_BYTES = 64 * 1024 * 1024;
 const MAX_FORM_DEPTH = 6;
+/** Floors for the budgets `readerLimitsFor` scales with the file's size, so a tiny file is still read. */
+const MIN_STEPS = 200_000;
+const MIN_STREAM_BYTES = 4 * 1024 * 1024;
+/** Steps and stream bytes a reader budget allows per byte of the file itself. */
+const STEPS_PER_BYTE = 8;
+const STREAM_BYTES_PER_BYTE = 32;
+
+/**
+ * The reader's budgets for a file of this size. A character cap alone does not bound the work: a few
+ * kilobytes of compressed stream can inflate to tens of megabytes, and a file that only looks small
+ * can ask for millions of steps. Scaling both budgets to the bytes actually in the file means a small
+ * file can never ask for bomb-scale work, while a real document of the usual size keeps exactly the
+ * budgets it had before. Used by src/pdf-extract.ts, which reads a file off the main thread.
+ */
+export function readerLimitsFor(bytes: number, maxChars: number = DEFAULT_CHARS): PdfLimits {
+  const size = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+  return {
+    maxChars,
+    maxSteps: Math.min(DEFAULT_STEPS, Math.max(MIN_STEPS, Math.floor(size * STEPS_PER_BYTE))),
+    maxStreamBytes: Math.min(MAX_STREAM_BYTES, Math.max(MIN_STREAM_BYTES, Math.floor(size * STREAM_BYTES_PER_BYTE))),
+  };
+}
 
 /** True when these bytes are a PDF, by the file's own magic rather than its name. */
 export function isPdfData(data: Buffer): boolean {
@@ -117,9 +145,11 @@ type Token =
  * reads as operators).
  */
 class Reader {
+  readonly src: string;
   at: number;
 
-  constructor(readonly src: string, at = 0) {
+  constructor(src: string, at = 0) {
+    this.src = src;
     this.at = at;
   }
 
@@ -382,9 +412,17 @@ class PdfDoc {
   encrypted = false;
   /** Raised when a step budget stopped the read. */
   truncated = false;
+  /** Raised when a stream was past its byte budget: the read saw only part of it. */
+  overBudget = false;
   steps = 0;
 
-  constructor(readonly maxSteps: number) {}
+  readonly maxSteps: number;
+  readonly maxStreamBytes: number;
+
+  constructor(maxSteps: number, maxStreamBytes: number = MAX_STREAM_BYTES) {
+    this.maxSteps = maxSteps;
+    this.maxStreamBytes = maxStreamBytes;
+  }
 
   /** Add every object the file holds directly, skipping over stream bytes so none is read as one. */
   scan(src: string): void {
@@ -548,7 +586,11 @@ function decodeStream(doc: PdfDoc, dict: PdfDict | undefined, raw: Buffer): Buff
     const name = names[i];
     const parm = doc.dictOf(parms[i] ?? parms[0]);
     if (name === "FlateDecode" || name === "Fl") {
-      const out = inflate(data);
+      const out = inflate(data, doc.maxStreamBytes);
+      if (out === "toobig") {
+        doc.overBudget = true;
+        return undefined;
+      }
       if (!out) return undefined;
       data = out;
       if (parm) data = applyPredictor(doc, parm, data) ?? data;
@@ -562,20 +604,32 @@ function decodeStream(doc: PdfDoc, dict: PdfDict | undefined, raw: Buffer): Buff
       return undefined; // DCTDecode, JPXDecode, CCITTFaxDecode, LZWDecode, JBIG2Decode, RunLengthDecode
     }
   }
-  return data.length > MAX_STREAM_BYTES ? data.subarray(0, MAX_STREAM_BYTES) : data;
+  if (data.length > doc.maxStreamBytes) {
+    doc.overBudget = true;
+    return data.subarray(0, doc.maxStreamBytes);
+  }
+  return data;
 }
 
-function inflate(data: Buffer): Buffer | undefined {
+/**
+ * Inflate one stream, never beyond the budget. `"toobig"` is a stream whose real output is past the
+ * budget rather than a damaged one: the caller says the read is partial instead of pretending the file
+ * holds no text. A null result is a stream this reader cannot decode at all.
+ */
+function inflate(data: Buffer, maxBytes: number): Buffer | "toobig" | undefined {
+  let toobig = false;
   try {
-    return inflateSync(data, { maxOutputLength: MAX_STREAM_BYTES });
-  } catch {
+    return inflateSync(data, { maxOutputLength: maxBytes });
+  } catch (err) {
     // Some writers omit the zlib header; a raw stream is worth one more try.
+    if ((err as { code?: string }).code === "ERR_BUFFER_TOO_LARGE") toobig = true;
   }
   try {
-    return inflateRawSync(data, { maxOutputLength: MAX_STREAM_BYTES });
-  } catch {
-    return undefined;
+    return inflateRawSync(data, { maxOutputLength: maxBytes });
+  } catch (err) {
+    if ((err as { code?: string }).code === "ERR_BUFFER_TOO_LARGE") toobig = true;
   }
+  return toobig ? "toobig" : undefined;
 }
 
 /** The PNG predictor some streams (nearly always cross-reference streams) use. */
@@ -978,13 +1032,19 @@ class ContentReader {
   images = 0;
   undecoded = 0;
 
-  constructor(
-    private readonly doc: PdfDoc,
-    private readonly out: PageText,
-    private fonts: Map<string, Font>,
-    private readonly budget: () => boolean,
-    private readonly depth = 0,
-  ) {}
+  private readonly doc: PdfDoc;
+  private readonly out: PageText;
+  private fonts: Map<string, Font>;
+  private readonly budget: () => boolean;
+  private readonly depth: number;
+
+  constructor(doc: PdfDoc, out: PageText, fonts: Map<string, Font>, budget: () => boolean, depth = 0) {
+    this.doc = doc;
+    this.out = out;
+    this.fonts = fonts;
+    this.budget = budget;
+    this.depth = depth;
+  }
 
   /** Interpret one content stream, with the resources in force for it. */
   run(content: string): void {
@@ -1140,9 +1200,10 @@ class ContentReader {
       case '"': {
         const bytes = this.pop();
         if (op === '"') {
-          // The operands are pushed word spacing, then character spacing, then the string.
-          const wordSpace = this.num();
+          // `aw ac string "` pushes word spacing, then character spacing, then the string, so after the
+          // string is popped the top of the stack is the character spacing and word spacing is under it.
           const charSpace = this.num();
+          const wordSpace = this.num();
           this.wordSpacing = wordSpace;
           this.charSpacing = charSpace;
         }
@@ -1314,10 +1375,11 @@ export function pdfText(data: Buffer, limits: PdfLimits = {}): PdfText {
   const maxPages = limits.maxPages ?? DEFAULT_PAGES;
   const maxChars = limits.maxChars ?? DEFAULT_CHARS;
   const maxSteps = limits.maxSteps ?? DEFAULT_STEPS;
+  const maxStreamBytes = limits.maxStreamBytes ?? MAX_STREAM_BYTES;
   const nothing = (reason: string): PdfText => ({ text: "", pages: 0, pagesWithText: 0, pagesWithoutText: [], chars: 0, words: 0, reason, truncated: false, undecoded: 0 });
   if (!isPdfData(data)) return nothing("the file is not a readable PDF");
   try {
-    const doc = new PdfDoc(maxSteps);
+    const doc = new PdfDoc(maxSteps, maxStreamBytes);
     doc.scan(data.toString("latin1"));
     doc.loadObjectStreams();
     if (doc.trailer?.has("Encrypt") && doc.resolve(doc.trailer.get("Encrypt")) !== null) {
@@ -1345,7 +1407,7 @@ export function pdfText(data: Buffer, limits: PdfLimits = {}): PdfText {
       parts.push(text);
       chars += text.length;
     }
-    if (doc.steps >= maxSteps) truncated = true;
+    if (doc.steps >= maxSteps || doc.overBudget) truncated = true;
     const text = parts.join("\f").replace(/\f+$/, "");
     if (!text.trim()) {
       return {
@@ -1356,9 +1418,11 @@ export function pdfText(data: Buffer, limits: PdfLimits = {}): PdfText {
         chars: 0,
         words: 0,
         reason:
-          undecoded > 0
-            ? "the PDF holds text, but its font carries no encoding this reader can read, so none of it came out"
-            : "the PDF has no text layer: it looks like a scan or images of pages, with no text to read",
+          doc.overBudget
+            ? "the PDF holds a page far larger than the file itself, so its text was not read within this reader's limits"
+            : undecoded > 0
+              ? "the PDF holds text, but its font carries no encoding this reader can read, so none of it came out"
+              : "the PDF has no text layer: it looks like a scan or images of pages, with no text to read",
         truncated,
         undecoded,
       };
