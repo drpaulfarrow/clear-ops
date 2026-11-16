@@ -92,13 +92,15 @@ const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
  * A `pdftotext` stand-in: it drains the PDF from stdin (counting the bytes), records its arguments, its
- * environment and its user in a file, writes what it was told to stdout, and exits with the code it was
- * given. It lives in a world-writable directory because the real tool runs as the unprivileged
- * `designer` user, which must be able to write its record there too.
+ * environment, its user and its own process id in a file, writes what it was told to stdout, and exits
+ * with the code it was given. It lives in a world-writable directory because the real tool runs as the
+ * unprivileged `designer` user, which must be able to write its record there too.
  *
  * Its output is written from a file rather than echoed, so the form feeds are real bytes.
+ *
+ * `drain: false` makes one that never reads the PDF it is handed - the tool that will not take its input.
  */
-function stub(opts: { output?: string; exit?: number; hang?: boolean } = {}): Stub {
+function stub(opts: { output?: string; exit?: number; hang?: boolean; drain?: boolean } = {}): Stub {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-stub-"));
   fs.chmodSync(dir, 0o777);
   const out = path.join(dir, "output.bin");
@@ -109,8 +111,8 @@ function stub(opts: { output?: string; exit?: number; hang?: boolean } = {}): St
     "#!/bin/sh",
     `log=${quote(log)}`,
     `out=${quote(out)}`,
-    "bytes=$(wc -c)",
-    '{ printf \'args=%s\\n\' "$*"; printf \'uid=%s\\n\' "$(id -u)"; printf \'stdin=%s\\n\' "$bytes"; env | sort | sed \'s/^/env=/\' ; } >> "$log" 2>/dev/null',
+    opts.drain === false ? "bytes=0" : "bytes=$(wc -c)",
+    '{ printf \'args=%s\\n\' "$*"; printf \'uid=%s\\n\' "$(id -u)"; printf \'pid=%s\\n\' "$$"; printf \'stdin=%s\\n\' "$bytes"; env | sort | sed \'s/^/env=/\' ; } >> "$log" 2>/dev/null',
     'printf "%s" ran >> "$log" 2>/dev/null',
     'cat "$out"',
     // `exec` so the hang is the shell itself: the service kills that one process and nothing is left behind.
@@ -119,6 +121,31 @@ function stub(opts: { output?: string; exit?: number; hang?: boolean } = {}): St
   fs.writeFileSync(s.path, `${script}\n`, { mode: 0o755 });
   STUBS.push(s);
   return s;
+}
+
+/** The pid the stand-in had while it ran, so a read that was stopped can be shown to have killed it. */
+function pidOf(s: Stub): number {
+  const line = fs.readFileSync(s.log, "utf8").split("\n").find((l) => l.startsWith("pid="));
+  return Number(line?.slice(4) ?? 0);
+}
+
+/** Whether that process is still there: a read that ends must leave nothing running behind it. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Waits for that process to go, so a killed parser is reaped rather than merely signalled. */
+async function gone(pid: number): Promise<boolean> {
+  for (let i = 0; i < 200; i++) {
+    if (!alive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return false;
 }
 
 /** What the stand-in saw: its arguments, its environment and its user. */
@@ -224,6 +251,37 @@ test("a parser that hangs with nothing to show is reported as stopped, not as a 
   assert.equal(result.text, "");
   assert.equal(result.truncated, true);
   assert.match(result.reason ?? "", /stopped after 1 second/);
+});
+
+/* ------------------------------ does the read settle? ----------------------------- */
+
+// A read that returns but leaves a child running leaves the whole test file's process alive with it, and
+// under `node --test` that is a run that never finishes rather than a failure anyone can read. So the two
+// ways a parser can be left behind are held here: stopped for time, and refusing to take its input.
+
+test("a parser stopped for time is killed and reaped, so nothing is left running behind the read", async () => {
+  const s = stub({ output: "Half a page\f, and then", hang: true });
+  const reading = extractPdfText(SIMPLE, {}, { pdftotext: s.path, timeoutMs: 1000 });
+  await ran(s);
+  const pid = pidOf(s);
+  assert.ok(pid > 1, "the stand-in recorded the process it was");
+  const result = await reading;
+  assert.equal(result.source, "pdftotext");
+  assert.equal(await gone(pid), true, "the parser was stopped and reaped, not merely signalled");
+});
+
+test("a parser that will not read the PDF it is handed is not waited for, and the reader decides", async () => {
+  const s = stub({ drain: false });
+  // Big enough that the write cannot all fit in the pipe: a tool that has gone and left its input unread
+  // must not hold the read open until the timeout.
+  const big = Buffer.concat([SIMPLE, Buffer.alloc(4 * 1024 * 1024, 0x20)]);
+  const started = Date.now();
+  const result = await extractPdfText(big, {}, { pdftotext: s.path, timeoutMs: 8_000 });
+  const took = Date.now() - started;
+  assert.equal(result.source, "reader", "a tool that would not read the PDF is not believed");
+  assert.equal(result.text, "Hello from the reader");
+  assert.ok(took < 8_000, `the read ended of its own accord rather than at the timeout: took ${took} ms`);
+  assert.equal(await gone(pidOf(s)), true, "nothing is left running");
 });
 
 test("more text than the caller's cap allows stops the parser, and is never passed off as complete", async () => {
