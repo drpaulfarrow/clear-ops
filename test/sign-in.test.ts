@@ -81,8 +81,8 @@ after(() => {
   server.close();
 });
 
-/** The reports view's path and token, taken from the module that serves it, as src/index.ts's gate does. */
-const { REPORTS_PATH, reportsToken } = await import("../src/reports.js");
+/** The reports view's paths and token, taken from the module that serves it, as src/index.ts's gate does. */
+const { REPORTS_PATH, DECKS_PATH, reportsToken } = await import("../src/reports.js");
 
 /**
  * Every browser view the sign-in covers, with words that must never come back to a stranger. Both
@@ -278,7 +278,7 @@ test("an unsigned-in visit to a view gets the sign-in page and none of the conte
 test("every gated path is under the same gate, index and one item alike", async () => {
   // Both views' routes are in main now (src/reports.ts and src/jobs-board.ts), each at its own path taken
   // from the module that serves it; the gate covers the index and one item with the same rule.
-  for (const p of [`${REPORTS_PATH}?t=x`, `${REPORTS_PATH}/abc?t=x`, `${BOARD_PATH}?t=x`, `${BOARD_PATH}/anything`]) {
+  for (const p of [`${REPORTS_PATH}?t=x`, `${REPORTS_PATH}/abc?t=x`, `${DECKS_PATH}?t=x`, `${DECKS_PATH}/a.md?t=x`, `${BOARD_PATH}?t=x`, `${BOARD_PATH}/anything`]) {
     const res = await get(p);
     assert.equal(res.status, 303, `${p} is not served to a stranger`);
     assert.equal(res.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(p)}`);
@@ -301,7 +301,7 @@ test("a gated path is gated whatever its case, because the routes answer any cas
   // reaches the board's route. The gate has to match the same way or the token in a forwarded link is
   // enough on its own. This is the bypass the maintainer reproduced: `/Jobs?t=<token>` served the board.
   const token = boardToken(store);
-  for (const p of [`/Jobs?t=${token}`, `/JOBS?t=${token}`, `/jObS?format=json&t=${token}`, `/Reports?t=x`, `/REPORTS`, `${REPORTS_PATH.toUpperCase()}/abc?t=x`]) {
+  for (const p of [`/Jobs?t=${token}`, `/JOBS?t=${token}`, `/jObS?format=json&t=${token}`, `/Reports?t=x`, `/REPORTS`, `${REPORTS_PATH.toUpperCase()}/abc?t=x`, `/Decks?t=x`, `${DECKS_PATH.toUpperCase()}/a.md?t=x`]) {
     const res = await get(p);
     assert.equal(res.status, 303, `${p} is not served to a stranger`);
     assert.equal(res.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(p)}`, `${p}: sent to the sign-in page`);

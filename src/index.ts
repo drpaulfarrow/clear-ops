@@ -43,7 +43,7 @@ import { VoiceBridge } from "./voice-bridge.js";
 import { BOARD_PATH, boardData, boardToken, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
 import { PASSWORD_PATH, SIGN_IN_PATH, SIGN_OUT_PATH, noPasswordPage, passwordPage, passwordSavedPage, signIn as pageSignIn, signInPage, SignInError } from "./sign-in.js";
 import type { SignIn } from "./sign-in.js";
-import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
+import { DECKS_PATH, FILE_CSP, PAGE_CSP, REPORTS_PATH, deckEntries, deckFor, renderDeckPage, renderDecksIndex, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
 import { defaultProbes, HealthProbes } from "./health.js";
 import { defaultCanary, type Canary } from "./auto-resume.js";
@@ -457,12 +457,12 @@ export function buildApp(deps: AppDeps) {
     res.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
   };
   /**
-   * The browser pages the sign-in covers: the jobs board and the reports view, each at its own path,
-   * taken from the module that serves it so the two can never drift apart. The gate is one place over
-   * the path, so both the index and one item, and the board's JSON, are behind it alike.
-   * Nothing else the service serves is behind it: no webhook, no callback and no health check.
+   * The browser pages the sign-in covers: the jobs board, the reports view and the decks listing, each
+   * at its own path, taken from the module that serves it so they can never drift apart. The gate is one
+   * place over the path, so both the index and one item, a deck and the board's JSON, are behind it
+   * alike. Nothing else the service serves is behind it: no webhook, no callback and no health check.
    */
-  const GATED_PATHS = [REPORTS_PATH, BOARD_PATH];
+  const GATED_PATHS = [REPORTS_PATH, DECKS_PATH, BOARD_PATH];
   /**
    * Whether a request path is one of those pages, matched the way Express matches the routes it guards:
    * case-insensitively (`case sensitive routing` is off, so `app.get(BOARD_PATH, ...)` also answers
@@ -620,11 +620,10 @@ export function buildApp(deps: AppDeps) {
   /**
    * The reports view: every saved job output as a page Paul can read on his phone, at a stable
    * address. Two GET routes behind the same long-lived token /reports prints in chat, and nothing
-   * else: no model call, no form and no write of any kind. Which outputs exist is decided by the same
-   * rules as the copy in the private outputs repository (src/output-folders.ts), so an assistant, CV
-   * or upload-derived output is not here either. The Markdown is rendered by src/reports.ts, which
-   * escapes everything, and a saved .html file beside an output is served under a policy that allows
-   * no script at all.
+   * else: no model call, no form and no write of any kind. Every finished job's saved output is here,
+   * whatever its kind or provenance (Paul's call, 16 Nov 2026: an output should always be handed to him
+   * as something he can click). The Markdown is rendered by src/reports.ts, which escapes everything,
+   * and a saved .html file beside an output is served under a policy that allows no script at all.
    */
   const reportHeaders = (res: express.Response, csp: string) => {
     noStore(res);
@@ -659,6 +658,27 @@ export function buildApp(deps: AppDeps) {
     }
     reportHeaders(res, PAGE_CSP);
     res.type("html").send(renderReportPage(report.entry, report.markdown ?? "", token));
+  });
+
+  /**
+   * Decks and one-pagers: the private folder the advisor and CV writers save into, listed and opened
+   * behind the same long-lived token and the same sign-in, and nothing else: two GET routes, no form,
+   * no model call, no write. The folder is read on each request, so a file saved a moment ago appears
+   * without a restart. A name that is not one plain file in the folder is refused, and the text is
+   * escaped by src/reports.ts before any markup, so nothing in a deck can run.
+   */
+  app.get(DECKS_PATH, (req, res) => {
+    reportHeaders(res, PAGE_CSP);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    if (!reportsTokenValid(deps.store, token)) return res.status(404).type("html").send(reportsRefusedPage());
+    res.type("html").send(renderDecksIndex(deckEntries(), token));
+  });
+  app.get(`${DECKS_PATH}/:name`, (req, res) => {
+    reportHeaders(res, PAGE_CSP);
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    const deck = reportsTokenValid(deps.store, token) ? deckFor(String(req.params.name ?? "")) : undefined;
+    if (!deck) return res.status(404).type("html").send(reportsRefusedPage());
+    res.type("html").send(renderDeckPage(deck.entry, deck.content, token));
   });
 
   return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, startHealth, voice };

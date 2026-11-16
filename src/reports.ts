@@ -1,49 +1,63 @@
 /**
- * The reports view: every saved job output as a page Paul can read on his phone.
+ * The reports view: every saved job output, and every deck or one-pager, as a page Paul can read on his
+ * phone. Paul's call, 16 November 2026: an output should always be handed to him in a form he can click
+ * to view, never only as a file path or by typing "show job".
  *
- * Long reports are written as Markdown and saved in DATA_DIR/outputs/<id>.md; that is what `show job`
- * prints in chat. This serves the same files as proper pages at a stable address, so a deep research
- * report, a review or an analysis can be read in a browser rather than as raw Markdown.
+ * Long reports are written as Markdown and saved in DATA_DIR/outputs/<id>.md; decks and one-pagers are
+ * saved in DATA_DIR/decks. This serves both as proper pages at a stable address, so a deep research
+ * report, a review, an analysis, a deck or a one-pager can be read in a browser rather than as raw
+ * Markdown on a volume.
  *
- * Two shapes of page, one gate:
+ * Three shapes of page, one gate and one long-lived token:
  *
  *  - `/reports?t=<token>` is the index: every saved output, newest first, with its title, kind, London
- *    date, job id and a link.
+ *    date, job id and a link, plus a link to the decks.
  *  - `/reports/<id>?t=<token>` is one output. When the worker also wrote a self-contained
  *    `<id>.html` beside the Markdown (the brief asks for one in some jobs), that file is served
  *    as-is under a strict Content-Security-Policy; otherwise the Markdown is rendered here.
+ *  - `/decks?t=<token>` lists the files in the private decks folder and `/decks/<name>?t=<token>`
+ *    opens one. The folder is read on each request, so a file a worker has just saved appears without
+ *    a restart.
  *
  * What it will not do. The Markdown is rendered by this file and nothing else: every character of the
  * output is escaped before any markup is added, so raw HTML, a script tag or an event attribute in a
- * report is shown as text and never runs. The pages carry no script, no cookie, no form and no
- * request to anywhere (the Content-Security-Policy is `default-src 'none'`). Nothing here writes:
- * there is no route that changes a job, a queue or a schedule, and no token, path or secret of the
- * service's own ever reaches the page.
+ * report or a deck is shown as text and never runs. The pages carry no script, no cookie, no form and no
+ * request to anywhere (the Content-Security-Policy is `default-src 'none'`). Nothing here writes: there
+ * is no route that changes a job, a queue or a schedule, and no token, path or secret of the service's
+ * own ever reaches the page.
  *
- * Which outputs exist is decided by the same rules as the copy in the private outputs repository
- * (src/output-folders.ts `classify`, the same call src/publish-outputs.ts and the jobs board make), so
- * an assistant (ea) or CV output, an output with no job record, and anything derived from a file Paul
- * uploaded is not served here either. A withheld output simply does not appear.
+ * Every finished job's saved output is served, whatever its kind or provenance: an assistant (ea) or CV
+ * output and anything derived from a file Paul uploaded are here too. This is deliberately wider than
+ * the copy in the private outputs repository (src/output-folders.ts `classify`), which is unchanged: what
+ * is copied into a repository and what Paul may open in a browser behind his own password are two
+ * different questions. An output with no job record still cannot be listed (there is no title, kind or
+ * date for it), and nothing from the decks folder or an upload ever leaves this view.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "./config.js";
-import { classify } from "./output-folders.js";
+import { deckDir } from "./decks.js";
 import { londonYmd } from "./london.js";
 import { jobTitle } from "./titles.js";
 import { SIGN_OUT_PATH } from "./sign-in.js";
 import type { Job, Store } from "./store.js";
 
 export const REPORTS_PATH = "/reports";
+/** The decks and one-pagers the advisor and CV kinds save, listed and opened behind the same token. */
+export const DECKS_PATH = "/decks";
 /** The index refreshes itself slowly, so a report that lands while Paul is looking appears in time. */
 export const REPORTS_REFRESH_SECONDS = 60;
 /** The index is a list of links, not an archive: the newest this many saved outputs. */
 const MAX_ENTRIES = 200;
 /** A saved .html page bigger than this is treated as not there rather than served. */
 const MAX_HTML_BYTES = 4 * 1024 * 1024;
+/** A deck file bigger than this is treated as not there rather than served (the writer caps at 200 KB). */
+const MAX_DECK_BYTES = 2 * 1024 * 1024;
 /** An output is named after its job id; anything else is never read, so no path can escape the folder. */
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
+/** A deck is one plain file name, Markdown or plain text: no directory, no climb, nothing else. */
+const DECK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.(md|txt)$/i;
 
 /* ---------- The token: minted once by the service, kept in the store, never logged ---------- */
 
@@ -96,15 +110,13 @@ export interface ReportPage {
 }
 
 /**
- * The saved output of a job the service published: a finished job, with a saved output, that
- * src/output-folders.ts does not withhold. The classification reads the job's brief and the output
- * text exactly as the outputs publisher does, so the two never disagree.
+ * The saved output of a finished job. Every finished job's saved output is served, whatever its kind or
+ * provenance. Only what is not a finished job with a saved output is missing: a job still running, a
+ * failed job, or a job whose report was never written.
  */
 function servable(store: Store, job: Job): string | undefined {
   if (job.status !== "done") return undefined;
-  const text = store.readOutput(job.id);
-  if (text === undefined) return undefined;
-  return "excluded" in classify(job, text) ? undefined : text;
+  return store.readOutput(job.id);
 }
 
 /** The self-contained .html page saved beside a job's output, when there is one and it is a sane size. */
@@ -148,6 +160,100 @@ export function reportFor(store: Store, id: string): ReportPage | undefined {
   if (text === undefined) return undefined;
   const htmlPath = savedHtmlPath(store, id);
   return { entry: entryFor(job, htmlPath !== undefined), ...(htmlPath ? { htmlPath } : { markdown: text }) };
+}
+
+/**
+ * The clickable link to one saved output, with the token, or undefined when that output is not served
+ * (a job still running, a failed job, no saved output). This is what a job's finish message, the chief's
+ * `get_output` and `show job` hand Paul, so an output is never given to him as a file path alone.
+ */
+export function reportUrlFor(store: Store, id: string): string | undefined {
+  if (!reportFor(store, id)) return undefined;
+  return `${config.publicUrl}${REPORTS_PATH}/${id}?t=${reportsToken(store)}`;
+}
+
+/* ---------- Decks and one-pagers (DATA_DIR/decks), read on each request ---------- */
+
+export interface DeckEntry {
+  /** The file name exactly as it is on disk. */
+  name: string;
+  /** A heading for the page: the name without its extension, dashes and underscores as spaces. */
+  title: string;
+  /** London date it was last written, YYYY-MM-DD. */
+  date: string;
+  /** ISO time, for ordering newest first. */
+  at: string;
+}
+
+export interface DeckPage {
+  entry: DeckEntry;
+  /** The file's text, rendered here. */
+  content: string;
+}
+
+/** True only for one plain Markdown or text file name in the decks folder: never a path, never a climb. */
+export function deckNameOk(name: string): boolean {
+  return DECK_NAME.test(name) && !name.includes("..");
+}
+
+/** The path of one deck file, only when its name is one plain file and it resolves inside the folder. */
+export function deckFilePath(name: string): string | undefined {
+  if (!deckNameOk(name)) return undefined;
+  const root = path.resolve(deckDir());
+  const p = path.resolve(root, name);
+  return p.startsWith(root + path.sep) ? p : undefined;
+}
+
+const deckTitle = (name: string): string => name.replace(/\.(?:md|txt)$/i, "").replace(/[-_]+/g, " ").trim() || name;
+
+function deckStat(name: string): { path: string; stat: fs.Stats } | undefined {
+  const p = deckFilePath(name);
+  if (!p) return undefined;
+  try {
+    const stat = fs.statSync(p);
+    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_DECK_BYTES) return undefined;
+    return { path: p, stat };
+  } catch {
+    return undefined;
+  }
+}
+
+const deckEntry = (name: string, stat: fs.Stats): DeckEntry => ({
+  name,
+  title: deckTitle(name),
+  date: londonYmd(stat.mtime),
+  at: stat.mtime.toISOString(),
+});
+
+/**
+ * Every deck or one-pager in the private folder, newest first. The directory is read here on each call,
+ * so a file a worker saved a moment ago is listed without a restart; a file that is too big, empty, not
+ * a plain Markdown or text file, or not a regular file is simply not listed.
+ */
+export function deckEntries(): DeckEntry[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(deckDir());
+  } catch {
+    return [];
+  }
+  const out: DeckEntry[] = [];
+  for (const name of names) {
+    const found = deckStat(name);
+    if (found) out.push(deckEntry(name, found.stat));
+  }
+  return out.sort((a, b) => b.at.localeCompare(a.at) || b.name.localeCompare(a.name));
+}
+
+/** One deck or one-pager, ready to serve. Undefined for a name that is not one file in the folder. */
+export function deckFor(name: string): DeckPage | undefined {
+  const found = deckStat(name);
+  if (!found) return undefined;
+  try {
+    return { entry: deckEntry(name, found.stat), content: fs.readFileSync(found.path, "utf8") };
+  } catch {
+    return undefined;
+  }
 }
 
 /* ---------- Markdown, rendered here ---------- */
@@ -414,6 +520,16 @@ function reportHref(id: string, token: string): string {
   return `${REPORTS_PATH}/${id}?t=${escapeHtml(token)}`;
 }
 
+/** The link to the decks listing, with the token. */
+function decksHref(token: string): string {
+  return `${DECKS_PATH}?t=${escapeHtml(token)}`;
+}
+
+/** The link to one deck file. The name is percent-encoded, so a space or a dot cannot break the address. */
+function deckHref(name: string, token: string): string {
+  return `${DECKS_PATH}/${encodeURIComponent(name)}?t=${escapeHtml(token)}`;
+}
+
 /** The index: every saved output, newest first. Titles, kind, date and id only, never any text. */
 export function renderReportsIndex(entries: ReportEntry[], token: string): string {
   const rows = entries
@@ -425,7 +541,8 @@ export function renderReportsIndex(entries: ReportEntry[], token: string): strin
     .join("");
   const body =
     `<main><h1>Saved reports</h1>` +
-    `<p class="note">Every saved job output, newest first. Read only; the pages carry no script and fetch nothing. <a href="${SIGN_OUT_PATH}">Sign out</a>.</p>` +
+    `<p class="note">Every saved job output, newest first. Read only; the pages carry no script and fetch nothing. ` +
+    `Also here: <a href="${decksHref(token)}">decks and one-pagers</a>. <a href="${SIGN_OUT_PATH}">Sign out</a>.</p>` +
     (rows || `<p class="empty">Nothing saved yet.</p>`) +
     `</main>`;
   return document_("Saved reports", body, `${REPORTS_REFRESH_SECONDS}; url=${REPORTS_PATH}?t=${escapeHtml(token)}`);
@@ -438,6 +555,37 @@ export function renderReportPage(entry: ReportEntry, markdown: string, token: st
     `<main>${crumb}<h1>${escapeHtml(entry.title)}</h1>` +
     `<p class="meta">${escapeHtml(entry.kind)} &middot; ${escapeHtml(entry.date)} &middot; <span class="id">${escapeHtml(entry.id)}</span></p>` +
     `${renderMarkdown(dropRepeatedTitle(markdown, entry.title))}</main>`;
+  return document_(entry.title, body);
+}
+
+/** The decks listing: name, date and a link each, never any text from a file. */
+export function renderDecksIndex(entries: DeckEntry[], token: string): string {
+  const rows = entries
+    .map(
+      (e) =>
+        `<div class="report"><div class="t"><a href="${deckHref(e.name, token)}">${escapeHtml(e.title)}</a></div>` +
+        `<div class="m">${escapeHtml(e.date)} &middot; <span class="id">${escapeHtml(e.name)}</span></div></div>`,
+    )
+    .join("");
+  const body =
+    `<main><h1>Decks and one-pagers</h1>` +
+    `<p class="note">Every file the advisor and CV writers saved, newest first. Read only; the pages carry no script and fetch nothing. ` +
+    `<a href="${REPORTS_PATH}?t=${escapeHtml(token)}">All reports</a> &middot; <a href="${SIGN_OUT_PATH}">Sign out</a>.</p>` +
+    (rows || `<p class="empty">Nothing saved yet.</p>`) +
+    `</main>`;
+  return document_("Decks and one-pagers", body, `${REPORTS_REFRESH_SECONDS}; url=${decksHref(token)}`);
+}
+
+/** One deck or one-pager: Markdown rendered here, a plain text file shown escaped in a block. */
+export function renderDeckPage(entry: DeckEntry, content: string, token: string): string {
+  const crumb = `<p class="crumb"><a href="${decksHref(token)}">&larr; Decks and one-pagers</a> &middot; <a href="${SIGN_OUT_PATH}">Sign out</a></p>`;
+  const rendered = /\.md$/i.test(entry.name)
+    ? renderMarkdown(dropRepeatedTitle(content, entry.title))
+    : `<pre>${escapeHtml(content)}</pre>`;
+  const body =
+    `<main>${crumb}<h1>${escapeHtml(entry.title)}</h1>` +
+    `<p class="meta">${escapeHtml(entry.date)} &middot; <span class="id">${escapeHtml(entry.name)}</span></p>` +
+    `${rendered}</main>`;
   return document_(entry.title, body);
 }
 

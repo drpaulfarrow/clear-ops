@@ -1,11 +1,13 @@
 /**
- * The reports view: every saved job output as a page Paul can read on his phone.
+ * The reports view: every saved job output, and every deck or one-pager, as a page Paul can read on his
+ * phone.
  *
  * No network and no model: the fake runner is never invoked, because the view only reads files that
  * are already saved. The tests cover the token gate, the Markdown renderer (headings, paragraphs,
- * lists, tables, code and links, and the escaping of raw HTML and a script), the exclusions the
- * outputs publisher applies, the self-contained .html file served instead when one was saved beside
- * the Markdown, and that nothing on the view can write.
+ * lists, tables, code and links, and the escaping of raw HTML and a script), that every finished job's
+ * output is served whatever its kind or provenance, the decks listing and a deck page, a deck name that
+ * tries to escape the folder, the self-contained .html file served instead when one was saved beside the
+ * Markdown, and that nothing on the view can write. Every fixture here is synthetic text.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +20,8 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-reports-
 
 const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
-const { reportsToken, reportsTokenValid, reportsUrl, reportEntries, reportFor, renderMarkdown, renderReportPage, renderReportsIndex, dropRepeatedTitle, REPORTS_PATH, PAGE_CSP, FILE_CSP } = await import("../src/reports.js");
+const { reportsToken, reportsTokenValid, reportsUrl, reportUrlFor, reportEntries, reportFor, renderMarkdown, renderReportPage, renderReportsIndex, dropRepeatedTitle, REPORTS_PATH, DECKS_PATH, PAGE_CSP, FILE_CSP, deckEntries, deckFor, deckFilePath, deckNameOk, renderDecksIndex, renderDeckPage } = await import("../src/reports.js");
+const { deckDir } = await import("../src/decks.js");
 const { signIn, SIGN_IN_PATH, SIGN_OUT_PATH, SESSION_COOKIE } = await import("../src/sign-in.js");
 const { londonYmd } = await import("../src/london.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
@@ -95,24 +98,32 @@ let runningJob: Job;
 let htmlJob: Job;
 const SAVED_HTML = "<!doctype html><html><head><title>Review</title></head><body><h1>Saved page</h1><script>alert(1)</script></body></html>";
 
+/** Synthetic decks and one-pagers, as the advisor and CV writers save them into DATA_DIR/decks. */
+const DECK_MD_NAME = "investor-deck.md";
+const DECK_TXT_NAME = "publisher-one-pager.txt";
+const DECK_LATER_NAME = "later-one-pager.md";
+const DECK_MD = `# investor deck\n\nA synthetic one-pager for the tests.\n\n<script>alert("SECRET DECK SCRIPT")</script>\n\n<div onclick="SECRET()">SECRET DECK HTML</div>\n`;
+const DECK_TXT = "Synthetic plain notes.\n\n<script>alert(1)</script>\n";
+
 before(async () => {
   store = new Store(process.env.DATA_DIR!);
 
   const job = (kind: Job["kind"], title: string, brief: string) => store.createJob(kind, brief, PAUL, "self", undefined, { title });
 
-  // Newest first on the index: reportJob (1 min ago) then olderJob (40 min ago).
+  // Newest first on the index: reportJob (1 min), then eaJob, cvJob, uploadJob, htmlJob, olderJob.
   olderJob = store.updateJob(job("research", "TollBit research", "what did TollBit do").id, { status: "done", finishedAt: at(40 * MIN) });
   store.writeOutput(olderJob.id, "# TollBit\n\nOlder report.\n");
   reportJob = store.updateJob(job("research", "Deep codebase review", "review every repository").id, { status: "done", finishedAt: at(1 * MIN) });
   store.writeOutput(reportJob.id, MARKDOWN);
 
-  // Withheld, exactly as src/publish-outputs.ts withholds them: assistant and CV outputs, and
-  // anything derived from a file Paul uploaded.
+  // Served like any other saved output (Paul's call, 16 Nov 2026), even though the outputs publisher
+  // still withholds them from the private repository: assistant and CV outputs, and anything derived
+  // from a file Paul uploaded.
   eaJob = store.updateJob(job("ea", "Inbox triage", "what needs me today").id, { status: "done", finishedAt: at(2 * MIN) });
   store.writeOutput(eaJob.id, "Mail from jo@example.com says SECRET MAIL\n");
-  cvJob = store.updateJob(job("cv", "Tailored CV", "tailor my CV").id, { status: "done", finishedAt: at(2 * MIN) });
+  cvJob = store.updateJob(job("cv", "Tailored CV", "tailor my CV").id, { status: "done", finishedAt: at(3 * MIN) });
   store.writeOutput(cvJob.id, "SECRET CV\n");
-  uploadJob = store.updateJob(job("research", "Warm paths", "cross-reference the LinkedIn Connections.csv export with the publisher list").id, { status: "done", finishedAt: at(3 * MIN) });
+  uploadJob = store.updateJob(job("research", "Warm paths", "cross-reference the LinkedIn Connections.csv export with the publisher list").id, { status: "done", finishedAt: at(4 * MIN) });
   store.writeOutput(uploadJob.id, "SECRET CONTACTS\n");
 
   // A finished job with no saved output, a job still running, and an output whose job record is gone.
@@ -125,6 +136,16 @@ before(async () => {
   htmlJob = store.updateJob(job("research", "Review with a page", "write a page beside it").id, { status: "done", finishedAt: at(5 * MIN) });
   store.writeOutput(htmlJob.id, "# Review\n\nSECRET MARKDOWN\n");
   fs.writeFileSync(path.join(store.dir, "outputs", `${htmlJob.id}.html`), SAVED_HTML);
+
+  // The private decks folder: two files, the Markdown one newer than the plain text one, plus a file
+  // that is not Markdown or text and a directory whose name looks like one, neither of which is served.
+  fs.mkdirSync(deckDir(), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(deckDir(), DECK_MD_NAME), DECK_MD);
+  fs.utimesSync(path.join(deckDir(), DECK_MD_NAME), new Date(at(10 * MIN)), new Date(at(10 * MIN)));
+  fs.writeFileSync(path.join(deckDir(), DECK_TXT_NAME), DECK_TXT);
+  fs.utimesSync(path.join(deckDir(), DECK_TXT_NAME), new Date(at(30 * MIN)), new Date(at(30 * MIN)));
+  fs.writeFileSync(path.join(deckDir(), "notes.json"), "SECRET JSON\n");
+  fs.mkdirSync(path.join(deckDir(), "subdir.md"), { recursive: true });
 
   const built = buildApp({ messenger, runner, store });
   scheduler = built.scheduler;
@@ -198,12 +219,18 @@ test("the index is served only with the token, is never cached, and cannot be wr
   for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
     assert.equal((await get(`${base}${REPORTS_PATH}?t=${token}`, { method })).status, 404, `${method} is not a route`);
     assert.equal((await get(`${base}${REPORTS_PATH}/${reportJob.id}?t=${token}`, { method })).status, 404, `${method} is not a route`);
+    assert.equal((await get(`${base}${DECKS_PATH}?t=${token}`, { method })).status, 404, `${method} is not a route`);
+    assert.equal((await get(`${base}${DECKS_PATH}/${DECK_MD_NAME}?t=${token}`, { method })).status, 404, `${method} is not a route`);
   }
 });
 
-test("the index lists saved outputs newest first, with title, kind, London date and id", () => {
+test("the index lists every finished job's saved output newest first, with title, kind, London date and id", () => {
   const entries = reportEntries(store);
-  assert.deepEqual(entries.map((e) => e.id), [reportJob.id, htmlJob.id, olderJob.id], "only what the outputs publisher would copy, newest first");
+  assert.deepEqual(
+    entries.map((e) => e.id),
+    [reportJob.id, eaJob.id, cvJob.id, uploadJob.id, htmlJob.id, olderJob.id],
+    "every finished job with a saved output, whatever its kind, newest first",
+  );
   const first = entries[0];
   assert.equal(first.title, "Deep codebase review");
   assert.equal(first.kind, "research");
@@ -215,18 +242,46 @@ test("the index lists saved outputs newest first, with title, kind, London date 
   assert.match(html, new RegExp(reportJob.id));
   assert.match(html, /research/);
   assert.match(html, /href="\/reports\/[A-Za-z0-9_-]+\?t=token"/);
+  assert.match(html, /href="\/decks\?t=token"/, "the decks are one tap from the index");
 });
 
-test("the assistant, CV and upload-derived outputs, a running job and a job with no output are never served", async () => {
+test("an upload-derived output and an assistant output are served at /reports/<id>, like any other", async () => {
   const token = reportsToken(store);
-  for (const job of [eaJob, cvJob, uploadJob, noOutputJob, runningJob]) {
-    assert.equal(reportFor(store, job.id), undefined, `${job.kind} output must not be served`);
+  // Paul's call, 16 Nov 2026: every saved output is served, whatever its kind or provenance, so he can
+  // always click to view it. These are the ones the outputs publisher still withholds from the private
+  // repository; the reports view is deliberately wider.
+  for (const job of [eaJob, cvJob, uploadJob]) {
+    assert.ok(reportFor(store, job.id), `${job.kind} output is served`);
+    const res = await get(`${base}${REPORTS_PATH}/${job.id}?t=${token}`);
+    assert.equal(res.status, 200, `${job.kind} output opens`);
+    const html = await res.text();
+    assert.match(html, new RegExp(job.id));
+    assert.match(html, /All reports/, "a way back to the index");
+  }
+  const index = await (await get(`${base}${REPORTS_PATH}?t=${token}`)).text();
+  for (const id of [eaJob.id, cvJob.id, uploadJob.id]) assert.ok(index.includes(id), `${id} is linked`);
+});
+
+test("a running job, a job with no saved output and an output with no job record are not served", async () => {
+  const token = reportsToken(store);
+  for (const job of [noOutputJob, runningJob]) {
+    assert.equal(reportFor(store, job.id), undefined, `${job.id} has nothing to serve`);
     assert.equal((await get(`${base}${REPORTS_PATH}/${job.id}?t=${token}`)).status, 404);
   }
-  assert.equal(reportFor(store, "orphan1"), undefined, "an output with no job record cannot be classified");
+  assert.equal(reportFor(store, "orphan1"), undefined, "an output with no job record has no title, kind or date");
   const index = await (await get(`${base}${REPORTS_PATH}?t=${token}`)).text();
-  for (const id of [eaJob.id, cvJob.id, uploadJob.id, runningJob.id]) assert.ok(!index.includes(id), `${id} must not be linked`);
+  for (const id of [noOutputJob.id, runningJob.id]) assert.ok(!index.includes(id), `${id} must not be linked`);
   assert.ok(!index.includes("orphan1"));
+});
+
+test("reportUrlFor gives the clickable link for a served output and nothing for one that is not", () => {
+  const token = reportsToken(store);
+  for (const job of [reportJob, eaJob, cvJob, uploadJob, htmlJob]) {
+    assert.match(reportUrlFor(store, job.id)!, new RegExp(`^https?://[^/]+${REPORTS_PATH}/${job.id}\\?t=${token}$`));
+  }
+  for (const id of [noOutputJob.id, runningJob.id, "orphan1", "../../state.json", ""]) {
+    assert.equal(reportUrlFor(store, id), undefined, `${id} has no link`);
+  }
 });
 
 test("one report renders as a page: headings, paragraphs, lists, tables, code and links", async () => {
@@ -331,19 +386,104 @@ test("the index shows metadata only: no output text, brief or personal file name
   const token = reportsToken(store);
   const res = await get(`${base}${REPORTS_PATH}?t=${token}`);
   const html = await res.text();
-  for (const text of ["SECRET SCRIPT", "SECRET HTML", "SECRET MAIL", "SECRET CV", "SECRET CONTACTS", "SECRET ORPHAN", "jo@example.com", "SECRET MARKDOWN", "Connections.csv"]) {
+  for (const text of ["SECRET SCRIPT", "SECRET HTML", "SECRET MAIL", "SECRET CV", "SECRET CONTACTS", "SECRET ORPHAN", "jo@example.com", "SECRET MARKDOWN", "Connections.csv", "SECRET DECK SCRIPT", "SECRET JSON"]) {
     assert.ok(!html.includes(text), `the index leaked: ${text}`);
   }
   const entries = JSON.stringify(reportEntries(store));
   assert.ok(!entries.includes("SECRET"), "no saved output text is read into the entry list");
 });
 
+/* ---------- Decks and one-pagers (DATA_DIR/decks) ---------- */
+
+test("the decks listing is served behind the token, newest first, and a file saved after boot appears without a restart", async () => {
+  const token = reportsToken(store);
+  // A file written after the app was built: the folder is read on each request, so it is listed at once.
+  fs.writeFileSync(path.join(deckDir(), DECK_LATER_NAME), "# later one pager\n\nSynthetic body.\n");
+
+  const res = await get(`${base}${DECKS_PATH}?t=${token}`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+  assert.match(res.headers.get("cache-control") ?? "", /no-store/);
+  assert.match(res.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.match(res.headers.get("x-content-type-options") ?? "", /nosniff/);
+  const html = await res.text();
+  assert.match(html, /Decks and one-pagers/);
+  assert.match(html, /Investor deck|investor deck/, "a deck is listed by its name without the extension");
+  assert.match(html, new RegExp(`href="${DECKS_PATH}/[^"]+\\?t=`), "each deck is linked with the token");
+  assert.match(html, /later-one-pager\.md/, "a file saved after boot is listed");
+  assert.match(html, /publisher-one-pager\.txt/);
+  // Newest first, and only the two decks and the later one: never the .json file or the directory.
+  assert.deepEqual(deckEntries().map((e) => e.name), [DECK_LATER_NAME, DECK_MD_NAME, DECK_TXT_NAME]);
+  assert.ok(!html.includes("notes.json"), "a file that is not Markdown or text is never listed");
+  assert.ok(!html.includes("subdir.md"), "a directory whose name looks like a deck is never listed");
+  assert.ok(!html.includes("SECRET JSON"), "no file text reaches the listing");
+  assert.ok(!/<script/i.test(html));
+});
+
+test("a deck page renders Markdown escaped, and a plain text file is shown as escaped text", async () => {
+  const token = reportsToken(store);
+  const md = await get(`${base}${DECKS_PATH}/${DECK_MD_NAME}?t=${token}`);
+  assert.equal(md.status, 200);
+  assert.match(md.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.match(md.headers.get("x-content-type-options") ?? "", /nosniff/);
+  const html = await md.text();
+  assert.match(html, /<h1>investor deck<\/h1>/, "the file name becomes the page heading");
+  assert.match(html, /A synthetic one-pager for the tests\./);
+  assert.match(html, /Decks and one-pagers/, "a way back to the listing");
+  // A script tag or raw HTML in a deck file is shown as words and never becomes markup.
+  assert.ok(!/<script/i.test(html), "a script tag in a deck must never be markup");
+  assert.ok(!/<div/i.test(html), "raw HTML in a deck must never be markup");
+  assert.match(html, /&#60;script&#62;alert\(&#34;SECRET DECK SCRIPT&#34;\)&#60;\/script&#62;/);
+  assert.match(html, /&#60;div onclick=&#34;SECRET\(\)&#34;&#62;SECRET DECK HTML&#60;\/div&#62;/);
+
+  // A plain text file is not read as Markdown: it is escaped whole, in a block.
+  const txt = await (await get(`${base}${DECKS_PATH}/${DECK_TXT_NAME}?t=${token}`)).text();
+  assert.match(txt, /<h1>publisher one pager<\/h1>/);
+  assert.match(txt, /<pre>Synthetic plain notes\./);
+  assert.ok(!/<script/i.test(txt));
+  assert.match(txt, /&#60;script&#62;alert\(1\)&#60;\/script&#62;/);
+});
+
+test("a deck name that tries to escape the folder is refused, and both decks routes need the token", async () => {
+  const token = reportsToken(store);
+  // A climb, an encoded climb, a file that is not Markdown or text, a directory and anything else.
+  for (const name of ["../state.json", "..%2Fstate.json", "..%2f..%2fstate.json", "notes.json", "subdir.md", "deck.sh", ".env", "state.json"]) {
+    assert.equal((await get(`${base}${DECKS_PATH}/${name}?t=${token}`)).status, 404, name);
+  }
+  // The same names are refused by the helpers, and a good name resolves inside the folder only.
+  for (const name of ["../state.json", "..%2Fstate.json", "a/b.md", "notes.json", "deck.sh", ".env", "x", ""]) {
+    assert.equal(deckNameOk(name), false, name);
+    assert.equal(deckFilePath(name), undefined, name);
+    assert.equal(deckFor(name), undefined, name);
+  }
+  // A directory whose name looks like a deck passes the name check but is never served, because only a
+  // regular file is; the same is true of the .json file above.
+  assert.equal(deckFor("subdir.md"), undefined);
+  assert.equal(deckFilePath(DECK_MD_NAME), path.join(deckDir(), DECK_MD_NAME));
+  assert.equal(deckNameOk(DECK_MD_NAME), true);
+  // A wrong or missing token is refused on both decks routes, exactly as on the reports.
+  assert.equal((await get(`${base}${DECKS_PATH}`)).status, 404);
+  assert.equal((await get(`${base}${DECKS_PATH}?t=wrong`)).status, 404);
+  assert.equal((await get(`${base}${DECKS_PATH}/${DECK_MD_NAME}`)).status, 404);
+  assert.equal((await get(`${base}${DECKS_PATH}/${DECK_MD_NAME}?t=wrong`)).status, 404);
+  const refused = await (await get(`${base}${DECKS_PATH}?t=wrong`)).text();
+  assert.ok(!refused.includes("wrong"), "the refused page never echoes the token");
+  assert.ok(!refused.includes(token));
+  // Signed out, both are behind the sign-in first, carrying the page he asked for.
+  for (const p of [`${DECKS_PATH}?t=${token}`, `${DECKS_PATH}/${DECK_MD_NAME}?t=${token}`]) {
+    const out = await fetch(`${base}${p}`, { redirect: "manual" });
+    assert.equal(out.status, 303, p);
+    assert.equal(out.headers.get("location"), `${SIGN_IN_PATH}?next=${encodeURIComponent(p)}`);
+  }
+});
+
 test("the view holds no script, no cookie, no form and no third-party request", () => {
-  const page = renderReportsIndex([], "token");
-  assert.match(page, /<meta name="viewport"/, "laid out for a phone");
-  assert.ok(!/<script/i.test(page));
-  assert.ok(!/<iframe|<form|document\.cookie|<link |<img /i.test(page));
-  assert.ok(!/(?:src|href)="https?:\/\//.test(page), "the index fetches nothing from anywhere");
+  for (const page of [renderReportsIndex([], "token"), renderDecksIndex([], "token"), renderDeckPage({ name: DECK_MD_NAME, title: "investor deck", date: "2026-11-16", at: "2026-11-16T09:00:00.000Z" }, "# deck\n\nBody.\n", "token")]) {
+    assert.match(page, /<meta name="viewport"/, "laid out for a phone");
+    assert.ok(!/<script/i.test(page));
+    assert.ok(!/<iframe|<form|document\.cookie|<link |<img /i.test(page));
+    assert.ok(!/(?:src|href)="https?:\/\//.test(page), "the pages fetch nothing from anywhere");
+  }
   assert.ok(!/script-src[^;]*unsafe/.test(PAGE_CSP), "the pages the service renders allow no script either");
   // A saved page is sandboxed as well as script-less.
   assert.match(FILE_CSP, /sandbox/);
