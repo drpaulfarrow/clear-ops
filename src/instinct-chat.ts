@@ -6,9 +6,11 @@
  *    Orchestrator.askAsInstinct, a separate entry from Paul's chat. It never goes through the allowlist
  *    and approval parsers in handleOne, so "send <id>", "YES <id>", "buy <id>", "dns apply <id>", "code",
  *    "act as me" and the rest cannot be produced from here. Approvals stay typed by Paul.
- *  - the chief it reaches has three tools (start_job, job_status, get_output) and no file tools. Jobs it
- *    starts are research or write only, carry origin "instinct", get no permits, no browser, and read only
- *    the managed repositories (src/jobs.ts, BRIDGE_READ_DENY in src/agents.ts).
+ *  - the chief it reaches has three read-only tools (job_status, get_job_context, get_output: start_job is
+ *    filtered out, so a chat turn cannot start anything) and no file or web tools. Jobs the bridge starts,
+ *    which are commissions only, are research or write, carry origin "instinct", get no permits, no browser,
+ *    read a throwaway source-only copy instead of the live checkouts (src/bridge-snapshot.ts) and are held
+ *    to the read-only set (src/jobs.ts, BRIDGE_READ_DENY in src/agents.ts).
  *
  * Limits are routine protections against a loop between two agents, not spending permission and not a
  * cap on spend: 20 chat turns and 6 jobs in any 24 hours, one chat turn at a time. Change them here.
