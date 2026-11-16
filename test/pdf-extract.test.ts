@@ -5,8 +5,9 @@
  * the parser's half is driven with a stand-in: a small shell script that is given the PDF on stdin and
  * answers on stdout exactly as `pdftotext` would. That is how the wiring is held - the arguments, the
  * environment, the user it runs as, its exit code, its silence, its slowness - without depending on
- * whether the real thing is installed here. The real `pdftotext`, over a real document, was run by hand
- * and is reported in the pull request; nothing here claims more than it does.
+ * whether the real thing is installed here. It is not installed on this machine, so nothing in this file
+ * claims to have run it: what the parser is given, and what is done with what it says, is held with the
+ * stand-in, and the pull request says the same.
  *
  * This service's own reader is the fallback on a machine without the parser, and it runs in a worker
  * thread. It is held here too, and at length in test/pdf.test.ts.
