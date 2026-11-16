@@ -17,8 +17,8 @@
 
 export const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/** The icon in the tile above the heading: a padlock, a card, a tick or a warning. */
-export type PageIcon = "lock" | "card" | "tick" | "alert";
+/** The icon in the tile above the heading: a padlock, a card, a tick, a warning or a bank. */
+export type PageIcon = "lock" | "card" | "tick" | "alert" | "bank";
 
 const icon = (paths: string, size = 26): string =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
@@ -30,6 +30,7 @@ const ICONS: Record<PageIcon, string> = {
   card: icon(`<rect x="3" y="5.8" width="18" height="12.4" rx="2.6"/><path d="M3 10.2h18"/><path d="M6.6 14.6h3.4"/>`),
   tick: icon(`<circle cx="12" cy="12" r="9"/><path d="M8.1 12.3l2.7 2.7 5.1-5.6"/>`),
   alert: icon(`<circle cx="12" cy="12" r="9"/><path d="M12 7.4v5.4"/><path d="M12 16.3v.1"/>`),
+  bank: icon(`<path d="M3.6 9.5 12 4.4l8.4 5.1"/><path d="M5.4 10.6v7.6"/><path d="M9.6 10.6v7.6"/><path d="M14.4 10.6v7.6"/><path d="M18.6 10.6v7.6"/><path d="M3.6 19.5h16.8"/>`),
 };
 
 /** The small padlock beside a password label. */
@@ -80,6 +81,12 @@ export interface PageOptions {
   body?: string;
   /** A quiet closing line, such as "You can close this tab." Escaped here. */
   foot?: string;
+  /**
+   * Extra rules for this page alone, as CSS text, appended to the one stylesheet. Only the service's
+   * own modules pass this, and everything in it is written here, never taken from a request: the pages
+   * carry no script at all, so nothing in this string can come from a bank, a provider or a form.
+   */
+  css?: string;
 }
 
 /** One page: icon, heading, optional chip and sentence, the caller's markup, a quiet closing line. */
@@ -89,7 +96,7 @@ export function htmlPage(o: PageOptions): string {
   const chip = o.chip ? `<span class="chip">${escapeHtml(o.chip)}</span>` : "";
   const text = o.text ? `<p class="text">${escapeHtml(o.text)}</p>` : "";
   const foot = o.foot ? `<p class="foot">${escapeHtml(o.foot)}</p>` : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(o.title)}</title><style>${STYLE}</style></head><body><main>${tile}<h1>${escapeHtml(heading)}</h1>${chip}${text}${o.body ?? ""}${foot}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(o.title)}</title><style>${STYLE}</style>${o.css ? `<style>${o.css}</style>` : ""}</head><body><main>${tile}<h1>${escapeHtml(heading)}</h1>${chip}${text}${o.body ?? ""}${foot}</main></body></html>`;
 }
 
 export interface FieldOptions {

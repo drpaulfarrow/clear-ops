@@ -27,6 +27,9 @@ import { GoogleApi, GoogleAuth, GoogleError, type Fetch } from "./google.js";
 import { OutboundGate } from "./outbound.js";
 import { GoDaddyClient } from "./dns.js";
 import { DnsGate, dnsServer, DNS_SERVER } from "./dns-gate.js";
+import { BANK_CALLBACK_PATH, BANK_PATH, BankStore, bankSettings, type BankSettings } from "./bank.js";
+import { BankApi } from "./bank-api.js";
+import { bankRouter } from "./bank-router.js";
 import { BrowserSignupSubmitter } from "./signup.js";
 import { SignupGate, signupServer, SIGNUP_SERVER } from "./signup-gate.js";
 import { BrowseSession } from "./browse.js";
@@ -84,6 +87,13 @@ export interface AppDeps {
   probes?: HealthProbes;
   /** The sign-in that stands in front of the browser pages. The singleton by default; tests pin its clock. */
   signIn?: SignIn;
+  /**
+   * The read-only bank connector (src/bank.ts and its neighbours). Everything here is off unless
+   * BANK_ENABLED and the three bank secrets are set; a test (and the local preview script) injects its
+   * own settings, a fake provider fetch and a store on a temporary directory, so no test ever signs,
+   * calls or reads anything.
+   */
+  bank?: { settings?: BankSettings; api?: BankApi; fetch?: typeof fetch; store?: BankStore; now?: () => number };
 }
 
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
@@ -189,6 +199,11 @@ export function buildApp(deps: AppDeps) {
   // The approval gate for DNS changes: shared by the dns agent's prepare tool and the chat approval.
   const dnsClient = new GoDaddyClient(deps.dnsFetch);
   const dns = new DnsGate(deps.store, dnsClient, deps.messenger);
+  // The read-only bank connector: off unless BANK_ENABLED and its own three secrets are set, and it
+  // never signs, sends or pays. Its provider client can make only the reads on its allowlist, and the
+  // only thing it keeps between visits is the sealed session record (src/bank.ts).
+  const bank = deps.bank?.settings ?? bankSettings();
+  const bankApi = deps.bank?.api ?? new BankApi({ settings: bank, ...(deps.bank?.fetch ? { fetchImpl: deps.bank.fetch } : {}), ...(deps.bank?.now ? { now: deps.bank.now } : {}) });
   // The approval gate for creating an account for Paul on a site he named: the job only PREPARES a plan,
   // and his own "signup apply <id>" is what fills the form in and submits it. The submission is the
   // service's own browser, opened for that one site alone: it may act only on the plan's own domain (the
@@ -450,7 +465,7 @@ export function buildApp(deps: AppDeps) {
    * the path, so both the index and one item, and the board's JSON, are behind it alike.
    * Nothing else the service serves is behind it: no webhook, no callback and no health check.
    */
-  const GATED_PATHS = [REPORTS_PATH, BOARD_PATH];
+  const GATED_PATHS = [REPORTS_PATH, BOARD_PATH, BANK_PATH];
   /**
    * Whether a request path is one of those pages, matched the way Express matches the routes it guards:
    * case-insensitively (`case sensitive routing` is off, so `app.get(BOARD_PATH, ...)` also answers
@@ -474,6 +489,9 @@ export function buildApp(deps: AppDeps) {
   const safeNext = (value: unknown): string | undefined => {
     if (typeof value !== "string" || value.length > 300 || !SAFE_NEXT.test(value) || value.includes("//") || value.includes("..")) return undefined;
     const path = value.split("?")[0];
+    // The bank's own redirect back is under a gated path but arrives without a session, so it is never
+    // somewhere the sign-in page sends him: its query is the provider's and belongs to nothing here.
+    if (under(path, BANK_CALLBACK_PATH)) return undefined;
     if (!GATED_PATHS.some((p) => under(path, p))) return undefined;
     // The encoded form of a climb (`/jobs/%2e%2e/%2e%2e/evil`) passes the literal `..` check above but
     // resolves in the browser to `/evil`, so decode (best effort) and require the decoded path to be a
@@ -485,6 +503,7 @@ export function buildApp(deps: AppDeps) {
       return undefined;
     }
     if (decoded.includes("..") || decoded.includes("//") || /[\\\s]/.test(decoded)) return undefined;
+    if (under(decoded, BANK_CALLBACK_PATH)) return undefined;
     return GATED_PATHS.some((p) => under(decoded, p)) ? value : undefined;
   };
   /** Where a signed-in visit with nowhere to go lands. */
@@ -505,6 +524,15 @@ export function buildApp(deps: AppDeps) {
   };
   app.use((req, res, next) => {
     if (!GATED_PATHS.some((p) => under(req.path, p))) return next();
+    // The bank's own redirect back is the one address under those paths that arrives without a session,
+    // and it can only ever be so: the bank's cross-site redirect cannot carry a SameSite=Strict cookie.
+    // It is exempt here because it has to be reachable at all, and it is safe for a reason that does not
+    // depend on this exemption: src/bank-router.ts's callback decides nothing, writes nothing, exchanges
+    // nothing, and only parks a one-time code against a high-entropy state this service minted itself
+    // (bound to the session that started it), for the owner's own authenticated POST to use. Its query
+    // string is never logged or echoed. Everything else under /bank, including every read, needs the
+    // session below, and each route checks it again for itself.
+    if (under(req.path, BANK_CALLBACK_PATH)) return next();
     if (!signedIn(req, res)) return;
     next();
   });
@@ -574,6 +602,15 @@ export function buildApp(deps: AppDeps) {
       res.status(400).type("html").send(passwordPage(token, { error: msg }));
     }
   });
+
+  /**
+   * The owner's own bank page (src/bank-router.ts, src/bank-gate.ts, src/bank-page.ts): read-only
+   * balances and a date-bounded transaction list for the HSBC UK personal accounts he chooses, through
+   * the provider's documented AIS API. Registered after the gate above, so the whole page needs his
+   * session, and each route checks it again for itself. Nothing here is reachable by a model, a worker,
+   * a job or the bridge: the only caller is his signed-in browser.
+   */
+  app.use(BANK_PATH, bankRouter({ store: deps.store, signIn, settings: bank, api: bankApi, ...(deps.bank?.store ? { bankStore: deps.bank.store } : {}), ...(deps.bank?.now ? { now: deps.bank.now } : {}) }));
 
   /**
    * The jobs board: one read-only page Paul bookmarks and opens on his phone instead of typing /jobs.

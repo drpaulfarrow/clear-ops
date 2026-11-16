@@ -430,3 +430,18 @@ test("only the dns kind takes the dns permit, and only a dns job holding it is t
   assert.equal(jobs.start("research", "x", "tg:1", "product", "tg:1", { permits: ["dns"] as any }).permits, undefined, "other kinds never get it");
   assert.equal(jobs.start("ea", "x", "tg:1", "product", "tg:1", { permits: ["dns"] as any }).permits?.length ?? 0, 0, "the assistant never gets it");
 });
+
+test("the /bank command replies with the bank page's address, says it is read-only and that it is off here, and calls no model", async () => {
+  const before = calls.length;
+  await post(inbound("447700900123", "/bank"));
+  const page = `${config.publicUrl}/bank`;
+  await waitFor(() => messenger.sent.some((m) => m.text.includes(page)));
+  const reply = messenger.sent.find((m) => m.text.includes(page))!;
+  assert.equal(reply.to, "447700900123", "the answer goes back to the sender");
+  assert.match(reply.text, /read through Enable Banking/, "it says where the figures would come from");
+  assert.match(reply.text, /can never pay, transfer or change anything/, "and that it is read-only");
+  assert.match(reply.text, /behind your password/, "and that the link alone is not enough");
+  assert.match(reply.text, /switched off here \(BANK_ENABLED is not set\)/, "and it says plainly that the connector is off here");
+  assert.doesNotMatch(reply.text, /BANK_JWT_PRIVATE_KEY|BANK_CONNECTION_KEY|BANK_APPLICATION_ID/, "and names no bank secret");
+  assert.equal(calls.length, before, "no model was asked anything");
+});

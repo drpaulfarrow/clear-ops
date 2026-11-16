@@ -15,6 +15,7 @@ import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js
 import { boardUrl } from "./jobs-board.js";
 import { PASSWORD_LINK_MINUTES, signIn } from "./sign-in.js";
 import { reportsUrl } from "./reports.js";
+import { BANK_PATH, bankReady, bankSettings } from "./bank.js";
 import { describeUploads, formatSize, inlineImages, receiptText, transcriptAsMessage, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
 import { isAudio, transcribe, TranscribeError, transcriptionAvailable, transcriptionUnavailableReason } from "./transcribe.js";
 import { GoogleAuth, setupSteps } from "./google.js";
@@ -204,6 +205,10 @@ export class Orchestrator {
     // in the store; only the read-only reports pages are behind it (src/reports.ts), and like the board
     // they sit behind the password too, so the link alone is not enough.
     if (/^\/reports$/i.test(trimmed)) return this.messenger.send(from, this.reportsText());
+    // The bank page's address (src/bank.ts): read-only, behind the same password as the board, and off
+    // unless BANK_ENABLED and the three bank secrets are set. This replies with the link only: the
+    // command reads nothing from any bank and starts nothing.
+    if (/^\/bank$/i.test(trimmed)) return this.messenger.send(from, this.bankText());
     // The password for the browser pages: a fresh one-time link to set a new one, in the same shape as
     // /board. Paul types it on his own phone, never in chat, and setting it signs out every device.
     if (/^\/password$/i.test(trimmed)) return this.messenger.send(from, this.passwordLinkText(from));
@@ -623,6 +628,11 @@ export class Orchestrator {
   private passwordLinkText(from: string): string {
     const url = signIn.link(this.store, from);
     return `Here is a private link to set a new password for the reports and the board. Type the new password twice there, on your phone, never here in chat: the service keeps only a salted hash of it.\n${url}\nThe link works once and expires in ${PASSWORD_LINK_MINUTES} minutes. Setting a new password signs out every device that was signed in with the old one.`;
+  }
+
+  private bankText(): string {
+    const ready = bankReady(bankSettings());
+    return `The bank page is at ${config.publicUrl}${BANK_PATH}. It shows the balances of, and a date-bounded transaction list for, the HSBC UK accounts you choose, read through Enable Banking when you press a button and never on a schedule. Read-only: it can never pay, transfer or change anything, and no model sees any of it. It sits behind your password like the board and the reports, so the link alone is not enough.${ready ? ` ${ready}` : " It is switched on: the first visit walks you through connecting, and nothing is readable until you pick the accounts."}`;
   }
 
   private reportsText(): string {
@@ -1284,7 +1294,8 @@ Commands:
 /jobs: recent jobs
 /board: a link to the jobs board, a read-only page you can bookmark on your phone, behind your password
 /reports: a link to your saved reports, every finished job's output as a page you can read on your phone, behind your password
-/password: a private one-time link to set or change the password that opens the reports and the board (type it there, never in chat; setting it signs out every device)
+/bank: a link to your bank page, read-only HSBC UK balances and transactions through Enable Banking, behind your password
+/password: a private one-time link to set or change the password that opens the reports, the board and the bank page (type it there, never in chat; setting it signs out every device)
 /spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free
 /resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
 retry <id>: rerun one failed job
