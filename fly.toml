@@ -14,10 +14,17 @@ primary_region = "lhr"
   REPO_DIR = "/data/workspace"
   SELF_REPO_DIR = "/data/self"
   SELF_REPO = "drpaulfarrow/clear-ops"
-  CHIEF_MODEL = "haiku"
+  # Tiered models (16 Nov 2026, the stability pass). The aliases map to OpenRouter models in src/llm.ts:
+  # haiku = DeepSeek V4.1 Flash, sonnet = GLM 5.3, opus = Kimi K3.1 Pro. The flash model stays on the
+  # high-volume, low-stakes work (research summaries, drafts, design notes); the chief, which routes every
+  # message, and the engineer get GLM; the maintainer, which reviews what the engineer wrote, gets Kimi.
+  CHIEF_MODEL = "sonnet"
   WORKER_MODEL = "haiku"
-  ENGINEER_MODEL = "haiku"
+  ENGINEER_MODEL = "sonnet"
+  MAINTAINER_MODEL = "opus"
   DESIGN_MODEL = "haiku"
+  # Changes to ClearOps itself are reviewed by the maintainer and merged by Paul ("maintainer" to undo).
+  SELF_MERGE = "paul"
   # The Agent SDK's own per-run guard, measured with its rounded-up estimate (about fifty times what
   # OpenRouter really charges). It is not a bill and never a job's cap: it only stops a run that has
   # gone badly wrong. A job's own cap, when one is set (JOB_BUDGET_USD and friends), counts the
