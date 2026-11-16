@@ -9,6 +9,10 @@ process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.ALLOWED_DISCORD_IDS = "424242";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-up-"));
 process.env.TELEGRAM_BOT_TOKEN = "123:SECRET-TOKEN";
+// These tests are about the upload store, not about the text inside a PDF, so the installed parser is
+// pinned out of the way: a CI runner has pdftotext, a development machine here does not, and the same
+// assertions must mean the same thing on both. The parser's own half is test/pdf-extract.test.ts.
+process.env.PDFTOTEXT_PATH = "/nonexistent/pdftotext-for-the-upload-tests";
 
 const { Uploads, sanitiseName, fetchCapped, UploadError, describeUploads, inlineImages, receiptText } = await import("../src/uploads.js");
 const { config, isAllowed } = await import("../src/config.js");

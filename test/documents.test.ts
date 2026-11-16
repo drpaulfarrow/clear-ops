@@ -15,6 +15,11 @@ import type { AddressInfo } from "node:net";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docs-"));
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
+// These tests are about what the bridge's document route accepts and saves, not about the text inside a
+// PDF, so the installed parser is pinned out of the way: a CI runner has pdftotext, a development machine
+// here does not, and the same assertions must mean the same thing on both. The parser's own half, and the
+// text an upload ends up with, are test/pdf-extract.test.ts.
+process.env.PDFTOTEXT_PATH = "/nonexistent/pdftotext-for-the-document-tests";
 
 const { DocumentIngest, DocumentError, docxText, docxTextFrom, familyOf, contradictionReason, unsafeNameReason, documentBodyParser, DOCUMENTS_ROUTE } = await import("../src/documents.js");
 const { Uploads, formatSize } = await import("../src/uploads.js");
