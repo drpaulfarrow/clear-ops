@@ -131,6 +131,24 @@ test("an attachment over the size limit is refused before downloading, and a dow
   assert.equal((await fetchCapped("https://cdn.discordapp.com/x", 100, okFetch)).toString(), "hello world, this is long");
 });
 
+test("a download with no body, or no bytes, fails loudly instead of saving an empty file", async () => {
+  const bodyless = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+  await assert.rejects(() => fetchCapped("https://cdn.discordapp.com/x", 100, bodyless), /no content/);
+  const emptyStream = (async () => new Response("")) as unknown as typeof fetch;
+  await assert.rejects(() => fetchCapped("https://cdn.discordapp.com/x", 100, emptyStream), /no content/);
+  // A declared length of zero is an empty file, not a body: same refusal.
+  const declaredEmpty = (async () => new Response(null, { status: 200, headers: { "content-length": "0" } })) as unknown as typeof fetch;
+  await assert.rejects(() => fetchCapped("https://cdn.discordapp.com/x", 100, declaredEmpty), /no content/);
+});
+
+test("a zero-byte file is never saved as a success", async () => {
+  const up = new Uploads(freshDir(), undefined, fixedDate);
+  assert.throws(() => up.save("empty.csv", Buffer.alloc(0)), (e: Error) => e instanceof UploadError && /empty \(0 bytes\)/.test(e.message));
+  const empty = att("empty.csv", Buffer.alloc(0), "text/csv");
+  await assert.rejects(() => up.ingest(empty), /the file is empty \(0 bytes\)/);
+  assert.deepEqual(fs.readdirSync(up.dir), [], "nothing was written and no success was reported");
+});
+
 test("Telegram files download through getFile, and the bot token never appears in an error", async () => {
   const urls: string[] = [];
   const fakeFetch = (async (url: string, init?: RequestInit) => {
@@ -315,6 +333,15 @@ test("a refused file is reported, and the chief is not woken when nothing was sa
   assert.match(messenger.sent[0].text, /Could not save huge.zip: too large \(500.0 MB; limit 20.0 MB\)/);
   assert.equal(messenger.sent[0].to, "dc:c:c1");
   assert.equal(calls.length, 0);
+});
+
+test("an empty download is reported to the chief, and no file is saved", async () => {
+  const { orch, messenger, uploads, calls } = harness();
+  const bodyless: Attachment = { name: "brief.pdf", mimeType: "application/pdf", download: async () => { throw new UploadError("download failed (no content)"); } };
+  await orch.handle("tg:99887766", "", { attachments: [bodyless] });
+  assert.match(messenger.sent[0].text, /Could not save brief\.pdf: download failed \(no content\)\./);
+  assert.equal(uploads.list().length, 0);
+  assert.equal(calls.length, 0, "the chief is not woken for a file that was not saved");
 });
 
 test("/uploads lists files and /delete upload removes one; the chief can delete with a tool", async () => {
