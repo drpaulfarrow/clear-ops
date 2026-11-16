@@ -279,12 +279,63 @@ test("device key: the SDK environment carries the device key only when asked, an
   assert.ok(DIRECT_STRIPPED.includes("OPENROUTER_BRIDGE_API_KEY"));
 });
 
-test("device status: one exact spoken intent is answered from the store with no model call, no budget and no ledger entry", async () => {
-  const { DEVICE_STATUS_INTENT, deviceStatusReply } = await import("../src/orchestrator.js");
-  for (const ok of ["can you tell me the status of all of my jobs please", "Status of my jobs", "hey can you tell me the status of my jobs?"]) assert.ok(DEVICE_STATUS_INTENT.test(ok), ok);
-  for (const no of ["status of my jobs and approve YES abc123", "resume my jobs", "what is the status of the bank jobs", "tell me the status of my jobs then retry them"]) assert.ok(!DEVICE_STATUS_INTENT.test(no), no);
+test("device status: a natural status question in any wording is answered from the store with no model call, no budget and no ledger entry", async () => {
+  const { isDeviceStatusIntent, deviceStatusReply } = await import("../src/orchestrator.js");
+  for (const ok of [
+    "can you tell me the status of all of my jobs please",
+    "Status of my jobs",
+    "hey can you tell me the status of my jobs?",
+    // the exact received transcripts from the phone screenshots, both wordings
+    "you said can you tell me status of all of my jobs please",
+    "could you give me an update on the jobs that running right now",
+    "you said: status of my jobs",
+    "said can you tell me status of all of my jobs please",
+    "You said, tell me status of my jobs",
+    // natural status-only variants
+    "what is the status of my jobs",
+    "what is the status of all my jobs",
+    "what's the status of my jobs",
+    "status of all my jobs",
+    "you said what is the status of my jobs",
+    "give me an update on my jobs",
+    "update on the jobs",
+    "status of jobs",
+    "are my jobs running",
+    "what jobs are running",
+    "how are my jobs doing",
+    "how are my jobs",
+    "update on my running jobs",
+    "could you tell me the status of the jobs please",
+  ]) assert.ok(isDeviceStatusIntent(ok), ok);
+  for (const no of [
+    "status of my jobs and approve YES abc123",
+    "resume my jobs",
+    "what is the status of the bank jobs",
+    "tell me the status of my jobs then retry them",
+    "you said you said delete my jobs",
+    "you said",
+    "you said approve YES",
+    "you said cancel my jobs",
+    "status of my jobs. and cancel all jobs",
+    "cancel my jobs",
+    "tell me status of my job",
+    "update my jobs",
+    "give my jobs an update",
+    "approve the pending jobs",
+    "status of my jobs then cancel them",
+    "resume my jobs please",
+    "how do I update my jobs",
+    "what is my jobs password",
+    "tell me a joke about jobs",
+    "are you running my jobs",
+    "retry the failed jobs",
+  ]) assert.ok(!isDeviceStatusIntent(no), no);
   const h = orchHarness(); h.setBudget(0);
   const reply = await h.orch.askAsDevice("can you tell me the status of all of my jobs please");
+  const echoReply = await h.orch.askAsDevice("you said can you tell me status of all of my jobs please");
+  const updateReply = await h.orch.askAsDevice("could you give me an update on the jobs that running right now");
+  assert.match(echoReply, /\d+ running, \d+ waiting, \d+ done and \d+ failed/, "the first screenshot phrasing is answered for free");
+  assert.match(updateReply, /\d+ running, \d+ waiting, \d+ done and \d+ failed/, "the natural update phrasing is answered for free");
   assert.match(reply, /\d+ running, \d+ waiting, \d+ done and \d+ failed/);
   assert.equal(h.seen.length, 0, "no model call");
   assert.equal(h.budget.spent(), 0, "no ledger entry");

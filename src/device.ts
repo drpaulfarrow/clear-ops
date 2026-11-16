@@ -12,8 +12,10 @@
  * checks it; the broad allowlist is not enough). `/unpair` revokes every device. Only a SHA-256 of each
  * token is stored. The routes answer 404 unless DEVICE_ENABLED=true.
  *
- * What a device turn can do is set in Orchestrator.askAsDevice: answer in words from a fixed status line
- * the service writes. No tools, no web, no jobs, no approval words, nothing that spends or changes.
+ * What a device turn can do is set in Orchestrator.askAsDevice: answer in one to three spoken sentences from
+ * what it knows, from the web and from the read-only job tools (job_status, get_job_context, get_output;
+ * start_job is filtered out), with one exact status intent answered from the store and no model call at all.
+ * Nothing that starts a job, approves, spends or changes anything can be said or done here.
  */
 import fs from "node:fs";
 import path from "node:path";

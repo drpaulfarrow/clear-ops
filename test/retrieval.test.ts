@@ -198,25 +198,33 @@ test("a provider failure in the decision step surfaces as a plain message, not a
     decide: async () => {
       throw new Error(`HTTP 429: ${config.openrouter.apiKey}`);
     },
+    // The fallback search runs when the decision step fails (see below); here it also fails, so the
+    // honest block is what the answer gets.
+    search: async () => {
+      throw new Error("Brave search failed: HTTP 503");
+    },
     now: NOW,
   });
   assert.equal(outcome.record.decision.source, "error");
   assert.match(outcome.record.error ?? "", /429/);
   assert.ok(!(outcome.record.error ?? "").includes(config.openrouter.apiKey), "the key is scrubbed");
-  assert.equal(outcome.record.searches.length, 0, "nothing was searched");
+  assert.equal(outcome.record.searches.length, 1, "the fallback search was tried once");
+  assert.equal(outcome.record.searches[0].engine, "brave");
   assert.match(outcome.evidence, /could not check whether a web search was needed/);
+  assert.match(outcome.evidence, /failed too/);
   assert.match(outcome.evidence, /may be out of date/);
 });
 
-test("the decision call is one short, tool-free completion on the cheap tier", async () => {
+test("the decision call is one short, tool-free completion on the cheap tier, asked for structured output", async () => {
   withKeys();
+  R.resetSchemaSupport();
   const calls: Array<{ url: string; init: any }> = [];
   const fetcher = async (url: string, init: any) => {
     calls.push({ url, init });
     return {
       ok: true,
       status: 200,
-      json: async () => ({ choices: [{ message: { content: '{"needs_retrieval": false, "engine": "brave", "queries": [], "reason": "no"}' } }] }),
+      json: async () => ({ choices: [{ message: { content: '{"needs_retrieval": false, "engine": "brave", "queries": [], "reason": "no"}' }, finish_reason: "stop" }] }),
       text: async () => "",
     };
   };
@@ -231,6 +239,295 @@ test("the decision call is one short, tool-free completion on the cheap tier", a
   assert.equal(body.tools, undefined, "no tool use");
   assert.equal(body.messages.length, 2, "one small system prompt and the request");
   assert.equal(outcome.record.model, "haiku");
+  // The provider is asked to enforce the shape rather than the prompt asking politely for it.
+  assert.equal(body.response_format.type, "json_schema");
+  assert.equal(body.response_format.json_schema.strict, true);
+  assert.deepEqual(body.response_format.json_schema.schema.required, ["needs_retrieval", "engine", "queries", "reason"]);
+  assert.equal(body.response_format.json_schema.schema.properties.needs_retrieval.type, "boolean");
+  assert.ok(body.response_format.json_schema.schema.properties.queries.maxItems <= config.retrieval.maxSearches + 1, "the schema's ceiling matches the budget");
+  // Reasoning is turned off, because reasoning tokens are counted inside max_tokens: a reasoning model
+  // (the default tier is one) can otherwise spend the whole decision reply thinking and come back empty
+  // with finish_reason "length", which is exactly the failure this change fixes (research rank 1).
+  assert.deepEqual(body.reasoning, { enabled: false }, "the structured attempt does not reason");
+  // And it is routed only to an endpoint that really takes the schema, rather than one that treats it as
+  // a strong hint (research rank 2).
+  assert.deepEqual(body.provider, { require_parameters: true }, "the call is routed to an endpoint that supports the schema");
+  assert.equal(outcome.record.diagnostic, undefined, "an ordinary turn's record is exactly what it always was");
+});
+
+test("a provider that refuses the schema is retried without it, and the refusal is remembered", async () => {
+  withKeys();
+  R.resetSchemaSupport();
+  const calls: Array<{ url: string; init: any }> = [];
+  // First call: the provider rejects the structured-output request (a 4xx). Second: a plain completion
+  // whose reply is chatty (a preamble and a fence), which the tolerant parse must still read.
+  const fetcher = async (url: string, init: any) => {
+    calls.push({ url, init });
+    if (calls.length === 1) {
+      return { ok: false, status: 400, json: async () => ({}), text: async () => '{"error":{"message":"response_format json_schema is not supported for this model"}}' };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: 'Sure.```json\n{"needs_retrieval": true, "engine": "brave", "queries": ["Prebid.js latest release"], "reason": "a release changes"}\n```Hope that helps.' }, finish_reason: "stop" }],
+      }),
+      text: async () => "",
+    };
+  };
+  const outcome = await R.retrieve("What is the latest Prebid.js release?", {
+    fetcher: fetcher as never,
+    search: async () => [result("Prebid", "https://prebid.org")],
+    fetchPage: noFetch,
+    now: NOW,
+  });
+  assert.equal(outcome.record.decision.needsRetrieval, true, "the retry's answer is used");
+  assert.deepEqual(outcome.record.decision.queries, ["Prebid.js latest release"]);
+  assert.equal(calls.length, 2, "one retry, then stop");
+  assert.ok(JSON.parse(calls[0].init.body).response_format, "the first attempt asked for structured output");
+  assert.equal(JSON.parse(calls[1].init.body).response_format, undefined, "the retry does not");
+  assert.equal(JSON.parse(calls[1].init.body).reasoning, undefined, "the plain fallback is left exactly as it was");
+  assert.equal(JSON.parse(calls[1].init.body).provider, undefined, "and carries no routing constraint");
+  assert.ok(JSON.parse(calls[1].init.body).max_tokens > JSON.parse(calls[0].init.body).max_tokens, "the retry is given more room than the cap that may have cut it off");
+  assert.equal(outcome.record.decision.source, "model", "a retried decision is still the model's");
+  const diag = outcome.record.diagnostic;
+  assert.ok(diag, "the retry is on the record");
+  assert.equal(diag.attempts, 2);
+  assert.equal(diag.retried, true);
+  assert.equal(diag.structured, true);
+  assert.equal(diag.status, 400);
+  assert.match(diag.firstError ?? "", /400/);
+  assert.ok(!JSON.stringify(diag).includes("Sure"), "the diagnostic holds the shape of the failure, never the reply");
+
+  // The refusal is remembered: the next turn does not pay for it again.
+  const again: Array<{ url: string; init: any }> = [];
+  const fetcher2 = async (url: string, init: any) => {
+    again.push({ url, init });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: '{"needs_retrieval": false, "engine": "brave", "queries": [], "reason": "no"}' }, finish_reason: "stop" }] }),
+      text: async () => "",
+    };
+  };
+  await R.retrieve("Summarise this note.", { fetcher: fetcher2 as never, now: NOW });
+  assert.equal(again.length, 1);
+  assert.equal(JSON.parse(again[0].init.body).response_format, undefined, "the schema is not asked for again");
+  assert.equal(JSON.parse(again[0].init.body).reasoning, undefined, "nor the reasoning control that goes with it");
+  assert.equal(JSON.parse(again[0].init.body).provider, undefined, "nor the routing constraint");
+  R.resetSchemaSupport();
+});
+
+test("a timeout, a 5xx or an unparseable reply is retried once and then given up on", async () => {
+  withKeys();
+  R.resetSchemaSupport();
+  // Twice unusable: the decision fails, and the record carries the shape of the failure.
+  const calls: string[] = [];
+  const bad = async (url: string, init: any) => {
+    calls.push(init.body);
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "I think a search would be a good idea." }, finish_reason: "stop" }] }), text: async () => "" };
+  };
+  const outcome = await R.retrieve("What is the latest Prebid.js release?", {
+    fetcher: bad as never,
+    search: async () => [result("Prebid", "https://prebid.org")],
+    fetchPage: noFetch,
+    now: NOW,
+  });
+  assert.equal(calls.length, 2, "retried exactly once, then stopped");
+  const diag = outcome.record.diagnostic;
+  assert.ok(diag, "the failure is diagnosable");
+  assert.equal(diag.attempts, 2);
+  assert.equal(diag.chars, "I think a search would be a good idea.".length, "how long the reply was");
+  assert.equal(diag.hadBrace, false, "no brace in it");
+  assert.equal(diag.finishReason, "stop");
+  assert.ok(!JSON.stringify(outcome.record).includes("good idea"), "never the reply itself");
+  assert.match(outcome.record.error ?? "", /did not return JSON/);
+
+  // A 5xx on the first attempt, a good reply on the retry: the turn is decided by the model.
+  calls.length = 0;
+  let n = 0;
+  const flaky = async (url: string, init: any) => {
+    calls.push(init.body);
+    n += 1;
+    if (n === 1) return { ok: false, status: 503, json: async () => ({}), text: async () => "unavailable" };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: '{"needs_retrieval": true, "engine": "brave", "queries": ["Prebid.js release"], "reason": "a release changes"}' }, finish_reason: "stop" }] }),
+      text: async () => "",
+    };
+  };
+  const second = await R.retrieve("What is the latest Prebid.js release?", {
+    fetcher: flaky as never,
+    search: async () => [result("Prebid", "https://prebid.org")],
+    fetchPage: noFetch,
+    now: NOW,
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(second.record.decision.needsRetrieval, true);
+  assert.equal(second.record.diagnostic?.status, 503);
+  assert.equal(second.record.error, undefined, "a flake the retry fixed is not an error on the record");
+  R.resetSchemaSupport();
+});
+
+test("a reply cut off at the token cap is a failure, never an empty decision", async () => {
+  withKeys();
+  R.resetSchemaSupport();
+  let n = 0;
+  const fetcher = async () => {
+    n += 1;
+    // Both attempts come back with the cap hit and nothing written: no decision, and it says so.
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }), text: async () => "" };
+  };
+  const outcome = await R.retrieve("What is the latest Prebid.js release?", {
+    fetcher: fetcher as never,
+    search: async () => [],
+    now: NOW,
+  });
+  assert.equal(n, 2);
+  assert.equal(outcome.record.decision.needsRetrieval, true, "the fallback retrieved rather than deciding nothing");
+  assert.match(outcome.record.error ?? "", /token cap/);
+  assert.equal(outcome.record.diagnostic?.finishReason, "length");
+  assert.equal(outcome.record.diagnostic?.hadBrace, false);
+  assert.match(outcome.evidence, /could not check whether a web search was needed/);
+  R.resetSchemaSupport();
+});
+
+test("when the decision fails, the service fails open and searches the request itself", async () => {
+  withKeys();
+  const asked: Array<{ engine: string; query: string }> = [];
+  const outcome = await R.retrieve("What is the latest version of Prebid.js and when was it released?", {
+    decide: async () => {
+      throw new Error("the decision call failed: ETIMEDOUT");
+    },
+    search: async (engine, query) => {
+      asked.push({ engine, query });
+      return [result("Prebid.js releases", "https://github.com/prebid/Prebid.js/releases")];
+    },
+    fetchPage: noFetch,
+    note: () => undefined,
+    now: NOW,
+  });
+  assert.deepEqual(asked, [{ engine: "brave", query: "What is the latest version of Prebid.js and when was it released" }], "one search, built from the request itself, within the budget");
+  assert.equal(outcome.record.decision.source, "error");
+  assert.equal(outcome.record.decision.needsRetrieval, true, "the fallback retrieved");
+  assert.deepEqual(outcome.record.decision.queries, ["What is the latest version of Prebid.js and when was it released"]);
+  assert.equal(outcome.record.searches.length, 1, "the search is a normal search record");
+  assert.equal(outcome.record.searches[0].engine, "brave");
+  assert.equal(outcome.record.searches[0].results, 1);
+  assert.equal(outcome.record.error, "the decision call failed: ETIMEDOUT", "the failure is still on the record");
+  assert.match(outcome.evidence, /Web evidence the service retrieved/);
+  assert.match(outcome.evidence, /could not check whether a web search was needed/);
+  assert.match(outcome.evidence, /one search built from the request itself/, "the fallback is explained, not hidden");
+  assert.match(outcome.evidence, /https:\/\/github\.com\/prebid\/Prebid\.js\/releases/);
+  assert.match(outcome.evidence, /Cite a URL from the evidence above/, "the evidence is still fenced and cited");
+  assert.doesNotMatch(outcome.evidence, /may be out of date/, "no hedging when a search did run");
+});
+
+test("the honest block is kept only when the fallback search also fails or finds nothing", async () => {
+  withKeys();
+  // The fallback found nothing.
+  const said: string[] = [];
+  const empty = await R.retrieve("What did TollBit announce last week?", {
+    decide: async () => {
+      throw new Error("HTTP 500: upstream");
+    },
+    search: async () => [],
+    note: (line) => said.push(line),
+    now: NOW,
+  });
+  assert.equal(empty.record.searches.length, 1);
+  assert.equal(empty.record.searches[0].empty, true);
+  assert.match(empty.evidence, /could not check whether a web search was needed/);
+  assert.match(empty.evidence, /found nothing/);
+  assert.match(empty.evidence, /may be out of date/);
+  assert.deepEqual(said, ["Checking whether this needs a search…", 'Searching the web: What did TollBit announce last week']);
+
+  // The fallback search itself errored.
+  const failed = await R.retrieve("What did TollBit announce last week?", {
+    decide: async () => {
+      throw new Error("HTTP 500: upstream");
+    },
+    search: async () => {
+      throw new Error(`Brave failed: HTTP 401 ${BRAVE}`);
+    },
+    now: NOW,
+  });
+  assert.match(failed.evidence, /failed too/);
+  assert.match(failed.evidence, /may be out of date/);
+  assert.ok(!failed.evidence.includes(BRAVE), "the key is scrubbed");
+
+  // And a request with nothing searchable in it is not searched at all.
+  const blank = await R.retrieve("   ", {
+    decide: async () => {
+      throw new Error("boom");
+    },
+    search: async () => {
+      throw new Error("must not be called");
+    },
+    now: NOW,
+  });
+  assert.equal(blank.record.searches.length, 0);
+  assert.match(blank.evidence, /could not check whether a web search was needed/);
+});
+
+test("the fallback query is the request itself, shortened, not a query invented by anyone", () => {
+  assert.equal(R.fallbackQuery("What is the latest Prebid.js release?"), "What is the latest Prebid.js release");
+  assert.equal(R.fallbackQuery("  Please   find   the TollBit pricing page  "), "the TollBit pricing page");
+  assert.equal(R.fallbackQuery("<b>Prebid</b> news"), "Prebid news");
+  assert.equal(R.fallbackQuery("x".repeat(500)).length, 200, "capped");
+  assert.equal(R.fallbackQuery("   "), "", "nothing to search for");
+});
+
+test("the fallback query is the task, unwrapped from the harness's own wrappers", () => {
+  // A chat turn arrives as the uploads note and then Paul's own message: the message is the request.
+  assert.equal(
+    R.fallbackQuery("Saved Connections.csv (1.2 MB).\n\nPaul's message: find the latest TollBit pricing page"),
+    "the latest TollBit pricing page",
+  );
+  // A voice note's transcript comes with the wrapper that says so, and its own quoting.
+  assert.equal(
+    R.fallbackQuery('Paul\'s message (transcribed from his voice note, so it may mishear names and numbers, but it is what he said): "what changed in SPUR this week"'),
+    "what changed in SPUR this week",
+  );
+  // A voice request from Discord arrives with the voice channel's own prefix.
+  assert.equal(R.fallbackQuery("Voice request from Paul in the ClearOps server: Prebid 10 release notes"), "Prebid 10 release notes");
+  // A generated brief ends with the report it is fixing: machinery, not the task.
+  assert.equal(
+    R.fallbackQuery("Fix the pricing copy\n\nEngineer's report:\nI changed three files and opened PR #12."),
+    "Fix the pricing copy",
+  );
+  // A fix-round brief carries the task it is fixing, and then the review of it: the task is the subject.
+  assert.equal(
+    R.fallbackQuery(
+      "Address the maintainer's review on the existing pull request https://github.com/x/y/pull/9 (automatic fix round 1 of 3).\n\nOriginal task:\nResearch SPUR's latest moves\n\nMaintainer's review (job a7a31a):\n# Maintainer review\nTwo things block the merge.",
+    ),
+    "Research SPUR's latest moves",
+  );
+  // A scheduled run's brief names the schedule at the end.
+  assert.equal(R.fallbackQuery("Check what changed at IAB Tech Lab\n\n(This is the scheduled run 8518b3.)"), "Check what changed at IAB Tech Lab");
+});
+
+test("the fallback search obeys the same engine policy as every other query", async () => {
+  withKeys();
+  const asked: Array<{ engine: string; query: string }> = [];
+  const outcome = await R.retrieve("Who are the competitors to TollBit, and what do they charge?", {
+    decide: async () => {
+      throw new Error("HTTP 500: upstream");
+    },
+    search: async (engine, query) => {
+      asked.push({ engine, query });
+      return [result("TollBit alternatives", "https://example.test/tollbit")];
+    },
+    fetchPage: noFetch,
+    now: NOW,
+  });
+  assert.equal(asked.length, 1, "one search, still inside the budget");
+  assert.equal(asked[0].engine, "exa", "an entity question goes to Exa, not always Brave");
+  assert.equal(outcome.record.searches[0].engine, "exa");
+  assert.equal(outcome.record.decision.engine, "exa", "the record says which engine really ran");
+  assert.equal(outcome.record.decision.source, "error", "and that it was the fallback, not the model");
+  assert.match(outcome.evidence, /one search built from the request itself/);
 });
 
 test("engine policy is code: Brave for news and releases, Exa for entities and lookalikes", () => {

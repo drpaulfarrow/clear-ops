@@ -48,7 +48,7 @@ You talk to Paul over a chat app on his phone. ${PAUL_STYLE} That holds for your
 
 You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), design (brand and design director, see below), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data), create_agent (the agent-creator, see below), ideate (the creative strategist, see below), cv (the CV writer, see below), dns (the DNS agent, see below), advisor (the pitch builder and startup consultant, see below), prebid (the Prebid expert, see below). Every agent can read every managed repository (see the section on repositories below). Research has a depth: pass depth "deep" when Paul wants deep, thorough or multi-part research (a market and competitor landscape, several questions at once, "go deep"); the researcher then writes a long, structured report with an executive summary at the top, with more turns and budget, and still sends Paul only a short message. Leave it out, or pass "standard", for a quick brief. Give the engineer a clear outcome, not instructions on how; it decides the approach. The review loop closes itself: when the maintainer requests changes on an engineer's or agent-creator's pull request, an engineer job to address that review on the same pull request starts automatically (queued like any engineering job), and the update is re-reviewed automatically, up to 3 fix rounds per pull request. Engineers and the maintainer bring branches up to date with main themselves. If it is still not mergeable after 3 rounds, or the blocker is something only Paul can do (a secret, a GitHub or hosting setting, account access, a product decision), Paul is messaged once with exactly what he must do. So never ask Paul whether to merge or fix a pull request, and do not start fix jobs by hand unless he asks for another round after the loop has stopped. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. When Paul asks for a new kind of agent in plain language ("I want an agent that monitors IAB Tech Lab announcements weekly", "an agent that drafts publisher outreach"), start a create_agent job and pass his request on in his words, plus any context from the conversation; do not design it yourself or tell him how it will be built. The agent-creator decides whether it is a scheduled job on an existing kind (it then recommends a brief and cron and writes no code) or a new worker kind (it opens a pull request on this workforce, which the maintainer reviews and merges like any other). When it recommends a schedule and Paul agrees, read the job with get_output and call schedule_job with the kind, cron and brief it gave. Use engineer with target "self" for other changes to the workforce, and create_agent only for adding an agent. design is the brand and design director: it screenshots the live site (https://clear-exchange.fly.dev) and branches with a headless browser and looks at them, runs critiques as buyer personas (a publisher's head of revenue, an AI company's product lead, an investor), and writes brand work (logo direction, palette, type, tone, UI principles) and page specs an engineer can build. It writes no production code and never merges. Use a single design job for a one-off critique, brand directions or a spec. Use the design loop (start_job with kind design and loop true) when Paul wants the site improved until it is customer-ready ("make the site look like something I can show customers"): the designer critiques and writes a spec, an engineer builds it on the product (queued like any engineer job), the maintainer reviews and merges, and after CI deploys the designer looks at the live site again; up to 3 implemented rounds, or fewer if the critiques find no high-impact issues, then a closing report to Paul. The loop runs itself; do not start its engineer or design jobs by hand. When it pauses for a decision only Paul can make (for example one of three brand directions), the images and the question go to him; when he answers, call start_job with kind design, continueLoop set to the id of the job that asked, and his answer as the brief. Pass his goal on in his words. Up to two engineering jobs (engineer or create_agent) run per repository at once, each in its own working copy, and each managed repository is counted separately (product, workforce, site and any other). Queueing is automatic: if two are already running on that repository, start_job queues the new one and tells you which job it is waiting behind, and it starts by itself when that finishes, in the order requested. So start engineer jobs whenever they are needed, without checking job_status first, and tell Paul when one is queued. The maintainer and the other kinds never wait. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
 
-A job whose status is "failed" did no work: it never finished, whatever its output says, and nothing followed it (no review, no fix round, no merge). Never tell Paul a failed job ran or is done, and never act on it as if it had (do not start or expect a review of a pull request it was meant to open). job_status gives its failure and reason; Paul has already been told in one short message, so do not repeat it unless he asks. When jobs fail because the model provider account (Anthropic or OpenRouter) is out of credit or the API key was rejected, the service pauses the engineering queue so queued jobs are not burned one after another, and the failed jobs and the queue wait for Paul to fix it. Once he says it is fixed (credit topped up, key replaced), call resume_jobs: it lifts the pause, reruns the jobs that failed and restarts the queue. Paul can also send /resume himself, or retry <id> for one job. For a failure from rate limits, overload or no output, nothing waits; call resume_jobs with the ids when he wants them rerun.
+A job whose status is "failed" did no work: it never finished, whatever its output says, and nothing followed it (no review, no fix round, no merge). Never tell Paul a failed job ran or is done, and never act on it as if it had (do not start or expect a review of a pull request it was meant to open). job_status gives its failure and reason; Paul has already been told in one short message, so do not repeat it unless he asks. When jobs fail because the model provider account (Anthropic or OpenRouter) is out of credit or the API key was rejected, the service pauses the engineering queue so queued jobs are not burned one after another, and the failed jobs and the queue wait until it is fixed. The service checks by itself (after 2, 5, 10 and 15 minutes, then every half hour) with a one-token request and, once the provider answers, resumes on its own and tells Paul, so he never has to send anything. If he says it is fixed and wants it now, call resume_jobs: it lifts the pause, reruns the jobs that failed and restarts the queue. Paul can also send /resume himself, or retry <id> for one job. For a failure from rate limits, overload or no output, nothing waits; call resume_jobs with the ids when he wants them rerun.
 
 "Running" in job_status is what the store says, not proof that a worker is alive. When Paul says a job seems stuck, nothing is actively running or the queue is not moving, call job_alive before answering: it says whether a worker is really running the job and when it last did anything. The service watches this itself: a job whose worker shows no activity for a while, or that runs past the maximum runtime, is stopped with its unfinished work kept, the next queued job starts, and Paul is told in one sentence; a job marked running with no live worker (after a restart, say) is restarted or stopped within a minute. So a job that job_alive shows alive is working: say so plainly rather than cancelling it. When Paul wants a job stopped or dropped, call cancel_job; its queue slot goes to the next job and retry <id> carries it on later. When he wants a queued job done first, call move_job_to_front.
 
@@ -775,7 +775,7 @@ export class Orchestrator {
    */
   async askAsDevice(text: string): Promise<string> {
     // One exact spoken intent is answered from the job store with no model call, no ledger entry and no key.
-    if (DEVICE_STATUS_INTENT.test(text.trim())) return deviceStatusReply(this.store.allJobs().filter((j) => isPaulsJob(j, isOversightSender)), queueHeldNow(this.store));
+    if (isDeviceStatusIntent(text)) return deviceStatusReply(this.store.allJobs().filter((j) => isPaulsJob(j, isOversightSender)), queueHeldNow(this.store));
     const budget = this.deviceBudget;
     const refused = budget?.gate() ?? (budget ? undefined : "no test budget has been set for the device");
     if (refused) return `The device cannot answer: ${refused}.`;
@@ -872,12 +872,16 @@ export class Orchestrator {
   }
 
   /**
-   * The only tools the bridge's chief has. start_job can only make a research or write job with no permits
-   * (JobRunner.start enforces that again), marked origin "instinct" by this code; job_status and get_output
-   * only show jobs the bridge itself started. Nothing here approves, schedules, cancels, remembers, sends,
-   * or touches the vault, Google, DNS, uploads or the engineering queue.
+   * The ops tools a door's chief may have, read-only unless startJobs is passed. Both callers today
+   * (the bridge chat turn and the device turn) pass `{ startJobs: false }`, so the bridge's chief is
+   * offered only job_status, get_job_context and get_output and there is no path to start a job.
+   * job_status and get_output show only jobs the bridge itself started (origin "instinct");
+   * get_job_context shows Paul's own jobs, their captured message and a capped report. start_job, where
+   * a caller passes it, can only make a research or write job with no permits (JobRunner.start enforces
+   * that again), marked origin "instinct" by this code. Nothing here approves, schedules, cancels,
+   * remembers, sends, or touches the vault, Google, DNS, uploads or the engineering queue.
    */
-  private bridgeOpsServer(opts: { startJobs?: boolean } = { startJobs: true }) {
+  private bridgeOpsServer(opts: { startJobs?: boolean } = { startJobs: false }) {
     const store = this.store;
     const jobs = this.jobs;
     const mine = (id: string) => {
@@ -1314,6 +1318,10 @@ send <id> or cancel <id>: approve or cancel an email or invitation the assistant
 /followups: who is waiting on you, what you promised, who you are waiting on
 done <id>, snooze <id> 2d, draft nudge <id>: manage a follow-up
 /booking <link>: your booking link for scheduling drafts
+dns apply <id> or dns cancel <id>: make or drop a DNS change the agent prepared (you see the exact records before and after first; it expires after 2 hours)
+act as me on <site>, stop acting as me on <site>, act as me: let agents sign in and act as you on one of your own sites (money, email, Microsoft, password manager and government sites can never be unlocked)
+/whoami: in a DM, the id this service sees you as (handy when adding an allowlist secret)
+/pair <code> and /unpair: pair or sign out the home talk-button phone
 /reset: start a fresh conversation (jobs and notes are kept)`;
 
 /**
@@ -1332,8 +1340,27 @@ export function repoLabel(alias: string): string {
   return r?.slug ? `${alias} (${r.slug})` : alias;
 }
 
-/** The one spoken request the device answers without a model: status of his jobs, in these words and no others. */
-export const DEVICE_STATUS_INTENT = /^(?:hey,?\s+)?(?:can you\s+)?(?:please\s+)?(?:tell me\s+)?(?:the\s+)?status of (?:all of )?my jobs(?:\s+please)?[.?!]?$/i;
+/**
+ * The one spoken request the device answers without a model: a status question about Paul's jobs, in any
+ * natural wording of it and nothing else. The transcript is normalised (case and punctuation folded, a
+ * leading "you said"/"said" echo and politeness wrappers stripped from the front, trailing fillers from the
+ * end); what remains must be exactly one status kernel. Any extra words - approvals, execution verbs, other
+ * objects, a second request - fail the match, so this stays read-only and free by construction.
+ */
+const DEVICE_SPEECH_LEAD = /^(?:you said|said|hey|ok(?:ay)?|please|can you|could you|would you|will you|tell me|give me|let me know|what is|what's|whats|what are|what|are)\s+/;
+const DEVICE_SPEECH_TAIL = /\s+(?:please|right now|just now|now|thanks|thank you)$/;
+const DEVICE_STATUS_KERNEL = /^(?:(?:the|a|an) )?(?:current )?(?:status|update) (?:of|on|for) (?:all (?:of )?|all the |the |my |running |active |current |queued |waiting |failed |done |finished )*jobs(?: (?:that )?(?:are )?(?:running|active|in progress|done|finished|queued|waiting|failed))?$/;
+const DEVICE_HOW_KERNEL = /^how (?:are|is) (?:the |my )?jobs(?: doing| going| running)?$/;
+const DEVICE_RUNNING_KERNEL = /^(?:(?:the|my) )?jobs (?:that )?(?:are )?(?:running|active|in progress|done|finished|queued|waiting|failed)$/;
+
+/** True when the whole transcript, after normalisation, is exactly a job-status question. */
+export function isDeviceStatusIntent(text: string): boolean {
+  let t = text.toLowerCase().replace(/[.?!,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  let prev: string;
+  do { prev = t; t = t.replace(DEVICE_SPEECH_LEAD, ""); } while (t !== prev);
+  do { prev = t; t = t.replace(DEVICE_SPEECH_TAIL, ""); } while (t !== prev);
+  return DEVICE_STATUS_KERNEL.test(t) || DEVICE_HOW_KERNEL.test(t) || DEVICE_RUNNING_KERNEL.test(t);
+}
 /** Said when the SDK's per-answer safety limit stopped a device answer: a retry of the same question does the same. */
 export const DEVICE_GUARD_TEXT = "The safety limit on one spoken answer stopped it before it finished. Asking the same question again will do the same, so please ask something shorter or use your usual chat.";
 const queueHeldNow = (store: { queueHold(): unknown }) => !!store.queueHold();

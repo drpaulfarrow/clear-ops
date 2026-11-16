@@ -43,7 +43,12 @@ function cap(text: string, max: number): { text: string; truncated: boolean } {
 
 /** Jobs Paul himself started: not the bridge's own, and requested by an allowed sender (not a schedule or the bridge). */
 export function isPaulsJob(j: Job, isAllowed: (sender: string) => boolean): boolean {
-  return j.origin !== "instinct" && isAllowed(j.requestedBy);
+  if (j.origin === "instinct") return false;
+  if (isAllowed(j.requestedBy)) return true;
+  // A one-use bridge commission (job.commission, on the workforce repo "self") started before its requester was
+  // stored with the "dc:u:" prefix carries the bare owner id. It counts only when that exact id is an allowed
+  // owner address; any other job with a bare id, or a commission for another id, stays hidden.
+  return j.commission !== undefined && j.target === "self" && /^\d{15,25}$/.test(j.requestedBy) && isAllowed(`dc:u:${j.requestedBy}`);
 }
 
 export function jobContextView(j: Job, readOutput: (id: string) => string | undefined) {

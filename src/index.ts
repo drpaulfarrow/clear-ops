@@ -49,6 +49,7 @@ import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
 import { defaultProbes, HealthProbes } from "./health.js";
+import { defaultCanary, type Canary } from "./auto-resume.js";
 import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
 import { DeviceBudget, DEVICE_PATH, DEVICE_TEXT_MAX_CHARS, DEVICE_TURNS_PER_DAY, DeviceRegistry, deviceRouter } from "./device.js";
 import { BridgeChat, BRIDGE_REPLY_TO } from "./instinct-chat.js";
@@ -85,6 +86,8 @@ export interface AppDeps {
   uptime?: UptimeLog;
   /** The board's dependency checks. Built from config by default; a test injects fakes. */
   probes?: HealthProbes;
+  /** Checks whether the provider answers again after a credit or key hold (src/auto-resume.ts). Off unless given, so tests never call out. */
+  canary?: Canary;
   /** The sign-in that stands in front of the browser pages. The singleton by default; tests pin its clock. */
   signIn?: SignIn;
   /**
@@ -244,7 +247,7 @@ export function buildApp(deps: AppDeps) {
   // Google connection above) or asks him in chat, and types it into the page itself (src/otp.ts). No
   // model, log, output or stored session ever holds a code, and Paul's own message goes once it is used.
   const otp = new OtpRelay({ messenger: deps.messenger, ...(deps.mailbox ? { mailbox: deps.mailbox } : { mailbox: new GmailCodeReader(googleApi) }) });
-  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp });
+  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, ...(deps.canary ? { canary: deps.canary } : {}) });
   const scheduler = new Scheduler(deps.store, jobs);
   const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
   scheduler.boot();
@@ -725,7 +728,7 @@ if (isMain) {
     if (to) void messenger.send(to, text).catch(() => undefined);
   };
   const outputs = new OutputsPublisher(store, { onProblem: notifyPaul });
-  const { app, orchestrator, jobs, startEaTimers, startHealth, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs });
+  const { app, orchestrator, jobs, startEaTimers, startHealth, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs, canary: defaultCanary() });
   startEaTimers();
   // The board's own timers: one heartbeat a minute and the dependency checks every five. Both are
   // read-only and unref'd, so neither holds the process open nor waits on anything.
