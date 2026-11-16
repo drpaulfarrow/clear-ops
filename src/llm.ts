@@ -216,5 +216,5 @@ export function modelNote(): string {
   }
   const m = openrouterModels();
   const alias = (a: string) => (isAlias(a) ? `${a} (${m[a.toLowerCase() as ModelAlias]})` : a);
-  return `\n\nModels: OpenRouter (src/llm.ts, OPENROUTER_API_KEY set). The aliases in the config are mapped to OpenRouter models by the code: chief ${alias(config.models.chief)}, workers ${alias(config.models.worker)}, engineers and maintainer ${alias(config.models.engineer)}, designer ${alias(config.design.model)}. The executive assistant runs on ${config.models.ea} on Anthropic's API directly, except "Draft nudge" follow-up jobs, which use the worker model. Claude Code's own background calls are mapped too. Nothing here needs changing to "use OpenRouter"; it already does.`;
+  return `\n\nModels: OpenRouter (src/llm.ts, OPENROUTER_API_KEY set). The aliases in the config are mapped to OpenRouter models by the code: chief ${alias(config.models.chief)}, workers ${alias(config.models.worker)}, engineers ${alias(config.models.engineer)}, maintainer ${alias(config.models.maintainer)}, designer ${alias(config.design.model)}. The executive assistant runs on ${config.models.ea} on Anthropic's API directly, except "Draft nudge" follow-up jobs, which use the worker model. Claude Code's own background calls are mapped too. Nothing here needs changing to "use OpenRouter"; it already does.`;
 }

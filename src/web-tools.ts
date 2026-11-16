@@ -38,7 +38,7 @@ export function webToolsFor(kind: JobKind, deps: { fetcher?: Fetcher; browse?: B
     const tools = SEARCH_TOOLS.filter((t) => engines.includes("brave") || !t.endsWith("__web_search")).filter((t) => engines.includes("exa") || !t.endsWith("__exa_search"));
     allowed.push(...tools);
     notes.push(
-      `Search: prefer ${engines.includes("brave") ? "web_search (Brave) for current facts and news" : ""}${engines.length === 2 ? ", and " : ""}${engines.includes("exa") ? "exa_search for finding companies, people, papers and similar pages" : ""} over the built-in WebSearch, which may not work on every model. Open and read a source before citing it.`,
+      `Search: prefer ${engines.includes("brave") ? "web_search (Brave) for current facts and news" : ""}${engines.length === 2 ? ", and " : ""}${engines.includes("exa") ? "exa_search for finding companies, people, papers and similar pages" : ""}. These are the web search tools; the built-in WebSearch is not available on open models. Open and read a source before citing it.`,
     );
   }
   if (BROWSE_KINDS.includes(kind) && config.browse.enabled && !deps.noBrowse) {
