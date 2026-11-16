@@ -96,6 +96,7 @@ jobs:
             OPENROUTER_HAIKU_MODEL="${{ vars.OPENROUTER_HAIKU_MODEL }}" \
             OPENROUTER_SONNET_MODEL="${{ vars.OPENROUTER_SONNET_MODEL }}" \
             OPENROUTER_OPUS_MODEL="${{ vars.OPENROUTER_OPUS_MODEL }}" \
+            OPENROUTER_FABLE_MODEL="${{ vars.OPENROUTER_FABLE_MODEL }}" \
             OPENROUTER_PRICES="$OPENROUTER_PRICES" \
             EA_MODEL="${{ vars.EA_MODEL }}" \
             BRAVE_API_KEY="${{ secrets.BRAVE_API_KEY }}" \
@@ -125,7 +126,12 @@ jobs:
             SIGNUP_EMAILS="${{ secrets.SIGNUP_EMAILS }}" \
             INSTINCT_BRIDGE_TOKEN="${{ secrets.INSTINCT_BRIDGE_TOKEN }}" \
             BRIDGE_CHAT_ENABLED="${{ vars.BRIDGE_CHAT_ENABLED }}" \
+            BRIDGE_CHAT_BUDGET_USD="${{ vars.BRIDGE_CHAT_BUDGET_USD }}" \
             BRIDGE_RETRY_ALLOW="${{ vars.BRIDGE_RETRY_ALLOW }}" \
+            BRIDGE_COMMISSION_ALLOW="${{ vars.BRIDGE_COMMISSION_ALLOW }}" \
+            BRIDGE_THREAD_GUILD_ID="${{ vars.BRIDGE_THREAD_GUILD_ID }}" \
+            BRIDGE_THREAD_PARENT_ID="${{ vars.BRIDGE_THREAD_PARENT_ID }}" \
+            OPENROUTER_BRIDGE_API_KEY="${{ secrets.OPENROUTER_BRIDGE_API_KEY }}" \
             OVERSIGHT_SENDER_IDS="${{ vars.OVERSIGHT_SENDER_IDS }}" \
             DEVICE_ENABLED="${{ vars.DEVICE_ENABLED }}" \
             DEVICE_TEST_BUDGET_USD="${{ vars.DEVICE_TEST_BUDGET_USD }}" \
