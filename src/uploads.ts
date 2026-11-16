@@ -134,6 +134,9 @@ const isZip = (name: string, mimeType: string, data: Buffer) =>
  * Fetch a URL into memory, refusing anything over `maxBytes` (declared or actual). Only https.
  * Errors never include the URL, which for Telegram and WhatsApp carries the bot token. `headers` is
  * for the channels that need an authorization header (WhatsApp's media URL); Telegram's does not.
+ *
+ * A download that hands back no body, or no bytes at all, is a failure and not an empty file: a
+ * zero-byte upload reported as a success is the one thing worse than a plain refusal.
  */
 export async function fetchCapped(url: string, maxBytes: number, fetchImpl: typeof fetch = fetch, headers?: Record<string, string>): Promise<Buffer> {
   if (!/^https:\/\//i.test(url)) throw new UploadError("refused a non-https download");
@@ -141,7 +144,7 @@ export async function fetchCapped(url: string, maxBytes: number, fetchImpl: type
   if (!res.ok) throw new UploadError(`download failed (${res.status})`);
   const declared = Number(res.headers.get("content-length") ?? NaN);
   if (Number.isFinite(declared) && declared > maxBytes) throw new UploadError(`too large (${formatSize(declared)}; limit ${formatSize(maxBytes)})`);
-  if (!res.body) return Buffer.alloc(0);
+  if (!res.body) throw new UploadError("download failed (no content)");
   const parts: Buffer[] = [];
   let total = 0;
   const reader = res.body.getReader();
@@ -155,6 +158,7 @@ export async function fetchCapped(url: string, maxBytes: number, fetchImpl: type
     }
     parts.push(Buffer.from(value));
   }
+  if (!total) throw new UploadError("download failed (no content)");
   return Buffer.concat(parts);
 }
 
@@ -195,6 +199,9 @@ export class Uploads {
 
   /** Write bytes as <date>-<sanitised name>, never overwriting; unpack zip archives beside it. */
   save(originalName: string, data: Buffer, mimeType?: string, caption?: string): SavedUpload {
+    // An empty file is never a saved upload: it is a download or a request that went wrong, and it is
+    // reported as one rather than stored and called a success.
+    if (!data.length) throw new UploadError("the file is empty (0 bytes)");
     const clean = sanitiseName(originalName);
     const type = mimeType || guessType(clean);
     const date = this.now().toISOString().slice(0, 10);
@@ -470,6 +477,26 @@ function* readZip(buf: Buffer, maxEntries: number): Generator<ZipEntry> {
       },
     };
   }
+}
+
+/**
+ * One named entry out of a zip archive, already decompressed, or undefined when the archive holds no
+ * such entry. A .docx is a zip whose text lives in `word/document.xml`, so the document reader
+ * (src/documents.ts) reads it through the same reader the uploads use, with its method, link and
+ * encrypted-entry checks and a cap on what a single entry may inflate to.
+ */
+export function readZipEntry(data: Buffer, name: string, maxBytes: number, maxEntries = 2000): Buffer | undefined {
+  for (const entry of readZip(data, maxEntries)) {
+    if (entry.name !== name || entry.isDir || entry.isLink || entry.encrypted || (entry.method !== 0 && entry.method !== 8)) continue;
+    if (entry.size > maxBytes) throw new UploadError(`an entry in the archive is larger than ${formatSize(maxBytes)}`);
+    if (entry.method === 0) return entry.data();
+    try {
+      return inflateRawSync(entry.data(), { maxOutputLength: maxBytes });
+    } catch {
+      throw new UploadError("the archive is corrupt");
+    }
+  }
+  return undefined;
 }
 
 /** Split an archive path into safe segments, or undefined if it is absolute or climbs out. */

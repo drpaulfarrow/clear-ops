@@ -9,6 +9,9 @@
  *  - GET  /api/instinct/status       what the board already shows: queue hold and the latest jobs (no briefs,
  *    outputs, paths, spend or secrets).
  *  - GET  /api/instinct/context[/:id] read-only, no model: jobs Paul started, his captured message, capped report.
+ *  - POST /api/instinct/documents    {"name","mimeType","note","data"} with the bytes base64: one real document
+ *    (a .docx is turned into a .txt beside it) saved as an ordinary private upload, answered 201 with its saved
+ *    path, its byte size and the sha256 of the bytes. No model call, and the uploads it writes are never read back.
  *  - POST /api/instinct/chat (404 unless BRIDGE_CHAT_ENABLED=true; paid model turn)         {"text"} to the chief as Paul's assistant, answered 202 with an id.
  *  - GET  /api/instinct/chat/:id     {status, reply} for that message.
  *  - GET  /api/instinct/jobs/:id     status, and the report once done, of a job this bridge started only.
@@ -26,19 +29,21 @@
  *
  * What it cannot do, by construction: reach Paul's own conversation, parse an approval word, start any
  * job but a read-only research or write job, grant a permit, schedule, cancel, resume, retry a job that is not
- * on the owner's allowlist, read a secret, an
- * upload or the data directory, or act as Paul anywhere.
+ * on the owner's allowlist, read a secret, the data directory or any stored upload (the documents
+ * route adds one, through the same private store as a chat attachment, and never reads one back), or
+ * act as Paul anywhere.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { Request, Response, Router as ExpressRouter } from "express";
-import { Router } from "express";
+import express, { Router } from "express";
 import { failureLabel } from "./failures.js";
 import { jobTitle } from "./titles.js";
 import type { Store } from "./store.js";
 import type { BridgeChat } from "./instinct-chat.js";
 import { bridgeJobView } from "./instinct-chat.js";
 import { CONTEXT_LIST_MAX, isPaulsJob, jobContextView, maskSecrets } from "./bridge-context.js";
+import { DocumentError, documentBodyParser, type DocumentIngest } from "./documents.js";
 
 export const INSTINCT_PATH = "/api/instinct";
 const OUTPUT_MAX_CHARS = 60_000;
@@ -47,12 +52,19 @@ const DM_PAGE_MAX = 100;
 const DM_TEXT_MAX = 2_000;
 const MISS_LIMIT = 5;
 const MISS_WINDOW_MS = 60_000;
+/** The bridge's own JSON bodies are small: a question, a job id, a brief id. */
+const BRIDGE_BODY_LIMIT = "128kb";
 
 export interface InstinctBridgeDeps {
   store: Pick<Store, "allJobs" | "queueHold" | "getJob" | "readOutput">;
   chat: BridgeChat;
   /** The shared secret; the bridge is off when empty. */
   token?: string;
+  /**
+   * Real documents from Paul or his assistant (src/documents.ts): `ingest` validates the bytes and saves them
+   * as an ordinary private upload. Absent, the route is a 404 like every other unset one.
+   */
+  documents?: Pick<DocumentIngest, "ingest" | "maxBytes">;
   /** Who counts as Paul's own sender (for the read-only context routes). */
   isAllowed?: (sender: string) => boolean;
   /** The model-backed chat routes. Off unless set: the read-only routes need no model and cost nothing. */
@@ -145,6 +157,31 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
     res.set("Cache-Control", "no-store").json(statusData(deps.store, now(), deps.isAllowed));
   });
 
+  /**
+   * One real document (src/documents.ts), authenticated like everything else here and running no model.
+   * Its own body parser is registered on the route, so the token is checked before the bytes are read,
+   * and the bytes are saved as an ordinary private upload: nothing is executed, nothing is read back,
+   * and a refusal says plainly why in one line the chief can pass on to Paul.
+   */
+  router.post(
+    "/documents",
+    (req: Request, res: Response, next) => {
+      if (!deps.documents) return void res.sendStatus(404);
+      documentBodyParser(deps.documents.maxBytes)(req, res, next);
+    },
+    (req: Request, res: Response) => {
+      const documents = deps.documents;
+      if (!documents) return void res.sendStatus(404);
+      try {
+        const receipt = documents.ingest(req.body);
+        res.set("Cache-Control", "no-store").status(201).json({ ok: true, ...receipt });
+      } catch (err) {
+        if (err instanceof DocumentError) return void res.status(err.status).json({ ok: false, error: err.message });
+        res.status(500).json({ ok: false, error: "the document could not be saved" });
+      }
+    },
+  );
+
   // Chat routes start a paid model turn, so they answer 404 unless explicitly enabled.
   router.use(["/chat", "/chat/:id"], (_req, res, next) => (deps.chatEnabled ? next() : void res.sendStatus(404)));
 
@@ -184,7 +221,7 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
       res.status(502).json({ ok: false, error: "Discord could not be read just now." });
     }
   });
-  router.post("/chat", (req, res) => {
+  router.post("/chat", express.json({ limit: BRIDGE_BODY_LIMIT }), (req, res) => {
     const r = deps.chat.submit((req.body as { text?: unknown } | undefined)?.text);
     if (!r.ok) return void res.status(r.status).json({ ok: false, error: r.error });
     res.status(202).json({ ok: true, id: r.id });
@@ -283,7 +320,7 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
       return false;
     }
   };
-  router.post("/commission", (req, res) => {
+  router.post("/commission", express.json({ limit: BRIDGE_BODY_LIMIT }), (req, res) => {
     const allow = deps.commissionAllow ?? {};
     if (!deps.commission || !deps.commissionBrief || Object.keys(allow).length === 0) return void res.sendStatus(404);
     const id = String((req.body as { briefId?: unknown } | undefined)?.briefId ?? "").trim().toLowerCase();
@@ -309,7 +346,7 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
       res.status(409).json({ ok: false, error: err instanceof Error ? err.message : "Commission refused." });
     }
   });
-  router.post("/retry", (req, res) => {
+  router.post("/retry", express.json({ limit: BRIDGE_BODY_LIMIT }), (req, res) => {
     const allow = deps.retryAllow ?? [];
     if (!deps.retry || allow.length === 0) return void res.sendStatus(404);
     const id = String((req.body as { id?: unknown } | undefined)?.id ?? "").trim().toLowerCase();
