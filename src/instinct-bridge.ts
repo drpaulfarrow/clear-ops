@@ -169,11 +169,13 @@ export function instinctRouter(deps: InstinctBridgeDeps): ExpressRouter {
       if (!deps.documents) return void res.sendStatus(404);
       documentBodyParser(deps.documents.maxBytes)(req, res, next);
     },
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       const documents = deps.documents;
       if (!documents) return void res.sendStatus(404);
       try {
-        const receipt = documents.ingest(req.body);
+        // Awaiting this is also what keeps a PDF's text being read out (off the main thread, so the
+        // service keeps answering) from delaying the receipt past the bytes being on disk.
+        const receipt = await documents.ingest(req.body);
         res.set("Cache-Control", "no-store").status(201).json({ ok: true, ...receipt });
       } catch (err) {
         if (err instanceof DocumentError) return void res.status(err.status).json({ ok: false, error: err.message });

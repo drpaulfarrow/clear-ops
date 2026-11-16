@@ -274,6 +274,31 @@ test("uploads stay private: owner-only, outside every git checkout, sanitised, s
   assert.match(src("agents.ts"), /prompt: `\$\{spec\.prompt\}\\n\\n\$\{UPLOADS_RULE\}`/, "every worker is told uploads are untrusted personal data");
 });
 
+/* ---------- Reading a PDF (extends the rules above, weakens none) ---------- */
+
+test("a PDF is read off the main thread, as the unprivileged user, with a timeout and no secret of the service's", () => {
+  const up = src("uploads.ts");
+  assert.doesNotMatch(up, /child_process|\beval\(|new Function\(/, "nothing in an upload is ever executed");
+  assert.match(up, /await extractPdfText\(/, "the upload path asks the extractor, so the read is not on the message path");
+  assert.match(up, /the text was read but could not be saved beside the PDF/, "a text that cannot be written is said plainly, never dropped silently");
+
+  const x = src("pdf-extract.ts");
+  assert.match(x, /new Worker\(/, "this service's own reader runs in a thread of its own");
+  assert.match(x, /execArgv: process\.execArgv/, "the worker is started with the loader this process was started with");
+  assert.match(x, /process\.getuid\?\.\(\) === 0 && !who/, "as root the parser runs as the designer user or not at all");
+  assert.match(x, /uid: who\.uid, gid: who\.gid/, "the parser drops to the unprivileged user");
+  assert.match(x, /const timer = setTimeout\([\s\S]{0,200}?failed: "timeout"/, "a read that runs long is stopped, not waited on");
+  assert.match(x, /stoppedReason\(timeoutMs\)/, "and a read that was stopped is said to cover only part of the file");
+  assert.match(x, /env: \{ PATH: process\.env\.PATH/, "the parser is given an environment of its own");
+  assert.doesNotMatch(x, /config\./, "the extractor names no secret of this service at all");
+  assert.match(x, /PDF_MAX_BYTES/, "a file above the size cap is refused rather than read");
+  assert.match(x, /source: "pdftotext"/, "which reader produced the text is recorded with it");
+
+  const w = src("pdf-worker.ts");
+  assert.doesNotMatch(w, /readFile|writeFile|createWriteStream|fetch\(/, "the reader's own thread touches no file and no network");
+  assert.match(w, /import\(source \? "\.\/pdf\.ts" : "\.\/pdf\.js"\)/, "the reader is imported under the name this worker itself was loaded with");
+});
+
 /* ---------- Voice notes (extends the rules above, weakens none) ---------- */
 
 test("a voice note is transcribed only after the allowlist check, marked as a transcript, and its key never leaves the service", async () => {

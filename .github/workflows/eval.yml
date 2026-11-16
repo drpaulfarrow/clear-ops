@@ -1,8 +1,10 @@
 # The chief's eval suite (scripts/eval.ts): ordinary requests sent to the real chief on the models
-# fly.toml sets, with the workers stubbed, so it costs pennies. It runs on pull requests that change
-# how the chief thinks or which models it uses, and by hand from the Actions tab, where a model can be
-# overridden to compare one against another before switching. It does not block a merge until Paul
-# makes "eval / chief" a required check in the branch protection settings.
+# fly.toml sets, with the workers stubbed, so it costs pennies. It needs live keys (OpenRouter, Brave,
+# Exa), so it never runs a branch's own code: branch authors here are agents, and a pull request
+# trigger would hand those keys to unreviewed code that could edit this very script. It runs on main
+# after a merge (code Paul has merged), and by hand from the Actions tab, where a model can be
+# overridden to compare one against another before switching. The job refuses any ref but main, so a
+# hand-started run on a branch (which an agent with an Actions token could start) never gets the keys.
 name: eval
 on:
   workflow_dispatch:
@@ -14,7 +16,8 @@ on:
         description: "Times to run each case"
         required: false
         default: "1"
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - "src/orchestrator.ts"
       - "src/agents.ts"
@@ -25,6 +28,7 @@ on:
       - "scripts/eval.ts"
 jobs:
   chief:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
