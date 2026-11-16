@@ -5,6 +5,7 @@
  *
  * Nothing else changes: tools, permissions, prompts and caps are the same whichever provider answers.
  */
+import { BANK_SECRETS } from "./bank.js";
 import { config } from "./config.js";
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
@@ -128,10 +129,16 @@ export const DIRECT_STRIPPED = [
   "OPENROUTER_API_KEY",
   "OPENROUTER_DEVICE_API_KEY",
   "OPENROUTER_BRIDGE_API_KEY",
+  // A run pinned to Anthropic reaches nowhere near a bank either: the connector's keys go with it.
+  ...BANK_SECRETS,
 ];
 
-/** Variables removed from the worker environment in OpenRouter mode (llmEnv supplies what is needed). */
-export const LLM_STRIPPED = ["OPENROUTER_API_KEY", "OPENROUTER_DEVICE_API_KEY", "OPENROUTER_BRIDGE_API_KEY", "OPENROUTER_PRICES"];
+/**
+ * Variables removed from the worker environment in OpenRouter mode (llmEnv supplies what is needed).
+ * The bank connector's own secrets are in here as well as in the unconditional strip in src/agents.ts:
+ * no worker, on either provider, has any business holding a key that can read a bank account.
+ */
+export const LLM_STRIPPED = ["OPENROUTER_API_KEY", "OPENROUTER_DEVICE_API_KEY", "OPENROUTER_BRIDGE_API_KEY", "OPENROUTER_PRICES", ...BANK_SECRETS];
 
 /** Price rows for the models in use, for the SDK's managed modelPricing setting. */
 export function modelPrices(): Record<string, Price> {

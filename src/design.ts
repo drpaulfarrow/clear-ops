@@ -14,6 +14,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { withoutBankSecrets } from "./bank.js";
+import { gitEnv } from "./bootstrap.js";
 import { config } from "./config.js";
 
 const exec = promisify(execFile);
@@ -71,7 +73,8 @@ let identity: Promise<Identity> | undefined;
 /** Looked up once. Before anything runs as the designer, the data and repository folders are locked down. */
 export function designIdentity(): Promise<Identity> {
   identity ??= (async () => {
-    const id = async (flag: string) => Number((await exec("id", [flag, config.design.user], { timeout: 5000 })).stdout.trim());
+    // `id` needs a PATH and nothing else of this service's (see the note on git below).
+    const id = async (flag: string) => Number((await exec("id", [flag, config.design.user], { timeout: 5000, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } })).stdout.trim());
     const designer = await Promise.all([id("-u"), id("-g")]).then(([uid, gid]) => ({ uid, gid })).catch(() => undefined);
     const current = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
     const who = chooseIdentity(designer && Number.isInteger(designer.uid) && Number.isInteger(designer.gid) ? designer : undefined, current);
@@ -454,8 +457,11 @@ export async function previewBranch(branch: string): Promise<Served> {
   const app = path.join(tmp, "app");
   const remote = `refs/remotes/origin/${branch}`;
   try {
-    await exec("git", ["-C", config.repoDir, "fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`], { timeout: 120_000 });
-    await exec("git", ["-C", config.repoDir, "archive", "--format=tar", "-o", tar, remote], { timeout: 60_000 });
+    // Git runs with the service's own PATH, HOME and locale and nothing else (src/bootstrap.ts
+    // `gitEnv`): a checkout can carry a repository configuration that names a program for git to run,
+    // and this one holds the work of every worker, so it is given no secret of this service's to read.
+    await exec("git", ["-C", config.repoDir, "fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`], { timeout: 120_000, env: gitEnv() });
+    await exec("git", ["-C", config.repoDir, "archive", "--format=tar", "-o", tar, remote], { timeout: 60_000, env: gitEnv() });
     await unpackAsDesigner(tar, app, who);
   } catch (err) {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -707,7 +713,12 @@ export const waitForProductDeploy: DeployWait = async (since) => {
   if (!repo) return sleep(10 * 60_000);
   while (Date.now() < deadline) {
     try {
-      const { stdout } = await exec("gh", ["run", "list", "--repo", repo, "--branch", "main", "--event", "push", "--limit", "5", "--json", "status,createdAt"], { timeout: 30_000 });
+      // One of only two subprocesses this service starts that keeps the service's own environment (the
+      // other is the founder's approved shell command, src/jobs.ts `run_command`): gh reads the service's
+      // GitHub credential from it to see the product's runs. The bank connector's keys are taken out
+      // (`withoutBankSecrets`, src/bank.ts), as they are out of every other subprocess here, and nothing
+      // a page or a repository supplies reaches this command.
+      const { stdout } = await exec("gh", ["run", "list", "--repo", repo, "--branch", "main", "--event", "push", "--limit", "5", "--json", "status,createdAt"], { timeout: 30_000, env: withoutBankSecrets() });
       const runs = (JSON.parse(stdout) as Array<{ status: string; createdAt: string }>).filter((r) => Date.parse(r.createdAt) >= since.getTime() - 5 * 60_000);
       if (runs.length && runs.every((r) => r.status === "completed")) return sleep(60_000);
     } catch {

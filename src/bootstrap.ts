@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { githubAuth, healthLine, healthProblem, type AuthHealth, type AuthMode, type GithubAuth } from "./github-auth.js";
@@ -7,6 +8,24 @@ import { explainCloneFailure, perRepoTokenFix, redact, repoRegistry, type Manage
 import { credentialLabel, repoCredentialLabel, repoTokens, repoTokenFile, writeRepoTokenFile, type CredentialKind } from "./repo-tokens.js";
 
 const exec = promisify(execFile);
+
+/**
+ * The environment a git subprocess runs with: the service's own PATH, HOME and locale, and nothing else.
+ * The service's process holds every secret it has (the vault key, the Google tokens, the channel tokens,
+ * the GitHub App key and now the bank connector's keys), and a repository being cloned or fast-forwarded
+ * has no business with any of them. Git does not need them: the repository credential is read from its
+ * owner-only file at each operation by the configured credential helper, exactly as it is when the App is
+ * in use. This is the same whitelist the browser gets (src/browse.ts, src/design.ts) and the installer
+ * gets (src/setup.ts `installerEnv`).
+ */
+export const gitEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => ({
+  PATH: env.PATH ?? "/usr/bin:/bin",
+  HOME: env.HOME ?? os.homedir(),
+  LANG: env.LANG ?? "C",
+});
+
+/** git, always with that scrubbed environment. Every call in this file goes through here. */
+const git = (args: string[], opts: { cwd?: string } = {}) => exec("git", args, { ...opts, env: gitEnv() });
 
 /** A managed repository that could not be prepared, and what Paul must change (plain English, no token). */
 export interface RepoProblem {
@@ -46,7 +65,7 @@ export async function prepareRepo(slug: string, dir: string, tokenArg?: string, 
     log(`Cloning ${slug} into ${dir}`);
     fs.mkdirSync(path.dirname(dir), { recursive: true });
     try {
-      await exec("git", ["clone", "--quiet", `https://x-access-token:${token}@github.com/${slug}`, dir]);
+      await git(["clone", "--quiet", `https://x-access-token:${token}@github.com/${slug}`, dir]);
     } catch (err) {
       // git's own message can carry the clone URL, token included.
       const stderr = (err as { stderr?: string }).stderr ?? "";
@@ -54,15 +73,15 @@ export async function prepareRepo(slug: string, dir: string, tokenArg?: string, 
     }
   }
   try {
-    await exec("git", ["config", "user.name", "Clear Exchange agents"], { cwd: dir });
-    await exec("git", ["config", "user.email", "agents@clear.exchange"], { cwd: dir });
+    await git(["config", "user.name", "Clear Exchange agents"], { cwd: dir });
+    await git(["config", "user.email", "agents@clear.exchange"], { cwd: dir });
     if (token) {
       // Keep the token out of the stored remote URL; supply it through a credential helper instead.
       const url = `https://github.com/${slug}`;
-      await exec("git", ["remote", "set-url", "origin", url], { cwd: dir }).catch(() => exec("git", ["remote", "add", "origin", url], { cwd: dir }));
+      await git(["remote", "set-url", "origin", url], { cwd: dir }).catch(() => git(["remote", "add", "origin", url], { cwd: dir }));
       const q = (s: string) => s.replace(/'/g, `'\\''`);
       const password = own && alias ? `$(cat '${q(repoTokenFile(alias))}')` : useFile ? `$(cat '${q(auth.tokenFile)}')` : token;
-      await exec("git", ["config", "credential.helper", `!f() { echo username=x-access-token; echo password=${password}; }; f`], { cwd: dir });
+      await git(["config", "credential.helper", `!f() { echo username=x-access-token; echo password=${password}; }; f`], { cwd: dir });
     }
   } catch (err) {
     log(`Could not configure git in ${dir}: ${redact(err instanceof Error ? err.message : String(err), token)}`);
@@ -78,15 +97,15 @@ export async function prepareRepo(slug: string, dir: string, tokenArg?: string, 
  */
 export async function refreshCheckout(dir: string, log: (m: string) => void = console.log): Promise<"updated" | "current" | "skipped"> {
   try {
-    await exec("git", ["fetch", "--quiet", "origin"], { cwd: dir });
-    const head = (await exec("git", ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { cwd: dir }).catch(() => ({ stdout: "origin/main" }))).stdout.trim();
+    await git(["fetch", "--quiet", "origin"], { cwd: dir });
+    const head = (await git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { cwd: dir }).catch(() => ({ stdout: "origin/main" }))).stdout.trim();
     const def = head.replace(/^origin\//, "");
-    const branch = (await exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir })).stdout.trim();
-    const dirty = (await exec("git", ["status", "--porcelain"], { cwd: dir })).stdout.trim();
+    const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir })).stdout.trim();
+    const dirty = (await git(["status", "--porcelain"], { cwd: dir })).stdout.trim();
     if (branch !== def || dirty) return "skipped";
-    const before = (await exec("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
-    await exec("git", ["merge", "--ff-only", "--quiet", `origin/${def}`], { cwd: dir });
-    const after = (await exec("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+    const before = (await git(["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+    await git(["merge", "--ff-only", "--quiet", `origin/${def}`], { cwd: dir });
+    const after = (await git(["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
     if (before === after) return "current";
     log(`Updated ${dir} to the latest ${def}.`);
     return "updated";

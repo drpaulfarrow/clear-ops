@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { BANK_SECRETS } from "./bank.js";
 import { config } from "./config.js";
 import { perRepoTokenFix, repoTokens } from "./repo-tokens.js";
 
@@ -313,8 +314,9 @@ export function healthProblem(h: AuthHealth): string | undefined {
 /** The one instance the service uses. Tests build their own. */
 export const githubAuth = new GithubAuth();
 
-/** Environment variables that must never reach a worker. */
-const WORKER_STRIPPED = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GODADDY_API_KEY", "GODADDY_API_SECRET", "GODADDY_API_TOKEN"];
+/** Environment variables that must never reach a worker. The bank connector's secrets are in this list
+ * as well as in src/agents.ts: two independent places, so one edit cannot let them through. */
+const WORKER_STRIPPED = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GODADDY_API_KEY", "GODADDY_API_SECRET", "GODADDY_API_TOKEN", ...BANK_SECRETS];
 
 /** Directory of the `gh` wrapper that reads the current token from the token file, so long jobs never hold a stale one. */
 export function wrapperDir(): string {

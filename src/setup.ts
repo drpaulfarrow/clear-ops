@@ -314,7 +314,9 @@ async function npmCi(dir: string, cacheDir: string): Promise<void> {
 
 /** The default link: hard links (no disk, no copy), falling back to a real copy when that is refused. */
 async function hardLink(from: string, to: string, copy: boolean): Promise<void> {
-  await exec("cp", copy ? ["-a", from, to] : ["-al", from, to], { timeout: 10 * 60_000 });
+  // `cp` is given a PATH and nothing else of this service's, exactly as the install above is given none
+  // (see `installerEnv`): linking a tree of dependencies needs no secret of ours.
+  await exec("cp", copy ? ["-a", from, to] : ["-al", from, to], { timeout: 10 * 60_000, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
 }
 
 /** What a store build did: ready, no room to write it, an install that failed, or one removed again. */

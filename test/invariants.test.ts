@@ -985,3 +985,214 @@ test("the web app inspector is signed out and read-only by construction", async 
   // And it never sees a request's headers, cookies or body.
   assert.doesNotMatch(inspect, /req\.headers|\.postData|request\.postData/, "headers and bodies are never read");
 });
+
+/* ---------- The bank connector: read-only, sealed, and never in a worker's reach ----------
+ *
+ * Added with the connector (15 Nov 2026). These extend the rules above and weaken none of them: the
+ * bank reads live behind the owner's own sign-in, no payment operation exists at all, the signing key
+ * and the record's key reach no worker or subprocess, no model and no worker tool can read a bank, and
+ * nothing but the sealed connection is kept. A test in test/bank-api.test.ts, test/bank-store.test.ts,
+ * test/bank-connect.test.ts and test/bank-page.test.ts covers the behaviour; this file covers the shape.
+ */
+
+test("the bank connector's operations are the reads plus one session delete, and no payment exists", async () => {
+  const api = src("bank-api.ts");
+  const { BANK_OPERATIONS, routeOf, paymentShapedStatics, PAYMENT_SHAPED } = await import("../src/bank-api.js");
+  const operations = Object.values(BANK_OPERATIONS).map((r) => `${r.method} ${r.path}`).sort();
+  assert.deepEqual(operations, [
+    "DELETE /sessions/{session}",
+    "GET /accounts/{account}/balances",
+    "GET /accounts/{account}/details",
+    "GET /accounts/{account}/transactions",
+    "GET /aspsps",
+    "GET /sessions/{session}",
+    "POST /auth",
+    "POST /sessions",
+  ], "the whole allowlist, and nothing else, ever");
+  // The two writes are the session's own lifecycle: starting an authorisation and exchanging a code.
+  assert.equal(operations.filter((o) => o.startsWith("POST")).length, 2);
+  for (const line of ["POST /payments", "POST /accounts/a/payments", "POST /bulk-payments", "POST /periodic-payments", "POST /domestic-payments", "POST /transfer", "POST /beneficiaries", "POST /funds-confirmations", "POST /standing-orders", "POST /pisp/payments", "PUT /accounts/a/payments"]) {
+    const [method, path] = line.split(" ");
+    assert.equal(routeOf(method, path), undefined, `${line} must never resolve to an operation`);
+  }
+  assert.ok(PAYMENT_SHAPED.test("payments"), "payment-shaped words are refused outright");
+  assert.ok(!paymentShapedStatics(BANK_OPERATIONS["account-balances"].path.split("/").filter(Boolean)), "and a read is not caught by it");
+  assert.match(api, /if \(routeOf\(route\.method, path\) !== op\)/, "every request is re-checked against the allowlist before it leaves");
+  assert.match(api, /url\.protocol !== "https:" \|\| url\.host !== this\.s\.host/, "and only the provider's own https address is ever called");
+  assert.match(api, /redirect: "error"/, "a redirect is an error, not something to follow");
+  assert.match(api, /createSign\("RSA-SHA256"\)/, "the application token is RS256");
+});
+
+test("every bank secret is stripped from every worker, and from every subprocess this service starts", async () => {
+  const { BANK_SECRETS } = await import("../src/bank.js");
+  const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
+  const { workerGithubEnv } = await import("../src/github-auth.js");
+  const { installerEnv } = await import("../src/setup.js");
+  const { gitEnv } = await import("../src/bootstrap.js");
+  assert.deepEqual([...BANK_SECRETS].sort(), ["BANK_APPLICATION_ID", "BANK_CONNECTION_KEY", "BANK_JWT_PRIVATE_KEY"]);
+
+  // Every worker kind's environment: the delete is unconditional, before any provider branch.
+  const agents = src("agents.ts");
+  assert.match(agents, /for \(const k of BANK_SECRETS\) delete env\[k\]/, "every worker's environment drops the bank secrets");
+  const deleteAt = agents.indexOf("for (const k of BANK_SECRETS) delete env[k]");
+  assert.ok(deleteAt > -1 && deleteAt < agents.indexOf("if (direct)"), "and it happens whatever the provider is");
+  // Both provider lists, and the GitHub wrapper's own list.
+  for (const [file, list] of [["llm.ts", "DIRECT_STRIPPED"], ["llm.ts", "LLM_STRIPPED"], ["github-auth.ts", "WORKER_STRIPPED"]] as const) {
+    const text = src(file);
+    // Either an exported list or a module-private one: both are read by the same call sites.
+    const at = Math.max(text.indexOf(`export const ${list}`), text.indexOf(`const ${list} =`));
+    assert.ok(at > -1, `${list} must stay declared in ${file}`);
+    assert.match(text.slice(at, at + 900), /\.\.\.BANK_SECRETS/, `${list} must include the bank secrets`);
+  }
+
+  // At runtime: a token-minting path, an install and a git call all come back without them.
+  const populated = { PATH: "/bin", HOME: "/root", BANK_APPLICATION_ID: "app", BANK_JWT_PRIVATE_KEY: "key", BANK_CONNECTION_KEY: "connection key long enough" } as NodeJS.ProcessEnv;
+  const gh = await workerGithubEnv(populated, { mode: () => "token", refreshFile: async () => false } as never);
+  for (const k of BANK_SECRETS) assert.equal(gh[k], undefined, `workerGithubEnv must drop ${k}`);
+  const install = installerEnv(populated, "/tmp/cache");
+  for (const k of BANK_SECRETS) assert.equal(install[k], undefined, `an installer must not be given ${k}`);
+  const git = gitEnv(populated);
+  for (const k of BANK_SECRETS) assert.equal(git[k], undefined, `a git call must not be given ${k}`);
+  assert.deepEqual(Object.keys(git).sort(), ["HOME", "LANG", "PATH"], "git gets npm's own needs and nothing of the service's");
+
+  // The browsers the service spawns are given a literal environment, never the service's own.
+  for (const file of ["browse.ts", "design.ts"]) {
+    const text = src(file);
+    assert.doesNotMatch(text, /env: \{\s*\.\.\.process\.env/, `${file} must not hand a browser the service's environment`);
+  }
+
+  // Every subprocess this service starts, read out of the source rather than trusted to a list here: a
+  // call site that is added later has to say what environment it gets, and the only two that keep the
+  // service's own environment (the founder's approved shell command, which deploys with FLY_API_TOKEN,
+  // and the gh call that watches the product's deploy) must take the bank secrets out of it first.
+  const dir = new URL("../src/", import.meta.url);
+  const starts = /from "node:child_process"/;
+  const calls = /(?<![\w.$])(exec|execFile|spawn)\(/g;
+  const callers = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".ts"))
+    .filter((f) => starts.test(fs.readFileSync(new URL(f, dir), "utf8")))
+    .sort();
+  // The parentheses' contents, so `env:` is judged on this call's own options and not on the next one's.
+  const argsAt = (text: string, open: number): string => {
+    let depth = 0;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === "(") depth++;
+      else if (text[i] === ")" && --depth === 0) return text.slice(open + 1, i);
+    }
+    return "";
+  };
+  const unguarded: string[] = [];
+  const serviceEnv: string[] = [];
+  let sites = 0;
+  for (const file of callers) {
+    const text = fs.readFileSync(new URL(file, dir), "utf8");
+    for (const m of text.matchAll(calls)) {
+      const args = argsAt(text, m.index + m[0].length - 1);
+      const where = `${file}:${text.slice(0, m.index).split("\n").length}`;
+      sites++;
+      if (!/\benv\s*:/.test(args)) unguarded.push(where);
+      if (/env\s*:\s*(process\.env|withoutBankSecrets\(\))/.test(args)) serviceEnv.push(file);
+    }
+  }
+  assert.ok(callers.length >= 5 && sites >= 12, `the scan must find the subprocesses (found ${callers.length} files, ${sites} calls)`);
+  assert.deepEqual(unguarded, [], `every subprocess must be given an environment of its own: ${unguarded.join(", ")}`);
+  assert.deepEqual(serviceEnv.sort(), ["design.ts", "jobs.ts"], "only the founder's own approved command and the deploy watch keep the service's environment, both with the bank keys taken out");
+  for (const file of callers) {
+    const text = fs.readFileSync(new URL(file, dir), "utf8");
+    assert.doesNotMatch(text, /env\s*:\s*\{\s*\.\.\.process\.env/, `${file} must not hand a subprocess the service's environment`);
+  }
+  // No worker kind is given a bank tool, and no worker prompt mentions one.
+  for (const kind of JOB_KINDS) {
+    const spec = workerSpec(kind);
+    assert.equal(JSON.stringify(spec.allowedTools).toLowerCase().includes("bank"), false, `${kind} must have no bank tool`);
+    assert.doesNotMatch(spec.prompt, /BANK_APPLICATION_ID|BANK_JWT_PRIVATE_KEY|BANK_CONNECTION_KEY/, `${kind} must not be told a bank secret's name`);
+  }
+});
+
+test("no model can read a bank: the bank modules reach no model, no worker and no job store", () => {
+  const files = ["bank.ts", "bank-api.ts", "bank-gate.ts", "bank-page.ts", "bank-router.ts"];
+  for (const file of files) {
+    const text = src(file);
+    for (const forbidden of ["agents.js", "orchestrator.js", "llm.js", "search.js", "retrieval.js", "ea.js", "google.js", "uploads.js", "browse.js"]) {
+      assert.doesNotMatch(text, new RegExp(`from "\\./${forbidden}"`), `${file} must not reach ${forbidden}`);
+    }
+    assert.doesNotMatch(text, /@anthropic-ai|openrouter|OpenRouter/i, `${file} must call no model`);
+    assert.doesNotMatch(text, /store\.(createJob|writeOutput|addNote|setSetting|recordRetrievalTurn|updateJob|createAction)/, `${file} must not write to the job store`);
+  }
+  // The gate reads the store only for the CSRF token's own key, and takes it as a type.
+  assert.match(src("bank-gate.ts"), /import type \{ Store \} from "\.\/store\.js"/, "the store reaches the gate as a type, and nothing else");
+  assert.match(src("bank-gate.ts"), /this\.o\.store\.settings\(\)/, "the one thing it reads is the page's session key");
+  // The page fetches nothing: no script, no stylesheet link, no font, no image.
+  assert.doesNotMatch(src("bank-page.ts"), /<script|<link|<img|@import|url\(/, "the bank page loads nothing from anywhere");
+  assert.match(src("bank-page.ts"), /from "\.\/page-style\.js"/, "it is built from the house style, which escapes every word");
+});
+
+test("the bank page is behind the owner's sign-in, and the bank's own redirect is the only exception", () => {
+  const index = src("index.ts");
+  assert.match(index, /const GATED_PATHS = \[REPORTS_PATH, BOARD_PATH, BANK_PATH\]/, "the bank page is a gated path");
+  assert.match(index, /under\(req\.path, BANK_CALLBACK_PATH\)/, "and the callback alone is exempt");
+  assert.match(index, /app\.use\(BANK_PATH, bankRouter\(/, "the bank routes are mounted under the bank path, and nowhere else");
+  // The callback route itself: no session, and nothing but parking a code.
+  const router = src("bank-router.ts");
+  const callback = router.slice(router.indexOf("router.get(rel(BANK_CALLBACK_PATH)"));
+  assert.match(callback, /gate\.acceptCallback\(/, "the callback asks the gate to park a code");
+  for (const forbidden of ["gate.complete", "gate.start", "gate.choose", "gate.balances", "gate.transactions", "gate.disconnect", "createSession"]) {
+    assert.equal(callback.includes(forbidden), false, `the callback must not ${forbidden}`);
+  }
+  assert.equal(callback.includes("console."), false, "and it logs nothing of what the bank sent");
+  // Every other route asks for the owner's session first, and every changing one for its CSRF token.
+  const changes = [...router.matchAll(/change\((BANK_[A-Z_]+_PATH)/g)].map((m) => m[1]);
+  assert.ok(changes.length >= 8, "the changing routes are registered");
+  assert.equal(new Set(changes).size, changes.length, "and each of them exactly once");
+  // The only two GETs are the page and the bank's own redirect back: nothing else here can be reached
+  // by a link, so no state changes on a GET.
+  assert.equal([...router.matchAll(/router\.get\(/g)].length, 2, "the page and the callback, and no other GET");
+  assert.match(router, /const guarded = async \(req: express\.Request, res: express\.Response\)/, "a POST's guard");
+  assert.match(router, /if \(!gate\.csrfOk\(one\(body\.csrf\), fingerprint\)\)/, "and the CSRF check is inside it");
+  for (const forbidden of ["router.put", "router.delete", "router.patch"]) assert.equal(router.includes(forbidden), false, `no ${forbidden} route exists`);
+  // The bank's own page is reached by following a link, never by redirecting the form that started the
+  // attempt: a browser applies `form-action` to a form submission's redirects too, so a 303 to the bank
+  // (whose own domain the policy cannot name in advance) is aborted by the browser and the owner never
+  // reaches his bank. The address is drawn escaped, as a link, by src/bank-page.ts.
+  assert.match(router, /form-action 'self'/, "a form may post only to this service");
+  assert.doesNotMatch(router, /res\.redirect\(303, [^)]*url/, "nothing here redirects the browser anywhere but the sign-in page");
+  assert.match(router, /await gate\.start\(one\(body\.action\), fingerprint\)/, "the start route still uses the action up");
+  const page = src("bank-page.ts");
+  assert.match(page, /a class="go" href="\$\{escapeHtml\(/, "the bank's address is drawn escaped, as a link");
+  assert.match(page, /Continue to \$\{escapeHtml\(bank\)\}/, "and it says where it goes");
+  assert.match(page, /!view\.waiting\?\.parked/, "the link is offered only while the bank has not sent him back");
+});
+
+test("the stored bank connection is sealed under its own key, with no plaintext path and no fallback", () => {
+  const bank = src("bank.ts");
+  assert.match(bank, /createCipheriv\("aes-256-gcm", key, iv\)/, "AES-256-GCM");
+  assert.match(bank, /cipher\.setAAD\(aad\)/, "the record's own name is authenticated with it");
+  assert.match(bank, /if \(!secret \|\| secret\.length < 16\) throw new BankError/, "a missing or short key is an error, not a weaker key");
+  assert.doesNotMatch(bank, /VAULT_KEY|pageSessionKey|GOOGLE_/, "the record is sealed under no other secret of this service");
+  // And the key itself comes from its own argument alone: no second source, no `??`, no `||`, no env.
+  const keyFn = bank.slice(bank.indexOf("export function connectionKey"), bank.indexOf("/** AES-256-GCM"));
+  assert.ok(keyFn.length > 100, "the key's own function was found");
+  assert.doesNotMatch(keyFn, /\?\?|process\.env/, "there is nothing else to fall back to when it is missing");
+  assert.match(bank, /writeFileSync\(tmp, sealed, \{ mode: 0o600 \}\)/, "the file is owner-only");
+  assert.match(bank, /kind: "unreadable"/, "a record that cannot be read is a state, never a partial read");
+  // And the record itself holds no balance and no transaction: the fields are the connection's alone.
+  const iface = bank.slice(bank.indexOf("export interface BankConnection {"), bank.indexOf("export type BankStoreState"));
+  for (const forbidden of ["balance", "transaction", "amount", "creditor", "iban", "accountNumber"]) {
+    assert.doesNotMatch(iface, new RegExp(`\\b${forbidden}`, "i"), `the stored connection has no ${forbidden}`);
+  }
+  assert.match(iface, /accounts: BankAccountSelection\[\]/, "only keyed handles and masked labels");
+  assert.match(bank, /createHmac\("sha256", key\)\.update\(`clear-ops-bank-account-v1:\$\{uid\}`\)/, "an account is a keyed handle");
+  assert.match(bank, /id\.slice\(-4\)/, "and a label keeps only the last four characters");
+});
+
+test("the banking sites the browser may never touch are still refused, unchanged by this connector", () => {
+  const policy = src("site-policy.ts");
+  assert.match(policy, /hsbc\.co\.uk/, "HSBC is still in NEVER_SITES");
+  assert.match(policy, /banks, payments, investing and crypto are never automated/);
+  assert.doesNotMatch(policy, /bank\.js|bank-api\.js|bank-gate\.js/, "the connector reaches no browser site policy");
+  // The connector has no browser at all: it is an API client and a page.
+  for (const file of ["bank.ts", "bank-api.ts", "bank-gate.ts", "bank-page.ts", "bank-router.ts"]) {
+    assert.doesNotMatch(src(file), /playwright|BrowseSession|chromium/i, `${file} must have no browser`);
+  }
+});

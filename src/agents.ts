@@ -2,6 +2,7 @@ import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMes
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
+import { BANK_SECRETS } from "./bank.js";
 import { githubAuth, workerGithubEnv } from "./github-auth.js";
 import { repoCredentialLabel } from "./repo-tokens.js";
 import { SEARCH_SECRETS } from "./search.js";
@@ -93,6 +94,11 @@ async function workerEnv(direct = false, cwd?: string): Promise<NodeJS.ProcessEn
   for (const k of SEARCH_SECRETS) delete env[k];
   // The transcription key is used by the service's own call to the transcription provider, never by a worker.
   for (const k of TRANSCRIBE_SECRETS) delete env[k];
+  // The bank connector's secrets are stripped whatever the provider is: no worker of any kind ever reads
+  // a bank account, so none of them gets the application id, the signing key or the key the connection
+  // record is sealed under. (They are in both LLM_STRIPPED and DIRECT_STRIPPED as well; this line is the
+  // one that does not depend on which provider is in use.)
+  for (const k of BANK_SECRETS) delete env[k];
   // Pinned to Anthropic: drop any gateway settings in the service's own environment (a base URL or
   // model mapping set by hand in the Fly secrets), so this run really goes to api.anthropic.com.
   if (direct) for (const k of DIRECT_STRIPPED) delete env[k];

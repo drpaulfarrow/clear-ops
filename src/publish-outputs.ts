@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { gitEnv } from "./bootstrap.js";
 import { config } from "./config.js";
 import { githubAuth } from "./github-auth.js";
 import { londonYmd } from "./london.js";
@@ -89,7 +90,11 @@ export interface PublisherOptions {
 
 const defaultGit = async (dir: string, args: string[]): Promise<string> => {
   try {
-    return (await exec("git", args, { cwd: dir, maxBuffer: 20 * 1024 * 1024 })).stdout;
+    // Git runs with the service's own PATH, HOME and locale and nothing else (src/bootstrap.ts
+    // `gitEnv`): the mirror's checkout is a repository like any other, and its own configuration can
+    // name a program for git to run, so it is handed no secret of this service's to read. The
+    // credential comes from the owner-only token file the credential helper reads, as it always did.
+    return (await exec("git", args, { cwd: dir, maxBuffer: 20 * 1024 * 1024, env: gitEnv() })).stdout;
   } catch (err) {
     const e = err as { stderr?: string; message?: string };
     throw new Error(redact(e.stderr || e.message || String(err)).slice(0, 500));

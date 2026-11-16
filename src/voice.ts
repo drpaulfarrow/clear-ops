@@ -375,7 +375,9 @@ export async function speak(text: string, fetchImpl: typeof fetch = fetch, signa
 /** MP3 to Discord's 48 kHz stereo 16-bit PCM, with ffmpeg. */
 export function decodeToDiscord(mp3: Buffer, ffmpeg = "ffmpeg"): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const p = spawn(ffmpeg, ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { stdio: ["pipe", "pipe", "pipe"] });
+    // ffmpeg is a decoder reading audio on its own standard input: it needs a PATH and nothing else of
+    // this service's, so it is given no secret of ours to read.
+    const p = spawn(ffmpeg, ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
     const out: Buffer[] = [];
     let err = "";
     p.stdout.on("data", (d: Buffer) => out.push(d));

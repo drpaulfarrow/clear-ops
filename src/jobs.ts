@@ -27,7 +27,8 @@ import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
-import { jobCredentialNote } from "./bootstrap.js";
+import { gitEnv, jobCredentialNote } from "./bootstrap.js";
+import { withoutBankSecrets } from "./bank.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
 
@@ -1623,9 +1624,12 @@ export function savedWorkNote(saved: SavedWork): string {
  */
 export async function stashWork(dir: string, message: string): Promise<SavedWork | undefined> {
   if (!fs.existsSync(path.join(dir, ".git"))) return undefined;
-  // A stash is a commit: give it an identity in case the checkout has none configured.
+  // A stash is a commit: give it an identity in case the checkout has none configured. Git runs with
+  // the service's own PATH, HOME and locale and nothing else (src/bootstrap.ts `gitEnv`): this checkout
+  // may hold anything a worker cloned, and a repository's own configuration can name a program for git
+  // to run, so it is given no secret of this service's to read.
   const git = async (...args: string[]) =>
-    (await exec("git", ["-C", dir, "-c", "user.name=clear-ops", "-c", "user.email=clear-ops@users.noreply.github.com", ...args], { timeout: 60_000 })).stdout.trim();
+    (await exec("git", ["-C", dir, "-c", "user.name=clear-ops", "-c", "user.email=clear-ops@users.noreply.github.com", ...args], { timeout: 60_000, env: gitEnv() })).stdout.trim();
   const branch = await git("rev-parse", "--abbrev-ref", "HEAD").catch(() => undefined);
   const dirty = await git("status", "--porcelain");
   if (!dirty) return { dir, branch };
@@ -1650,11 +1654,19 @@ export type ActionExecutor = (action: PendingAction) => Promise<string>;
  * founder. The engineer merges and pushes on its own; this is for anything else.
  */
 export const actionExecutors: Record<string, ActionExecutor> = {
-  /** Run one shell command in the repo on the founder's behalf (a deploy, a migration). payload: { command } */
+  /**
+   * Run one shell command in the repo on the founder's behalf (a deploy, a migration). payload: { command }
+   *
+   * This is one of only two subprocesses here that keeps the service's own environment, and deliberately:
+   * it is the founder's own command, approved by him in chat, and a deploy needs the service's own
+   * secrets to reach Fly (`FLY_API_TOKEN`). Nothing a worker or a repository supplies ever reaches it,
+   * and the bank connector's keys are taken out of it (`withoutBankSecrets`, src/bank.ts), as they are
+   * out of every other subprocess this service starts.
+   */
   async run_command(action) {
     const command = String(action.payload.command ?? "");
     if (!command) throw new Error("No command given");
-    const { stdout, stderr } = await exec("bash", ["-lc", command], { cwd: config.repoDir, timeout: 10 * 60_000 });
+    const { stdout, stderr } = await exec("bash", ["-lc", command], { cwd: config.repoDir, timeout: 10 * 60_000, env: withoutBankSecrets() });
     return (stdout + stderr).trim().slice(-3000) || "Done (no output)";
   },
 };
@@ -1701,7 +1713,10 @@ export function serialiseLaneSetup<T>(checkout: string, work: () => Promise<T>):
  */
 export async function ensureLane(checkout: string, lane: number): Promise<string> {
   const dir = laneDir(checkout, lane);
-  const git = (cwd: string, ...args: string[]) => exec("git", ["-C", cwd, ...args], { timeout: 120_000 }).then((r) => r.stdout.trim());
+  // As in stashWork: git runs with the service's own PATH, HOME and locale and nothing else
+  // (src/bootstrap.ts `gitEnv`), because a working copy can hold anything a worker left behind and a
+  // repository's own configuration can name a program for git to run.
+  const git = (cwd: string, ...args: string[]) => exec("git", ["-C", cwd, ...args], { timeout: 120_000, env: gitEnv() }).then((r) => r.stdout.trim());
   const make = async (): Promise<string> => {
     await git(checkout, "fetch", "--quiet", "origin").catch(() => undefined);
     const head = await git(checkout, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").catch(() => "origin/main");
