@@ -1303,6 +1303,10 @@ send <id> or cancel <id>: approve or cancel an email or invitation the assistant
 /followups: who is waiting on you, what you promised, who you are waiting on
 done <id>, snooze <id> 2d, draft nudge <id>: manage a follow-up
 /booking <link>: your booking link for scheduling drafts
+dns apply <id> or dns cancel <id>: make or drop a DNS change the agent prepared (you see the exact records before and after first; it expires after 2 hours)
+act as me on <site>, stop acting as me on <site>, act as me: let agents sign in and act as you on one of your own sites (money, email, Microsoft, password manager and government sites can never be unlocked)
+/whoami: in a DM, the id this service sees you as (handy when adding an allowlist secret)
+/pair <code> and /unpair: pair or sign out the home talk-button phone
 /reset: start a fresh conversation (jobs and notes are kept)`;
 
 /**
