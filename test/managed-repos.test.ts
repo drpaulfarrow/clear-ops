@@ -50,17 +50,31 @@ test("product and self stay the defaults, and Paul's site is managed out of the 
   assert.ok(list[2].dir.startsWith(config.dataDir));
 });
 
-test("app-doubleshift is managed out of the box as its own repository, beside the site", () => {
+test("app-doubleshift and Paul's private test copy are managed out of the box, each as its own repository", () => {
   const list = repoRegistry.list();
-  assert.deepEqual(list.map((r) => r.alias), ["product", "self", "site", "doubleshift"]);
+  assert.deepEqual(list.map((r) => r.alias), ["product", "self", "site", "doubleshift", "doubleshift-test"]);
   const ds = repoRegistry.find("doubleshift")!;
   assert.equal(ds.slug, "shftd2-pre/app-doubleshift");
   assert.equal(ds.dir, path.join(config.reposDir, "doubleshift"), "its own working copy under the data volume");
   assert.ok(ds.dir.startsWith(config.dataDir));
   assert.equal(ds.created, undefined, "configured, not created by the workforce");
+  const dt = repoRegistry.find("doubleshift-test")!;
+  assert.equal(dt.slug, "drpaulfarrow/doubleshift-test");
+  assert.equal(dt.dir, path.join(config.reposDir, "doubleshift-test"), "its own working copy under the data volume");
+  assert.ok(dt.dir.startsWith(config.dataDir));
+  assert.equal(dt.created, undefined, "configured, not created by the workforce");
   assert.equal(list.find((r) => r.alias === "site")!.slug, "drpaulfarrow/drpaulfarrowcom", "the site stays managed, unchanged");
   assert.match(repoRegistry.describe(), /doubleshift \(shftd2-pre\/app-doubleshift\)/);
-  assert.deepEqual(parseManagedRepos(config.repos.extra).map((r) => r.alias), ["site", "doubleshift"], "the default list parses as the setting does");
+  assert.match(repoRegistry.describe(), /doubleshift-test \(drpaulfarrow\/doubleshift-test\)/);
+  assert.deepEqual(
+    parseManagedRepos(config.repos.extra),
+    [
+      { alias: "site", slug: "drpaulfarrow/drpaulfarrowcom", names: ["drpaulfarrow.com"] },
+      { alias: "doubleshift", slug: "shftd2-pre/app-doubleshift", names: [] },
+      { alias: "doubleshift-test", slug: "drpaulfarrow/doubleshift-test", names: [] },
+    ],
+    "the default list parses as the setting does",
+  );
 });
 
 test("a repository is found by alias, full owner/name, bare name or Paul's own name for it", () => {
@@ -70,6 +84,11 @@ test("a repository is found by alias, full owner/name, bare name or Paul's own n
   for (const n of ["doubleshift", "DOUBLESHIFT", "shftd2-pre/app-doubleshift", "app-doubleshift", "https://github.com/shftd2-pre/app-doubleshift", "https://github.com/shftd2-pre/app-doubleshift.git"]) {
     assert.equal(repoRegistry.find(n)?.alias, "doubleshift", n);
   }
+  for (const n of ["doubleshift-test", "DOUBLESHIFT-TEST", "drpaulfarrow/doubleshift-test", "https://github.com/drpaulfarrow/doubleshift-test", "https://github.com/drpaulfarrow/doubleshift-test.git"]) {
+    assert.equal(repoRegistry.find(n)?.alias, "doubleshift-test", n);
+  }
+  assert.notEqual(repoRegistry.find("doubleshift")?.slug, "drpaulfarrow/doubleshift-test", "the test copy never answers to the production alias");
+  assert.notEqual(repoRegistry.find("doubleshift-test")?.slug, "shftd2-pre/app-doubleshift", "the production repository never answers to the test alias");
   assert.equal(repoRegistry.find("product")?.alias, "product");
   assert.equal(repoRegistry.find("clear-exchange")?.alias, "product");
   assert.equal(repoRegistry.find("self")?.alias, "self");
@@ -88,6 +107,17 @@ test("MANAGED_REPOS parses alias=owner/name, ignores bad entries and cannot shad
   assert.equal(r.find("product")?.slug, undefined, "product unset stays unset");
   assert.equal(r.dir("docs"), path.join("/tmp/r", "docs"));
   assert.equal(r.describe(), "product, self (drpaulfarrow/clear-ops), docs (o/docs)");
+});
+
+test("the test copy parses like any other entry and a malformed one is still ignored", () => {
+  assert.deepEqual(parseManagedRepos("doubleshift-test=drpaulfarrow/doubleshift-test"), [
+    { alias: "doubleshift-test", slug: "drpaulfarrow/doubleshift-test", names: [] },
+  ]);
+  assert.deepEqual(parseManagedRepos("doubleshift test=o/x, doubleshift-test=, =o/y"), [], "a bad alias, a missing slug and a missing alias are ignored");
+  const r = new RepoRegistry({ extra: "doubleshift-test=drpaulfarrow/doubleshift-test", reposDir: "/tmp/r", product: undefined });
+  assert.equal(r.dir("doubleshift-test"), path.join("/tmp/r", "doubleshift-test"), "cloned under its own folder");
+  assert.equal(r.find("drpaulfarrow/doubleshift-test")?.alias, "doubleshift-test");
+  assert.ok(r.aliases().includes("doubleshift-test"));
 });
 
 test("created repositories are persisted in the store and managed again after a restart", () => {
@@ -290,6 +320,7 @@ function chief(calls: Array<[string, Record<string, unknown>]>, worker: AgentRun
 test("start_job takes a repo by alias, owner/name or his name for it, defaults to product and refuses unknown ones", async () => {
   fs.mkdirSync(path.join(config.reposDir, "site"), { recursive: true });
   fs.mkdirSync(path.join(config.reposDir, "doubleshift"), { recursive: true });
+  fs.mkdirSync(path.join(config.reposDir, "doubleshift-test"), { recursive: true });
   const g = gatedRunner();
   const c = chief(
     [
@@ -301,11 +332,12 @@ test("start_job takes a repo by alias, owner/name or his name for it, defaults t
       ["start_job", { kind: "engineer", title: "Nope", brief: "Nothing", repo: "mystery" }],
       ["start_job", { kind: "create_agent", title: "An agent", brief: "Agent please", repo: "site" }],
       ["start_job", { kind: "engineer", title: "Small fix", brief: "Small doubleshift fix", repo: "shftd2-pre/app-doubleshift" }],
+      ["start_job", { kind: "engineer", title: "Test copy fix", brief: "Fix the test copy", repo: "doubleshift-test" }],
     ],
     g.runner,
   );
   await c.orch.handle(FOUNDER, "do things");
-  const [footer, header, product, old, audit, nope, agent, doubleshift] = c.results;
+  const [footer, header, product, old, audit, nope, agent, doubleshift, testCopy] = c.results;
   const job = (brief: string) => c.store.allJobs().find((j) => j.brief === brief)!;
   assert.equal(job("Fix the footer").target, "site");
   assert.match(footer.text, /^Started: Site footer · engineer, site · /);
@@ -324,6 +356,10 @@ test("start_job takes a repo by alias, owner/name or his name for it, defaults t
   assert.equal(agent.isError, undefined);
   assert.equal(job("Small doubleshift fix").target, "doubleshift", "the new repository is chosen by its full owner/name");
   assert.match(doubleshift.text, /^Started: Small fix · engineer, doubleshift · /);
+  assert.equal(job("Fix the test copy").target, "doubleshift-test", "Paul's test copy is chosen by its own alias, with its own queue");
+  assert.match(testCopy.text, /^Started: Test copy fix · engineer, doubleshift-test · /);
+  await waitFor(() => !!g.calls.find((x) => x.key === "Fix the test copy"));
+  assert.equal(g.calls.find((x) => x.key === "Fix the test copy")!.cwd, path.join(config.reposDir, "doubleshift-test"), "the engineer works in the test copy's own checkout");
   await waitFor(() => !!g.calls.find((x) => x.key === "Audit my site copy"));
   assert.match(g.calls.find((x) => x.key === "Audit my site copy")!.prompt, /Repository for this job: "site".*drpaulfarrowcom/s);
 });
@@ -342,7 +378,7 @@ test("the chief's prompt lists the repositories, how to choose one and how a new
   const c = chief([], async () => ({ text: "x" }));
   await c.orch.handle(FOUNDER, "hello");
   const p = c.prompt();
-  assert.match(p, /Repositories\. The workforce manages these: product \(acme\/clear-exchange\), self \(drpaulfarrow\/clear-ops\), site \(drpaulfarrow\/drpaulfarrowcom\), doubleshift \(shftd2-pre\/app-doubleshift\)/);
+  assert.match(p, /Repositories\. The workforce manages these: product \(acme\/clear-exchange\), self \(drpaulfarrow\/clear-ops\), site \(drpaulfarrow\/drpaulfarrowcom\), doubleshift \(shftd2-pre\/app-doubleshift\), doubleshift-test \(drpaulfarrow\/doubleshift-test\)/);
   assert.match(p, /"doubleshift" is app-doubleshift/);
   assert.match(p, /MANAGED_REPOS/);
   assert.match(p, /only when Paul asks for one in this conversation/);
