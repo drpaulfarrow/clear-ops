@@ -48,6 +48,8 @@ import { UptimeLog } from "./uptime.js";
 import { defaultProbes, HealthProbes } from "./health.js";
 import { defaultCanary, type Canary } from "./auto-resume.js";
 import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
+import { DocumentIngest } from "./documents.js";
+import { Uploads } from "./uploads.js";
 import { DeviceBudget, DEVICE_PATH, DEVICE_TEXT_MAX_CHARS, DEVICE_TURNS_PER_DAY, DeviceRegistry, deviceRouter } from "./device.js";
 import { BridgeChat, BRIDGE_REPLY_TO } from "./instinct-chat.js";
 import fs from "node:fs";
@@ -234,7 +236,11 @@ export function buildApp(deps: AppDeps) {
   const otp = new OtpRelay({ messenger: deps.messenger, ...(deps.mailbox ? { mailbox: deps.mailbox } : { mailbox: new GmailCodeReader(googleApi) }) });
   const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, ...(deps.canary ? { canary: deps.canary } : {}) });
   const scheduler = new Scheduler(deps.store, jobs);
-  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, undefined, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
+  // One private uploads store for the whole service: chat attachments and the documents the bridge takes in
+  // (src/documents.ts) land in the same place, under the same name rules and the same size limit.
+  const uploads = new Uploads();
+  const documents = new DocumentIngest(uploads, path.join(config.dataDir, "bridge-documents.jsonl"));
+  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, uploads, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
   scheduler.boot();
   const bridgeBudget = new DeviceBudget(path.join(config.dataDir, "bridge-chat-budget.json"), () => config.bridgeChatBudgetUsd, "the bridge chat");
   orchestrator.bridgeBudget = bridgeBudget;
@@ -285,8 +291,6 @@ export function buildApp(deps: AppDeps) {
   };
 
   const app = express();
-  // Keep the raw body for signature verification.
-  app.use(express.json({ verify: (req, _res, buf) => ((req as express.Request & { rawBody?: Buffer }).rawBody = buf) }));
 
   app.get("/health", (_req, res) => res.json({ ok: true, jobs: deps.store.listJobs(3).length }));
   // What the deploy waits on (.github/workflows/deploy.yml): how many workers are running right now.
@@ -296,7 +300,12 @@ export function buildApp(deps: AppDeps) {
   // Paul's assistant (src/instinct-bridge.ts, src/instinct-chat.ts): an authenticated door for status and for
   // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach
   // Paul's own chat, approve anything, grant a permit or start anything but read-only research or write jobs.
-  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat, guilds: () => (discordRef.current ? inspectGuilds(discordRef.current.client as never, config.oversightSenderIds.find((x) => x.startsWith("dc:u:"))?.slice(5) ?? "") : Promise.resolve(undefined)), dmHistory: (limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); return discordRef.current && owner ? readOwnerDm(discordRef.current.client as never, owner, limit, before) : Promise.resolve(undefined); }, threadHistory: (threadId, limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); const c = discordRef.current?.client as never as { user?: { id: string } } | undefined; return discordRef.current && owner && c?.user?.id ? readJobThread(discordRef.current.client as never, { ownerUserId: owner, botUserId: c.user.id, guildId: config.bridgeThreadGuildId, parentId: config.bridgeThreadParentId }, threadId, limit, before) : Promise.resolve(undefined); }, commissionAllow: config.instinctBridgeCommissions, commissionLogFile: path.join(config.dataDir, "bridge-commissions.json"), commissionBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no commission starts from here." : undefined), commissionBrief: (id) => { try { return fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "commissions", `${id}.md`), "utf8"); } catch { return undefined; } }, commission: (id, brief) => { const owner = soleDiscordOwner(config.oversightSenderIds); if (!owner) throw new Error("No single Discord owner is configured."); const j = jobs.startCommission(id, brief, owner, `Commission ${id}`); return { id: j.id, status: j.status }; }, retryLogFile: path.join(config.dataDir, "bridge-retries.json"), retryAllow: config.instinctBridgeRetryAllow, retry: (id) => jobs.retry(id), retryBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no retry runs from here." : undefined) }));
+  app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, documents, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat, guilds: () => (discordRef.current ? inspectGuilds(discordRef.current.client as never, config.oversightSenderIds.find((x) => x.startsWith("dc:u:"))?.slice(5) ?? "") : Promise.resolve(undefined)), dmHistory: (limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); return discordRef.current && owner ? readOwnerDm(discordRef.current.client as never, owner, limit, before) : Promise.resolve(undefined); }, threadHistory: (threadId, limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); const c = discordRef.current?.client as never as { user?: { id: string } } | undefined; return discordRef.current && owner && c?.user?.id ? readJobThread(discordRef.current.client as never, { ownerUserId: owner, botUserId: c.user.id, guildId: config.bridgeThreadGuildId, parentId: config.bridgeThreadParentId }, threadId, limit, before) : Promise.resolve(undefined); }, commissionAllow: config.instinctBridgeCommissions, commissionLogFile: path.join(config.dataDir, "bridge-commissions.json"), commissionBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no commission starts from here." : undefined), commissionBrief: (id) => { try { return fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "commissions", `${id}.md`), "utf8"); } catch { return undefined; } }, commission: (id, brief) => { const owner = soleDiscordOwner(config.oversightSenderIds); if (!owner) throw new Error("No single Discord owner is configured."); const j = jobs.startCommission(id, brief, owner, `Commission ${id}`); return { id: j.id, status: j.status }; }, retryLogFile: path.join(config.dataDir, "bridge-retries.json"), retryAllow: config.instinctBridgeRetryAllow, retry: (id) => jobs.retry(id), retryBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no retry runs from here." : undefined) }));
+
+  // Keep the raw body for signature verification. Registered after the bridge above on purpose: the bridge's
+  // own routes carry their own body limits (a document can be a few megabytes) and check the bearer token
+  // before a body is read, so the app-wide 100 KB parser must never see one of them.
+  app.use(express.json({ verify: (req, _res, buf) => ((req as express.Request & { rawBody?: Buffer }).rawBody = buf) }));
 
   // The home talk-button device (src/device.ts): paired by the owner typing /pair, text only, no tools. 404 unless DEVICE_ENABLED=true.
   app.use(DEVICE_PATH, deviceRouter({ registry: deviceRegistry, chat: deviceChat, enabled: config.deviceEnabled }));

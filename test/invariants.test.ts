@@ -1001,3 +1001,28 @@ test("the web app inspector is signed out and read-only by construction", async 
   // And it never sees a request's headers, cookies or body.
   assert.doesNotMatch(inspect, /req\.headers|\.postData|request\.postData/, "headers and bodies are never read");
 });
+
+test("a document through the Instinct bridge is a private upload, validated before it is written and never read back", () => {
+  const d = src("documents.ts");
+  // The bytes go through the same private store as a chat attachment: its owner-only modes, its name
+  // rules and its size limit. The module itself writes no document anywhere.
+  assert.match(d, /this\.uploads\.save\(/, "the bytes are saved by the uploads store");
+  assert.doesNotMatch(d, /readFileSync|readdirSync|createReadStream/, "a document is never read back out of the uploads");
+  assert.doesNotMatch(d, /writeFileSync/, "the module writes no file of its own");
+  const checkAt = d.indexOf("contradictionReason(");
+  const saveAt = d.indexOf("this.uploads.save(");
+  assert.ok(checkAt > -1 && saveAt > -1 && checkAt < saveAt, "the bytes are checked before anything is written, so a refusal saves nothing");
+  // And no code path may save an empty file and call it a success: a body-less download is a failure.
+  const up = src("uploads.ts");
+  assert.match(up, /if \(!res\.body\) throw new UploadError\("download failed \(no content\)"\)/, "a download with no body fails loudly");
+  assert.match(up, /if \(!data\.length\) throw new UploadError\("the file is empty \(0 bytes\)"\)/, "a zero-byte file is never saved");
+  // The route lives on the bridge, behind the same bearer token as every other bridge route.
+  const b = src("instinct-bridge.ts");
+  assert.match(b, /router\.post\(\s*"\/documents"/, "the documents route is on the bridge");
+  assert.match(b, /documentBodyParser\(deps\.documents\.maxBytes\)/, "the route sets its own body limit from the uploads limit");
+  // The bridge is mounted before the app-wide JSON parser, so the token is checked before a body is read.
+  const index = src("index.ts");
+  const bridgeAt = index.indexOf("app.use(INSTINCT_PATH");
+  const jsonAt = index.indexOf("app.use(express.json(");
+  assert.ok(bridgeAt > -1 && jsonAt > -1 && bridgeAt < jsonAt, "the bearer token is checked before any document body is parsed");
+});
