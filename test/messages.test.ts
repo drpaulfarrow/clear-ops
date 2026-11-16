@@ -18,6 +18,8 @@ const { ConsoleMessenger } = await import("../src/whatsapp.js");
 const { plainMessage, splitReport, tidyReply, splitSentences, MESSAGE_OPEN, MESSAGE_CLOSE, MAX_MESSAGE_CHARS, PAUL_STYLE, REPORT_RULE } = await import("../src/messages.js");
 const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
 const { nudgeText } = await import("../src/followups.js");
+const { config } = await import("../src/config.js");
+const { REPORTS_PATH } = await import("../src/reports.js");
 const { EA_SCHEDULES, LEGACY_EA_BRIEFS, upgradeEaSchedules } = await import("../src/ea.js");
 import type { AgentRunner, RunOptions } from "../src/agents.js";
 
@@ -123,9 +125,13 @@ test("job notifications are short and plain, and the full report is still saved 
   assert.equal(finished.length, 2);
   for (const f of finished) assertPlain(f.text, f.text.split("\n")[0]);
   const engMsg = finished.find((f) => f.text.startsWith(`Finished: 402 flow · engineer · ${eng.id}.`))!.text;
+  // Paul's call, 16 Nov 2026: a finished job's saved output is handed over as a clickable link, never
+  // only as a path or as "show job <id>".
+  const token = store.settings().reportsToken;
+  assert.ok(token, "the finish message mints the reports token for the link");
   assert.equal(
     engMsg,
-    `Finished: 402 flow · engineer · ${eng.id}.\nThe 402 flow is up for review at ${PR}, with tests green. The maintainer reviews and merges it next. Nothing needs you. Started Review: 402 flow · maintain · ${review.id} to review and merge. Full report: show job ${eng.id}.`,
+    `Finished: 402 flow · engineer · ${eng.id}.\nThe 402 flow is up for review at ${PR}, with tests green. The maintainer reviews and merges it next. Nothing needs you. Started Review: 402 flow · maintain · ${review.id} to review and merge. Read it: ${config.publicUrl}${REPORTS_PATH}/${eng.id}?t=${token}.`,
   );
   const revMsg = finished.find((f) => f.text.startsWith(`Finished: Review: 402 flow · maintain · ${review.id}.`))!.text;
   assert.match(revMsg, /merged as abc1234\./);
@@ -137,6 +143,20 @@ test("job notifications are short and plain, and the full report is still saved 
   assert.ok(store.readOutput(review.id)!.includes(`REVIEW ${PR}: merged`), "the verdict line stays in the saved output");
   assert.ok(review.brief.includes("## What changed") && !review.brief.includes(MESSAGE_OPEN), "the maintainer reviews the full report");
   assert.equal(store.getJob(eng.id)!.pr, PR);
+});
+
+test("a job the Instinct bridge started reports into the bridge's sink and never carries the reports link", async () => {
+  // The bridge is built so that nothing of the service's, the reports token included, reaches it, and its
+  // sink is not Paul's chat. The saved output is still served at /reports for Paul himself.
+  const { store, messenger, jobs, settled } = harness(() => `Publisher list drafted.\n\n${MESSAGE_OPEN}\nThe publisher list is drafted, with the sources beside each name.\n${MESSAGE_CLOSE}`);
+  const job = jobs.start("research", "Publisher list", "instinct:bridge", "product", "discord:999", { title: "Publisher list", origin: "instinct" });
+  await waitFor(() => settled());
+  const finished = messenger.sent.find((m) => m.text.startsWith("Finished:"))!;
+  assert.equal(finished.to, "discord:999", "the bridge's own sink, not Paul's chat");
+  assert.ok(store.readOutput(job.id), "the output is saved as usual");
+  assert.equal(store.settings().reportsToken, undefined, "the reports token is never minted for a bridge job");
+  assert.ok(!finished.text.includes(REPORTS_PATH), "the reports link never reaches the bridge sink");
+  assert.match(finished.text, /Full report: show job /, "the old wording is unchanged there");
 });
 
 test("the review loop still reads verdicts from the saved report, and its escalation is plain", async () => {

@@ -463,7 +463,7 @@ test("every agent, including kinds added later, carries Paul's messaging rule, a
   const jobs = src("jobs.ts");
   assert.match(jobs, /const \{ report, message \} = splitReport\(result\.text\)/, "each worker's answer is split into report and message");
   assert.match(jobs, /this\.store\.writeOutput\(id, report\)/, "the full report is saved");
-  assert.match(jobs, /finishedText\(job, message, chained\)/, "Paul is sent the short message");
+  assert.match(jobs, /finishedText\(job, message, chained, reportUrl\)/, "Paul is sent the short message, with the clickable link to the saved output");
   assert.ok(!/\.send\([^;]*result\.text/.test(jobs), "a worker's raw answer is never sent to chat");
 });
 

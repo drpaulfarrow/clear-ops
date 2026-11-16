@@ -28,6 +28,7 @@ import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
+import { reportUrlFor } from "./reports.js";
 import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
@@ -1123,9 +1124,14 @@ export class JobRunner {
         chained = next.chained;
         escalation = next.escalation;
       }
+      // The clickable link to the saved output, so Paul is never handed a path or asked to type
+      // "show job" (his call, 16 Nov 2026). Undefined only when the output is not served, and never for a
+      // job the Instinct bridge started: that message goes to the bridge's own sink rather than to Paul's
+      // chat, and the bridge is built so that no secret of the service's, this token included, reaches it.
+      const reportUrl = job.origin === "instinct" ? undefined : reportUrlFor(this.store, id);
       await this.messenger.send(
         job.replyTo ?? job.requestedBy,
-        finishedText(job, message, chained),
+        finishedText(job, message, chained, reportUrl),
       );
       if (job.kind === "design") await this.sendImages(job, report);
       if (escalation) await this.messenger.send(job.replyTo ?? job.requestedBy, escalation);
@@ -1629,10 +1635,13 @@ export function isScheduleVerdict(text: string): boolean {
 
 /**
  * What Paul sees when a job finishes: which job, the worker's short plain message, what happens next,
- * and where the full report is. Never the report itself, its headings, lists or verdict lines.
+ * and where the full report is. Never the report itself, its headings, lists or verdict lines. When the
+ * output is served on the reports view, that is a clickable link (Paul's call, 16 Nov 2026: an output
+ * should always be handed to him in a form he can click); `show job <id>` remains the fallback.
  */
-export function finishedText(job: Pick<Job, "id" | "title" | "brief" | "kind" | "target">, message: string, next = ""): string {
-  const body = [message, next, `Full report: show job ${job.id}.`].map((s) => s.trim()).filter(Boolean).join(" ");
+export function finishedText(job: Pick<Job, "id" | "title" | "brief" | "kind" | "target">, message: string, next = "", reportUrl?: string): string {
+  const where = reportUrl ? `Read it: ${reportUrl}.` : `Full report: show job ${job.id}.`;
+  const body = [message, next, where].map((s) => s.trim()).filter(Boolean).join(" ");
   return `Finished: ${jobLabel(job)}.\n${body}`;
 }
 

@@ -14,7 +14,7 @@ import type { Messenger } from "./whatsapp.js";
 import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js";
 import { boardUrl } from "./jobs-board.js";
 import { PASSWORD_LINK_MINUTES, signIn } from "./sign-in.js";
-import { reportsUrl } from "./reports.js";
+import { reportUrlFor, reportsUrl } from "./reports.js";
 import { describeUploads, formatSize, inlineImages, receiptText, transcriptAsMessage, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
 import { isAudio, transcribe, TranscribeError, transcriptionAvailable, transcriptionUnavailableReason } from "./transcribe.js";
 import { GoogleAuth, setupSteps } from "./google.js";
@@ -242,8 +242,13 @@ export class Orchestrator {
     if (/^\/google disconnect$/i.test(trimmed)) return this.messenger.send(from, await this.googleDisconnect());
     const show = trimmed.match(/^show job ([a-f0-9]{6})$/i);
     if (show) {
-      const out = this.store.readOutput(show[1].toLowerCase());
-      return this.messenger.send(from, out ?? `No output for job ${show[1]}.`);
+      const id = show[1].toLowerCase();
+      const out = this.store.readOutput(id);
+      if (out === undefined) return this.messenger.send(from, `No output for job ${show[1]}.`);
+      // A saved output is handed over as the clickable link Paul asked for (16 Nov 2026); the raw text
+      // is only the fallback for an output the reports view does not serve (no job record, say).
+      const link = reportUrlFor(this.store, id);
+      return this.messenger.send(from, link ? `Job ${id} is saved here: ${link}` : out);
     }
 
     return this.askChief(sender, from, messageId, trimmed, undefined, { text: trimmed, kind: "typed" });
@@ -626,7 +631,7 @@ export class Orchestrator {
   }
 
   private reportsText(): string {
-    return `The saved reports are at ${reportsUrl(this.store)}. Bookmark it on your phone: it lists every saved job output newest first, and tapping one opens it as a proper page you can read, formatted, instead of raw Markdown. It is read only, and assistant and CV outputs are never there.`;
+    return `The saved reports are at ${reportsUrl(this.store)}. Bookmark it on your phone: it lists every saved job output newest first, and tapping one opens it as a proper page you can read, formatted, instead of raw Markdown. Every finished job's output is there, whatever its kind, and the decks and one-pagers the advisor and CV writers save are on the same page. It is read only.`;
   }
 
   private jobsText(): string {
@@ -1049,7 +1054,10 @@ export class Orchestrator {
               const queue = j.waitingFor ? { ...(held ? { heldUntilResume: true } : { queuedBehind: jobRef(store.getJob(j.waitingFor), j.waitingFor) }), queuePosition: jobs.queuePosition(j.id) } : {};
               const failed = j.status === "failed" ? { failedReason: `This job failed and did no work, because ${failureReason({ kind: j.failure ?? "error", detail: j.error ?? "" })}. Treat it as not done.` } : {};
               const live = j.status === "running" ? { liveness: jobs.liveness(j.id)?.summary } : {};
-              return { content: [{ type: "text", text: JSON.stringify({ title: jobTitle(j), ...failed, ...live, ...j, ...queue }, null, 2) }] };
+              // A finished job's saved output as the clickable link, so the chief can hand it to Paul
+              // rather than a file path (his call, 16 Nov 2026). Absent when there is nothing to serve.
+              const report = j.status === "done" ? { reportUrl: reportUrlFor(store, j.id) } : {};
+              return { content: [{ type: "text", text: JSON.stringify({ title: jobTitle(j), ...failed, ...live, ...j, ...report, ...queue }, null, 2) }] };
             }
             return { content: [{ type: "text", text: this.jobsText() }] };
           },
@@ -1099,11 +1107,13 @@ export class Orchestrator {
         ),
         tool(
           "get_output",
-          "Read the full output of a finished job.",
+          "Read the full output of a finished job. When it carries a saved report link, give Paul that link in your reply rather than pasting the report: every output should reach him as something he can click.",
           { id: z.string() },
           async ({ id }) => {
             const out = store.readOutput(id);
-            return { content: [{ type: "text", text: out ?? `No output for job ${id}.` }] };
+            if (out === undefined) return { content: [{ type: "text", text: `No output for job ${id}.` }] };
+            const link = reportUrlFor(store, id);
+            return { content: [{ type: "text", text: link ? `Saved report (click to view): ${link}\n\n${out}` : out }] };
           },
           { annotations: { readOnlyHint: true } },
         ),
@@ -1287,7 +1297,7 @@ const HELP = `Talk to me normally. I answer quick things myself and delegate the
 Commands:
 /jobs: recent jobs
 /board: a link to the jobs board, a read-only page you can bookmark on your phone, behind your password
-/reports: a link to your saved reports, every finished job's output as a page you can read on your phone, behind your password
+/reports: a link to your saved reports, every finished job's output and the decks and one-pagers as pages you can read on your phone, behind your password
 /password: a private one-time link to set or change the password that opens the reports and the board (type it there, never in chat; setting it signs out every device)
 /spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free
 /resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
@@ -1297,7 +1307,7 @@ retry <id>: rerun one failed job
 buy <id> or buy cancel <id>: approve or decline a purchase (you see the shop, items, total and a picture first; the approval page link does the same)
 code <id> <the code>: the code a site sent you, so I can put it into the sign-in page that is waiting for it (it never reaches the model and is not kept)
 signup apply <id> or signup cancel <id>: create the account a sign-up plan described (you see the site, the address and every field first; it expires after 6 hours)
-show job <id>: full output of a job
+show job <id>: the clickable link to a job's saved output
 Send a file (CSV, PDF, screenshot, zip) and I save it privately for me and the workers
 /uploads: files you have sent
 /delete upload <name>: delete one (or "all")
