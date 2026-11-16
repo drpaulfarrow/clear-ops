@@ -862,12 +862,16 @@ export class Orchestrator {
   }
 
   /**
-   * The only tools the bridge's chief has. start_job can only make a research or write job with no permits
-   * (JobRunner.start enforces that again), marked origin "instinct" by this code; job_status and get_output
-   * only show jobs the bridge itself started. Nothing here approves, schedules, cancels, remembers, sends,
-   * or touches the vault, Google, DNS, uploads or the engineering queue.
+   * The ops tools a door's chief may have, read-only unless startJobs is passed. Both callers today
+   * (the bridge chat turn and the device turn) pass `{ startJobs: false }`, so the bridge's chief is
+   * offered only job_status, get_job_context and get_output and there is no path to start a job.
+   * job_status and get_output show only jobs the bridge itself started (origin "instinct");
+   * get_job_context shows Paul's own jobs, their captured message and a capped report. start_job, where
+   * a caller passes it, can only make a research or write job with no permits (JobRunner.start enforces
+   * that again), marked origin "instinct" by this code. Nothing here approves, schedules, cancels,
+   * remembers, sends, or touches the vault, Google, DNS, uploads or the engineering queue.
    */
-  private bridgeOpsServer(opts: { startJobs?: boolean } = { startJobs: true }) {
+  private bridgeOpsServer(opts: { startJobs?: boolean } = { startJobs: false }) {
     const store = this.store;
     const jobs = this.jobs;
     const mine = (id: string) => {
