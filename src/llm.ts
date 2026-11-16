@@ -65,8 +65,19 @@ function allPrices(): Record<string, Price> {
 }
 
 export function provider(): Provider {
+  // A declared provider wins, key or no key: with LLM_PROVIDER=openrouter and the key missing, runs fail
+  // (openRouterKeyMissing) rather than falling back to Claude on the Anthropic key.
+  if (config.llmProvider) return config.llmProvider;
   return config.openrouter.apiKey ? "openrouter" : "anthropic";
 }
+
+/** OpenRouter is the provider in force but its key is not set: nothing may run, and nothing falls back. */
+export function openRouterKeyMissing(apiKey: string = config.openrouter.apiKey): boolean {
+  return provider() === "openrouter" && !apiKey;
+}
+
+export const OPENROUTER_KEY_MISSING =
+  "OPENROUTER_API_KEY is not set, and LLM_PROVIDER is openrouter, so nothing runs: agents never fall back to Claude on the Anthropic key. Add the OPENROUTER_API_KEY secret in GitHub and redeploy.";
 
 /** The provider's name for messages to Paul: "the OpenRouter account is out of credit". */
 export function providerName(): string {
@@ -176,6 +187,7 @@ export function parsePrices(raw: string | undefined, warn: (m: string) => void =
 
 /** One start-up log line: the provider, the model per alias, and any model whose cost would be a guess. */
 export function modelLine(): string {
+  if (openRouterKeyMissing()) return `Models: NONE. ${OPENROUTER_KEY_MISSING}`;
   if (provider() !== "openrouter") return "Models: Anthropic API.";
   const m = openrouterModels();
   const bad: string[] = [];

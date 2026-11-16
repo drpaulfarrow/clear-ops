@@ -241,6 +241,8 @@ export interface GoogleProbeDeps {
 
 /** The provider key the models run on. Both providers' endpoint is a small read that needs the key. */
 function modelProbe(fetchImpl: typeof fetch, key: string, name: string, timeoutMs: number): HealthProbe {
+  // OpenRouter declared or in force with no key is a failure, not "off": every agent run is refused.
+  if (!key && name === "openrouter") return { name: "model provider", check: async () => ({ state: "fail", detail: "OPENROUTER_API_KEY is not set, so no agent can run" }) };
   if (!key) return { name: "model provider", check: async () => ({ state: "off", detail: "no model key is set" }) };
   if (name === "openrouter") {
     // The key endpoint (src/spend.ts reads the same one): it answers only to a live inference key.
