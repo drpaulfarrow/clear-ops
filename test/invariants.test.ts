@@ -441,12 +441,18 @@ test("the Google Docs reader stays a narrow owner-requested read: no wider grant
   assert.ok(!/drive|documents\.(?!readonly)/.test(docs.searchParams.get("scope")!), "never a Drive-wide or write scope");
   assert.equal(docs.searchParams.get("include_granted_scopes"), "true", "the Docs consent is incremental: Google is asked to add to the grant");
   assert.throws(() => auth.consentUrl("s", "s", { extraScopes: [GOOGLE_SCOPES[0]!] }), /Only new optional scopes/, "a consent link cannot re-ask for a scope it already has");
+  assert.throws(() => auth.consentUrl("s", "s", { extraScopes: ["https://www.googleapis.com/auth/drive"] }), /Only new optional scopes/, "a consent link is hard-limited: a Drive scope is never minted into one");
+  assert.throws(() => auth.consentUrl("s", "s", { extraScopes: [DOCS_READONLY_SCOPE, DOCS_READONLY_SCOPE] }), /Only new optional scopes/, "a duplicate optional scope is refused");
   // The callback validates what Google actually returned against what the link asked for, and an
-  // incremental consent that returns no new refresh token keeps the stored one.
+  // incremental consent that returns no new refresh token keeps the stored one. An existing
+  // combined grant is never revoked to clean up a rejected optional attempt, and the connected
+  // account is pinned: no consent from a different account switches it.
   const google = src("google.ts");
   assert.match(google, /const missing = p\.scopes\.filter\(\(sc\) => !granted\.includes\(sc\)\)/, "the returned scopes are validated against the requested ones");
   assert.match(google, /refreshToken = stored\.refreshToken/, "an incremental consent preserves the stored refresh token");
   assert.match(google, /stored\.account !== account/, "and only for the same account");
+  assert.match(google, /const mayRevoke = !stored && !this\.connected\(\)/, "a returned refresh token is revoked only on a first-time connect, never over an existing combined grant");
+  assert.match(google, /if \(tok\.refresh_token && mayRevoke\) await this\.revokeToken\(tok\.refresh_token\)/, "every refusal path that cleans up a fresh token skips it when a grant is already stored");
   const reader = src("doc-reader.ts");
   assert.ok(!/auth\/drive|drive\.googleapis\.com/.test(reader), "no Drive-wide scope or API");
   assert.ok(!/accounts\.google\.com|consentUrl|refresh_token|refreshToken/.test(reader), "the reader never mints a consent link or touches a refresh token");

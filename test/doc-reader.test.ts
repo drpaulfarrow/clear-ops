@@ -669,6 +669,12 @@ test("docs consent is incremental: the four scopes plus documents.readonly only,
   assert.equal(u.searchParams.get("include_granted_scopes"), "true", "Google is asked to add to what it already granted");
   // An extra scope that is not new is refused outright.
   assert.throws(() => auth.consentUrl(PAUL, PAUL, { extraScopes: [GOOGLE_SCOPES[0]!] }), /Only new optional scopes/);
+  // The optional addition is hard-limited to the one read-only Docs scope: a Drive-wide scope,
+  // a duplicate, two extras at once and an arbitrary scope are each refused before any link exists.
+  assert.throws(() => auth.consentUrl(PAUL, PAUL, { extraScopes: ["https://www.googleapis.com/auth/drive"] }), /Only new optional scopes/, "a Drive scope is never minted into a link");
+  assert.throws(() => auth.consentUrl(PAUL, PAUL, { extraScopes: [DOCS_READONLY_SCOPE, DOCS_READONLY_SCOPE] }), /Only new optional scopes/, "a duplicate extra is refused");
+  assert.throws(() => auth.consentUrl(PAUL, PAUL, { extraScopes: ["https://www.googleapis.com/auth/documents", DOCS_READONLY_SCOPE] }), /Only new optional scopes/, "a write Docs scope and a second extra are refused");
+  assert.throws(() => auth.consentUrl(PAUL, PAUL, { extraScopes: ["https://www.googleapis.com/auth/gmail.readonly"] }), /Only new optional scopes/, "a default scope is never re-asked as an extra");
 });
 
 test("the consent callback validates the scopes Google actually returned; a missing Docs scope stores nothing", async () => {
@@ -718,4 +724,72 @@ test("a completed docs consent records the wider grant, and an incremental conse
   const s3 = new URL(auth3.consentUrl(PAUL, PAUL, { extraScopes: [DOCS_READONLY_SCOPE] })).searchParams.get("state")!;
   await assert.rejects(auth3.completeConsent(s3, "the-code"), /only paul@clear\.exchange may be connected/);
   assert.deepEqual(auth2.grantedScopes(), [...GOOGLE_SCOPES, DOCS_READONLY_SCOPE], "the existing grant is untouched by a refused one");
+});
+
+test("a rejected optional Docs consent never revokes the existing combined grant: the old token, grant and account survive, and the connection still refreshes after a restart", async () => {
+  // The regression this guards: with an existing completed connection, an optional Docs consent
+  // that Google answers with only the old scopes and a refresh token must be rejected WITHOUT
+  // calling /revoke. The returned refresh token covers the combined authorization (the
+  // incremental flow), so revoking it would remove the existing Gmail and Calendar permission,
+  // not merely clean up the fresh attempt.
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docconsent-"));
+  const settings = {
+    clientId: "cid",
+    clientSecret: "csecret",
+    account: "paul@clear.exchange",
+    tokenKey: "a long random key",
+    redirectUri: "https://ops.example/google/callback",
+  };
+  const first = oauthFake({ scope: GOOGLE_SCOPES.join(" ") });
+  const auth = new GoogleAuth({ ...settings, dataDir, fetch: first.f });
+  const s1 = new URL(auth.consentUrl(PAUL, PAUL)).searchParams.get("state")!;
+  await auth.completeConsent(s1, "the-code");
+  assert.deepEqual(auth.grantedScopes(), [...GOOGLE_SCOPES], "an existing completed connection");
+  const tokenBefore = fs.readFileSync(auth.tokenFile, "utf8");
+
+  // The optional Docs attempt: Google returns only the old scopes, and a fresh refresh token.
+  const reject = oauthFake({ scope: GOOGLE_SCOPES.join(" "), refresh: "refresh-fresh-attempt" });
+  const auth2 = new GoogleAuth({ ...settings, dataDir, fetch: reject.f });
+  const s2 = new URL(auth2.consentUrl(PAUL, PAUL, { extraScopes: [DOCS_READONLY_SCOPE] })).searchParams.get("state")!;
+  await assert.rejects(auth2.completeConsent(s2, "the-code"), /Not all permissions were granted \(missing documents.readonly\)/);
+  // Zero revoke requests: an existing combined grant is never revoked to clean up a rejected attempt.
+  assert.ok(!reject.seen.some((s) => String(s.url).includes("/revoke")), "a rejected optional attempt makes zero revoke requests");
+  // The old encrypted token, the old active grant and the account are exactly as they were.
+  assert.equal(fs.readFileSync(auth2.tokenFile, "utf8"), tokenBefore, "the stored encrypted token is byte-for-byte unchanged");
+  assert.deepEqual(auth2.grantedScopes(), [...GOOGLE_SCOPES], "the old grant's scopes are unchanged");
+  assert.equal(auth2.account(), "paul@clear.exchange", "the connected account is unchanged");
+  // After a restart the old connection still refreshes.
+  const afterRestart = new GoogleAuth({ ...settings, dataDir, fetch: first.f });
+  assert.equal(await afterRestart.accessToken(), "access-refreshed", "the preserved refresh token still mints access tokens");
+});
+
+test("the connected account is pinned: a consent from a different account never switches the connection, even with no account configured", async () => {
+  // GOOGLE_ACCOUNT is blank here, so the only pin is the stored token itself: an incremental
+  // consent answered from a different Google account is refused, the old grant is untouched and
+  // no revoke request is ever made.
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docconsent-"));
+  const settings = {
+    clientId: "cid",
+    clientSecret: "csecret",
+    account: "",
+    tokenKey: "a long random key",
+    redirectUri: "https://ops.example/google/callback",
+  };
+  const first = oauthFake({ scope: GOOGLE_SCOPES.join(" ") });
+  const auth = new GoogleAuth({ ...settings, dataDir, fetch: first.f });
+  const s1 = new URL(auth.consentUrl(PAUL, PAUL)).searchParams.get("state")!;
+  await auth.completeConsent(s1, "the-code");
+  assert.equal(auth.account(), "paul@clear.exchange");
+  const tokenBefore = fs.readFileSync(auth.tokenFile, "utf8");
+
+  const other = oauthFake({ email: "someone@gmail.com", refresh: "refresh-other-account" });
+  const auth2 = new GoogleAuth({ ...settings, dataDir, fetch: other.f });
+  const s2 = new URL(auth2.consentUrl(PAUL, PAUL, { extraScopes: [DOCS_READONLY_SCOPE] })).searchParams.get("state")!;
+  await assert.rejects(auth2.completeConsent(s2, "the-code"), /already connected as paul@clear\.exchange/);
+  assert.ok(!other.seen.some((s) => String(s.url).includes("/revoke")), "no revoke request is made against the existing grant");
+  assert.equal(auth2.account(), "paul@clear.exchange", "no implicit account switch");
+  assert.deepEqual(auth2.grantedScopes(), [...GOOGLE_SCOPES], "the old grant is unchanged");
+  assert.equal(fs.readFileSync(auth2.tokenFile, "utf8"), tokenBefore, "the old encrypted token is unchanged");
+  const afterRestart = new GoogleAuth({ ...settings, dataDir, fetch: first.f });
+  assert.equal(await afterRestart.accessToken(), "access-refreshed", "the old connection still refreshes");
 });

@@ -21,6 +21,9 @@ export const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
 ];
 
+/** The one optional scope a consent link may ever add on top of the four above: read-only Google Docs, no Drive, no writes. */
+export const DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly";
+
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
@@ -133,17 +136,18 @@ export class GoogleAuth {
    * the chat that asked for it, which is where the result is reported. Uses PKCE as well as the secret.
    *
    * The default asks for exactly the assistant's four Gmail and Calendar scopes, as it always has.
-   * `extraScopes` is the one optional addition: an incremental consent, where Google is asked to add
-   * that scope on top of what the grant already carries (include_granted_scopes=true) and the
-   * callback then validates what Google actually returned. Nothing wider than the extra scope is
-   * ever requested, and the stored token is never widened without Google confirming it.
+   * `extraScopes` is the one optional addition, and it is hard-limited: only the read-only Docs scope
+   * may ever appear in it, once. A Drive-wide scope, a write scope, one of the four the grant already
+   * carries, a duplicate, anything arbitrary: refused here, before a link is ever minted, so no
+   * wider permission can be requested through this builder. When the extra scope is present the
+   * consent is incremental (Google is asked to add it on top of what the grant already carries,
+   * include_granted_scopes=true) and the callback then validates what Google actually returned.
    */
   consentUrl(requestedBy: string, replyTo: string, opts?: { extraScopes?: string[] }): string {
     if (!this.configured()) throw new GoogleError("Google is not set up yet: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are missing.");
     const extra = opts?.extraScopes ?? [];
-    for (const sc of extra) {
-      if (GOOGLE_SCOPES.includes(sc) || extra.filter((x) => x === sc).length > 1) throw new GoogleError("Only new optional scopes may be added to a consent link.");
-    }
+    if (extra.length > 1 || (extra.length === 1 && extra[0] !== DOCS_READONLY_SCOPE))
+      throw new GoogleError("Only new optional scopes may be added to a consent link: the read-only Google Docs permission alone, never a scope the grant already carries, a duplicate or anything wider.");
     for (const [k, p] of this.pending) if (p.expires < this.now()) this.pending.delete(k);
     const state = randomBytes(24).toString("base64url");
     const verifier = randomBytes(48).toString("base64url");
@@ -170,6 +174,20 @@ export class GoogleAuth {
     const p = this.pending.get(state);
     this.pending.delete(state);
     if (!p || p.expires < this.now()) throw new GoogleError("This link has expired or was already used. Ask for a new one in chat.");
+    // What is already stored, read before anything is exchanged or revoked. An existing grant is a
+    // combined authorization (an incremental consent asks Google to add scopes to it), so a refresh
+    // token Google returns over it covers the existing Gmail and Calendar permission too: revoking it
+    // would remove the existing grant, not merely clean up a rejected optional attempt. So a
+    // returned token is revoked only on a first-time connect, when nothing is stored at all; with a
+    // grant already present every refusal leaves the old encrypted token, the old active grant and
+    // the connected account exactly as they were.
+    let stored: StoredToken | undefined;
+    try {
+      stored = this.load();
+    } catch {
+      stored = undefined;
+    }
+    const mayRevoke = !stored && !this.connected();
     const tok = await this.tokenRequest({
       grant_type: "authorization_code",
       code,
@@ -181,7 +199,7 @@ export class GoogleAuth {
     const granted = String(tok.scope ?? "").split(/\s+/).filter(Boolean);
     const missing = p.scopes.filter((sc) => !granted.includes(sc));
     if (missing.length) {
-      if (tok.refresh_token) await this.revokeToken(tok.refresh_token).catch(() => undefined);
+      if (tok.refresh_token && mayRevoke) await this.revokeToken(tok.refresh_token).catch(() => undefined);
       throw new GoogleError(`Not all permissions were granted (missing ${missing.map((m) => m.split("/").pop()).join(", ")}). Try again and tick every box.`);
     }
     // Which account this is, from Gmail itself, so no extra identity scope is needed.
@@ -189,18 +207,17 @@ export class GoogleAuth {
     const account = String((profile as { emailAddress?: string }).emailAddress ?? "").toLowerCase();
     if (!account) throw new GoogleError("Could not tell which Google account this is.");
     if (this.s.account && account !== this.s.account) {
-      if (tok.refresh_token) await this.revokeToken(tok.refresh_token).catch(() => undefined);
+      if (tok.refresh_token && mayRevoke) await this.revokeToken(tok.refresh_token).catch(() => undefined);
       throw new GoogleError(`That was ${account}, but only ${this.s.account} may be connected. Nothing was stored.`);
     }
+    // The connected account is pinned: a consent answered from a different Google account never
+    // switches the connection or overwrites the stored token, even when no single account is
+    // configured (a blank GOOGLE_ACCOUNT setting must not become an implicit account switch).
+    if (stored && stored.account !== account)
+      throw new GoogleError(`That was ${account}, but this workforce is already connected as ${stored.account}, so nothing was changed. Say "disconnect Google" first if you mean to switch.`);
     // Refresh-token preservation: an incremental consent may return no new refresh token, because
     // Google keeps the one already granted. The stored refresh token is kept then, and only the
     // recorded scopes widen; the old token is never replaced with nothing.
-    let stored: StoredToken | undefined;
-    try {
-      stored = this.load();
-    } catch {
-      stored = undefined;
-    }
     let refreshToken = tok.refresh_token as string | undefined;
     if (!refreshToken) {
       if (!stored || stored.account !== account) throw new GoogleError("Google did not return a refresh token. Remove the app's access in your Google account settings and try the link again.");
