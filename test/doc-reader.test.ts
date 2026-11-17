@@ -33,6 +33,7 @@ const { Store } = await import("../src/store.js");
 const { Orchestrator } = await import("../src/orchestrator.js");
 const { JobRunner } = await import("../src/jobs.js");
 const { Scheduler } = await import("../src/scheduler.js");
+const { readTrace } = await import("../src/trace.js");
 
 /** Synthetic document identifier for reader tests. */
 const DOC_ID = "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -610,6 +611,70 @@ test("the first worker call receives only its explicitly selected source: the pr
   await waitFor(() => store.getJob(later.id)!.status === "done");
   assert.ok(!workerPrompts.at(-1)!.includes("Chapter one"), "a staging is bound once, never to every future job");
   assert.notEqual(store.getJob(later.id)!.docSnapshot, true);
+});
+
+test("a bound job's trace keeps names and outcomes only, and an unbound job of the same kind keeps its detail", async () => {
+  // The regression this guards: redaction knows token shapes, not a document's own words, so a bound
+  // job's trace could keep its source's path and short quotes (a Bash command, a result tail, a
+  // worker remark) past the one job the source is bound to. A bound job now traces names and outcomes
+  // only, whatever its kind; an unbound job keeps the useful detailed trace exactly as before.
+  const { f } = fakeFetch(() => reply({ revisionId: "R1" }));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docreader-"));
+  const docs = new DocReader({ auth: fakeAuth(), dataDir, allow: [DOC_ID], fetch: f, now: fixedDate });
+  const handle = await stage(docs);
+  // The snapshot file the staged read really saved: the worker quotes its true path, as a real one might.
+  const records = JSON.parse(fs.readFileSync(path.join(docs.dir, "records.json"), "utf8")) as Array<{ handle?: string; file: string }>;
+  const snapshotPath = path.join(docs.dir, records.find((r) => r.handle === handle)!.file);
+
+  // A worker that quotes the bound source in a Bash command, a Bash tail, a Read error and a remark.
+  const sent: Array<{ to: string; text: string }> = [];
+  const m = { send: async (to: string, text: string) => void sent.push({ to, text }) } as never;
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docreader-store-")));
+  const workerPrompts: string[] = [];
+  const runner = (async (o: { prompt: string; onTrace?: (e: never) => void }) => {
+    workerPrompts.push(o.prompt);
+    for (const e of [
+      { type: "tool", id: "t1", name: "Bash", input: { command: `sed -n 1p ${snapshotPath}` } },
+      { type: "tool_result", id: "t1", isError: false, text: `Chapter one opens quietly.\n${"ordinary tail output of the command. ".repeat(80)}` },
+      { type: "text", text: "Reading the source's first line before writing." },
+      { type: "tool", id: "t2", name: "Read", input: { file_path: snapshotPath } },
+      { type: "tool_result", id: "t2", isError: true, text: `ENOENT: ${snapshotPath}` },
+      { type: "end", outcome: "finished", turns: 3 },
+    ])
+      o.onTrace?.(e as never);
+    return { text: "the worker's reply" };
+  }) as never;
+  const jobs = new JobRunner(store, m, runner, undefined, { docs });
+
+  // The bound write job: its worker received the source in its first prompt, and its trace (the
+  // synthetic JSONL under DATA_DIR/traces) holds tool names and outcomes only.
+  const bound = jobs.start("write", "Write the opening from the source.", PAUL, "product", PAUL, {}, { source: handle });
+  await waitFor(() => store.getJob(bound.id)!.status === "done");
+  assert.ok(workerPrompts.at(-1)!.includes("Chapter one"), "the source reached the bound job's worker");
+  const boundLines = readTrace(bound.id);
+  const boundJson = JSON.stringify(boundLines);
+  assert.ok(boundLines.some((l) => l.ev === "tool" && l.name === "Bash"), "tool names are kept");
+  assert.ok(boundLines.some((l) => l.ev === "result" && l.name === "Read" && l.error), "outcomes are kept");
+  assert.ok(boundLines.some((l) => l.ev === "end" && l.text === "finished"), "how the run ended is kept");
+  for (const banned of [snapshotPath, "Chapter one", "sed -n", "ordinary tail output", "Reading the source's first line"])
+    assert.ok(!boundJson.includes(banned), `a bound job's trace holds none of it: ${banned}`);
+
+  // A bound advisor job traces the same way: the rule is the binding, not the kind.
+  const handle2 = await stage(docs);
+  const advisor = jobs.start("advisor", "Pressure-test the pitch from the source.", PAUL, "product", PAUL, {}, { source: handle2 });
+  await waitFor(() => store.getJob(advisor.id)!.status === "done");
+  const advisorJson = JSON.stringify(readTrace(advisor.id));
+  assert.ok(!advisorJson.includes(snapshotPath) && !advisorJson.includes("Chapter one"), "a bound advisor job traces names and outcomes only");
+
+  // The same kind unbound keeps the detailed trace, exactly as before: the command, the Bash tail
+  // and the worker's own remark are all still there.
+  const free = jobs.start("write", "An ordinary writing job.", PAUL, "product", PAUL);
+  await waitFor(() => store.getJob(free.id)!.status === "done");
+  assert.ok(!workerPrompts.at(-1)!.includes("Chapter one"), "no source reached the unbound job's worker");
+  const freeJson = JSON.stringify(readTrace(free.id));
+  assert.ok(freeJson.includes(`sed -n 1p ${snapshotPath}`), "the command is kept");
+  assert.ok(freeJson.includes("ordinary tail output"), "the Bash tail is kept");
+  assert.ok(freeJson.includes("Reading the source's first line"), "the worker's remark is kept");
 });
 
 test("a job marked for a bound source fails closed when the source is absent, modified or its reader is missing: no source-free success", async () => {

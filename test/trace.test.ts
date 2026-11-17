@@ -46,6 +46,77 @@ test("the assistant, CV and DNS kinds record names and outcomes only, and no rem
   }
 });
 
+test("a job carrying a bound private source records names and outcomes only, whatever its kind", () => {
+  // Synthetic fixture: a staged source's path and one of its own lines, the kinds that may carry one.
+  const sourcePath = "/data/doc-snapshots/synthetic-snapshot.txt";
+  const sourceLine = "Chapter one opens quietly.";
+  for (const kind of ["write", "advisor"] as const) {
+    const names = new Map<string, string>();
+    // The worker's Bash call and its result both quote the bound source: neither is kept.
+    const tool = shapeTrace({ type: "tool", id: "7", name: "Bash", input: { command: `grep -n ${sourceLine} ${sourcePath}` } }, kind, names, true);
+    const res = shapeTrace({ type: "tool_result", id: "7", isError: false, text: `${sourceLine}\n` }, kind, names, true);
+    const remark = shapeTrace({ type: "text", text: `The source says ${sourceLine}` }, kind, names, true);
+    assert.equal(tool?.name, "Bash", "the tool name is kept");
+    assert.equal(tool?.text, undefined, "a bound job's trace holds no command");
+    assert.equal(res?.name, "Bash");
+    assert.equal(res?.text, undefined, "no Bash tail");
+    assert.equal(remark, undefined, "no worker remark");
+    const kept = JSON.stringify([tool, res]);
+    assert.ok(!kept.includes(sourcePath), "no source path");
+    assert.ok(!kept.includes(sourceLine), "no source content");
+    // The outcome half is kept exactly: a failing result says it failed, never what it said.
+    const failed = shapeTrace({ type: "tool_result", id: "8", isError: true, text: `grep: ${sourcePath}: no such file` }, kind, names, true);
+    assert.equal(failed?.error, true, "the outcome is kept");
+    assert.equal(failed?.text, undefined, "the failure's words are not");
+    // How the run ended is an outcome, so it stays.
+    assert.equal(shapeTrace({ type: "end", outcome: "finished", turns: 4 }, kind, names, true)?.text, "finished");
+  }
+});
+
+test("a bound job's saved trace holds no source path, content, tail or remark; an unbound job's is unchanged", () => {
+  const sourcePath = "/data/doc-snapshots/synthetic-snapshot.txt";
+  const sourceLine = "Chapter one opens quietly.";
+  // A worker that quotes the bound source in a command, a Bash tail, a Read error and a remark.
+  const events = (): Raw[] => [
+    { type: "tool", id: "1", name: "Bash", input: { command: `cat ${sourcePath} | head -5` } },
+    { type: "tool_result", id: "1", isError: false, text: `${sourceLine}\n${"a tail line of ordinary output. ".repeat(60)}` },
+    { type: "text", text: `Working from the source: ${sourceLine}` },
+    { type: "tool", id: "2", name: "Read", input: { file_path: sourcePath } },
+    { type: "tool_result", id: "2", isError: true, text: `ENOENT: no such file ${sourcePath}` },
+    { type: "end", outcome: "finished", turns: 3 },
+  ];
+
+  // The bound job: names and outcomes only, in the file and in what /trace replies.
+  const boundDir = dir();
+  const bound = new JobTrace("bound1", "write", boundDir, true);
+  bound.note("start", "write on product, model sonnet");
+  for (const e of events()) bound.event(e);
+  const boundLines = readTrace("bound1", boundDir);
+  const boundJson = JSON.stringify(boundLines);
+  assert.ok(boundLines.length >= 6, "every step is traced, as names and outcomes");
+  assert.ok(boundLines.some((l) => l.ev === "tool" && l.name === "Bash"), "tool names are kept");
+  assert.ok(boundLines.some((l) => l.ev === "result" && l.name === "Read" && l.error), "outcomes are kept");
+  assert.ok(boundLines.some((l) => l.ev === "end" && l.text === "finished"), "the run's end is kept");
+  for (const banned of [sourcePath, sourceLine, "cat ", "a tail line of ordinary output", "Working from the source"])
+    assert.ok(!boundJson.includes(banned), `a bound job's trace holds none of it: ${banned}`);
+  const boundText = traceText("Opening · write · bound1", "done", boundLines);
+  assert.match(boundText, /steps/);
+  assert.ok(!boundText.includes(sourcePath) && !boundText.includes(sourceLine), "/trace replies with none of the source");
+
+  // The same kind unbound: the useful detailed trace, exactly as before.
+  const freeDir = dir();
+  const free = new JobTrace("free1", "write", freeDir);
+  free.note("start", "write on product, model sonnet");
+  for (const e of events()) free.event(e);
+  const freeLines = readTrace("free1", freeDir);
+  const freeJson = JSON.stringify(freeLines);
+  assert.ok((freeLines.find((l) => l.ev === "tool" && l.name === "Bash")?.text ?? "").includes(`cat ${sourcePath}`), "the command is kept");
+  assert.ok(freeJson.includes(sourcePath), "an unbound job's trace keeps ordinary paths");
+  assert.ok(freeJson.includes("a tail line of ordinary output"), "the Bash tail is kept");
+  assert.ok(freeJson.includes("Working from the source"), "the worker's remark is kept");
+  assert.match(traceText("Opening · write · free1", "done", freeLines), /Working from the source/);
+});
+
 test("a trace stops growing at its cap but still records how the job ended", () => {
   const d = dir();
   const t = new JobTrace("big", "engineer", d);

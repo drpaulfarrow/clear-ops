@@ -13,7 +13,10 @@ import type { JobKind } from "./store.js";
  * tool answered or failed, with a clipped excerpt of what a built-in tool said (a failing test's output,
  * a refused command); the worker's own short remarks; and how the run ended. What it never holds:
  * anything from a kind that works over Paul's mail, calendar, CV or DNS (PRIVATE_KINDS: tool names and
- * outcomes only), the input or output of any service tool (`mcp__...`: names and outcomes only, because
+ * outcomes only), the same from every job that carries a bound private source (a staged Google Doc,
+ * `src/doc-reader.ts`), whatever its kind - the source's own text reached that job's worker, so no
+ * command, tail or remark that could quote it is kept to outlive the one job the source is bound to -,
+ * the input or output of any service tool (`mcp__...`: names and outcomes only, because
  * those carry mail, pages, logins and search results), a one-time code, a password or a card (those never
  * reach a model, so they cannot reach here), and every token `redact` knows.
  *
@@ -86,9 +89,20 @@ function inputSummary(name: string, input: Record<string, unknown>): string {
 }
 
 /** Shapes one raw event into the line that is stored, or nothing when the kind or tool keeps it out. */
-export function shapeTrace(e: RawTraceEvent, kind: JobKind, names: Map<string, string>, now: Date = new Date()): TraceLine | undefined {
+export function shapeTrace(
+  e: RawTraceEvent,
+  kind: JobKind,
+  names: Map<string, string>,
+  /** A private source is bound to this job (src/doc-reader.ts): names and outcomes only, whatever its kind. */
+  sourceBound = false,
+  now: Date = new Date(),
+): TraceLine | undefined {
   const t = now.toISOString();
-  const priv = PRIVATE_KINDS.includes(kind);
+  // Names and outcomes only: the private kinds (Paul's mail, calendar, CV and zones), and every job
+  // carrying a bound private source whatever its kind, because that job's worker was handed the
+  // source's own text and `redact` knows token shapes, not a document's words - so a clipped quote
+  // kept here would outlive the one job the source is bound to (its intended lifetime).
+  const priv = PRIVATE_KINDS.includes(kind) || sourceBound;
   const sub = "sub" in e && e.sub ? { sub: true } : {};
   if (e.type === "tool") {
     names.set(e.id, e.name);
@@ -124,6 +138,8 @@ export class JobTrace {
     readonly jobId: string,
     private readonly kind: JobKind,
     dir: string = tracesDir(),
+    /** A private source is bound to this job (src/doc-reader.ts): its trace keeps names and outcomes only. */
+    private readonly sourceBound = false,
   ) {
     this.file = path.join(dir, `${jobId.replace(/[^A-Za-z0-9_-]/g, "")}.jsonl`);
     try {
@@ -144,7 +160,7 @@ export class JobTrace {
   event(e: RawTraceEvent): void {
     let line: TraceLine | undefined;
     try {
-      line = shapeTrace(e, this.kind, this.names);
+      line = shapeTrace(e, this.kind, this.names, this.sourceBound);
     } catch {
       return;
     }

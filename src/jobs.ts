@@ -28,7 +28,7 @@ import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
-import { JobTrace, type RawTraceEvent } from "./trace.js";
+import { JobTrace, tracesDir, type RawTraceEvent } from "./trace.js";
 import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
@@ -1097,7 +1097,11 @@ export class JobRunner {
         ? { sdkUsd: limits.realBudgetUsd ?? limits.maxBudgetUsd, onAnthropic, isGuard: limits.realBudgetUsd === undefined }
         : { sdkUsd: limits.maxBudgetUsd, onAnthropic, isGuard: true };
       costMeter = this.costWatch(cap.onAnthropic ? undefined : limits.realBudgetUsd, () => live.abort.abort());
-      const trace = new JobTrace(id, job.kind);
+      // A job whose worker was handed a bound private source (docNote above, src/doc-reader.ts) traces
+      // names and outcomes only, whatever its kind (src/trace.ts): `redact` knows token shapes, not a
+      // document's own words, so a clipped command, tail or remark kept here could carry the source's
+      // path and quotes past the one job the source is bound to. An unbound job keeps the detailed trace.
+      const trace = new JobTrace(id, job.kind, tracesDir(), docNote !== "");
       trace.note("start", `${job.kind} on ${job.target ?? "product"}, model ${route.model}${job.resumed ? `, resumed (${job.resumed})` : ""}${job.fixRound ? `, fix round ${job.fixRound}` : ""}`);
       progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
       const shown = progress;
