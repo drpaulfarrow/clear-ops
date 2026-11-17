@@ -35,6 +35,7 @@ How does tollbit.com's web app work? What does it load and call?
 What did Sam last say about pricing?
 Prep me for my 10am.
 connect Google   /google   /google disconnect
+read doc <doc id or link> for job 93137e
 show job 93137e
 /board   /reports   /jobs   /password   /status   /pending   /reset   /help   /uploads
 /resume   retry 3552e7
@@ -214,6 +215,8 @@ Only if Google says the app is blocked: admin.google.com, Security, Access and d
 
 To disconnect: say "disconnect Google" or send `/google disconnect`. That revokes the grant at Google and deletes the stored token. You can also remove it at myaccount.google.com, Security, Third-party connections. `/google` shows whether it is connected.
 
+**Reading a private Google Doc for a job.** `read doc <doc id or link> for job <id>` reads one Google Doc you have identified, through the same Google connection, and hands its text to that job alone, fenced as untrusted data. It is refused unless the document is on the service's own allowlist (`GOOGLE_DOC_IDS`, the app-level list of documents you identified, which is separate from the Google permission) and the connected grant carries the read-only Google Docs permission (`documents.readonly`, nothing wider; the existing Gmail and Calendar permission is never changed by the code). The service saves an immutable private snapshot with its source, retrieval time and revision, never mirrored to any repository, and the job's output is kept out of the outputs repository too. A missing permission, a redirect, an oversize, empty or textless document is a clear failure, never a partial read. `test/doc-reader.test.ts` covers all of this synthetically; see the Google Docs bullet in `docs/ARCHITECTURE.md`.
+
 The scopes are the narrowest that allow drafts and holds. `gmail.compose` would technically allow sending, which is why the code refuses every send endpoint whatever the model asks. The refresh token is encrypted with AES-256-GCM under `DATA_DIR/secrets` (owner-only) on the data volume.
 
 ### Follow-ups, outreach and scheduling
@@ -365,6 +368,7 @@ See `.env.example`. The important ones:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The OAuth client for the executive assistant (see above). |
 | `GOOGLE_ACCOUNT` | The only Google account that may be connected. |
 | `GOOGLE_TOKEN_KEY` | Encrypts the stored Google refresh token. Without it a key is derived from the client secret. |
+| `GOOGLE_DOC_IDS` | Comma-separated Google Doc IDs Paul identified for `read doc` (the app-level allowlist, separate from the Google permission). Defaults to the one document named as the book's voice source. |
 | `EA_BOOKING_LINK` | Paul's appointment-schedule link, offered in scheduling drafts. Set as an Actions variable (not a secret). Optional; `/booking <link>` in chat sets it at runtime and takes precedence. |
 | `OUTBOUND_DAILY_CAP` | Most sends, invitations and cancellations per London day. Default 10. |
 | `OUTBOUND_MAX_RECIPIENTS` | Most recipients (To, Cc, Bcc) or attendees per item. Default 10. |
