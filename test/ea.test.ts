@@ -372,7 +372,7 @@ test("consent stores the refresh token encrypted, owner-only, and refreshes acce
   const { auth, tick } = newAuth(g.fetch);
   const state = stateOf(auth.consentUrl("tg:99887766", "tg:99887766"));
   const r = await auth.completeConsent(state, "the-code");
-  assert.deepEqual(r, { account: "paul@clear.exchange", requestedBy: "tg:99887766", replyTo: "tg:99887766" });
+  assert.deepEqual(r, { account: "paul@clear.exchange", requestedBy: "tg:99887766", replyTo: "tg:99887766", scopes: [...GOOGLE_SCOPES] });
   const raw = fs.readFileSync(auth.tokenFile, "utf8");
   assert.ok(!raw.includes("refresh-secret-1"), "the refresh token is not stored in plain text");
   assert.equal(fs.statSync(auth.tokenFile).mode & 0o777, 0o600);

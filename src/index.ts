@@ -50,7 +50,7 @@ import { defaultProbes, HealthProbes } from "./health.js";
 import { defaultCanary, type Canary } from "./auto-resume.js";
 import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
 import { DocumentIngest } from "./documents.js";
-import { DocReader } from "./doc-reader.js";
+import { DocReader, DOCS_READONLY_SCOPE } from "./doc-reader.js";
 import { Uploads } from "./uploads.js";
 import { DeviceBudget, DEVICE_PATH, DEVICE_TEXT_MAX_CHARS, DEVICE_TURNS_PER_DAY, DeviceRegistry, deviceRouter } from "./device.js";
 import { BridgeChat, BRIDGE_REPLY_TO } from "./instinct-chat.js";
@@ -345,17 +345,32 @@ export function buildApp(deps: AppDeps) {
   app.get(GOOGLE_CALLBACK_PATH, async (req, res) => {
     const state = typeof req.query.state === "string" ? req.query.state : "";
     const code = typeof req.query.code === "string" ? req.query.code : "";
+    // A denial (or any Google-side error) is reported plainly and changes nothing: no token is
+    // exchanged, nothing is stored, and the existing grant is untouched.
+    if (typeof req.query.error === "string" && req.query.error) {
+      const denied = req.query.error === "access_denied";
+      return res.status(400).type("html").send(page("Not connected", denied ? "You declined the permissions, so nothing was changed. Ask for a new link in chat whenever you want to try again." : "Google did not grant access. Ask for a new link in chat if you want to try again."));
+    }
     if (!state || !code) {
       return res.status(400).type("html").send(page("Not connected", "Google did not grant access. Ask for a new link in chat if you want to try again."));
     }
     try {
       const r = await google.completeConsent(state, code);
-      res.type("html").send(page("Connected", "Your assistant can now read your mail and calendars, write drafts and place holds. It can send an email or invite people only after you approve that exact item in chat. You can close this tab."));
+      const docs = r.scopes.includes(DOCS_READONLY_SCOPE);
+      res.type("html").send(
+        page(
+          "Connected",
+          docs
+            ? "Your assistant can now read your mail and calendars, write drafts and place holds, and read the Google Doc you name for a job you choose. It can send an email or invite people only after you approve that exact item in chat. You can close this tab."
+            : "Your assistant can now read your mail and calendars, write drafts and place holds. It can send an email or invite people only after you approve that exact item in chat. You can close this tab.",
+        ),
+      );
       deps.store.setSetting("eaReplyTo", r.replyTo);
       const made = ensureEaSchedules(scheduler, r.requestedBy, r.replyTo);
       const lines = made.map((m) => `${m.name} ${m.cron} (${m.id}${m.created ? "" : ", already set"})`).join("; ");
+      const docsNote = docs ? " You also approved the optional read-only Google Docs permission: a document you name can now be read for one job at a time." : "";
       await deps.messenger
-        .send(r.replyTo, `Google connected as ${r.account}: drafts plus holds; it sends mail or invites people only when you approve each one in chat. Weekday briefs scheduled: ${lines}. Tell me to move or cancel either.`)
+        .send(r.replyTo, `Google connected as ${r.account}: drafts plus holds; it sends mail or invites people only when you approve each one in chat.${docsNote} Weekday briefs scheduled: ${lines}. Tell me to move or cancel either.`)
         .catch(() => undefined);
     } catch (err) {
       const msg = err instanceof GoogleError ? err.message : "Something went wrong talking to Google. Ask for a new link in chat.";

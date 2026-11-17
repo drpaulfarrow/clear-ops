@@ -237,7 +237,7 @@ export class DocReader {
     const granted = this.s.auth.grantedScopes() ?? [];
     if (!granted.includes(DOCS_READONLY_SCOPE)) {
       this.log({ ok: false, docId: parsed.docId, reason: "the connected grant does not carry the read-only Google Docs permission" });
-      throw new DocReaderError("The connected Google grant does not include the read-only Google Docs permission, so nothing was read. The existing Gmail and Calendar permission is untouched; the Docs permission has to be approved and connected first.");
+      throw new DocReaderError("The connected Google grant does not include the optional read-only Google Docs permission, so nothing was read. The existing Gmail and Calendar permission is untouched. Say \"docs consent\" in chat for the one-time link that adds it.");
     }
     const token = await this.s.auth.accessToken();
     // The fetch URL is always built here from the validated ID, so the link as pasted is never

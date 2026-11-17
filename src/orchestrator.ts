@@ -24,7 +24,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
-import { parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
+import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
@@ -207,6 +207,10 @@ export class Orchestrator {
     // handled above, before this line.
     const docCmd = parseDocReadCommand(trimmed);
     if (docCmd && this.docs) return this.handleDocRead(sender, from, docCmd);
+    // The optional Docs consent: his own whole message asks for the one-time link that adds the
+    // read-only Google Docs permission to the existing grant. Parsed here, before any model, like
+    // every other owner-only command; the Google screen itself is the owner's step to approve.
+    if (/^(?:docs consent|connect docs|\/docs)$/i.test(trimmed)) return this.handleDocsConsent(sender, from);
     const out = parseOutboundCommand(trimmed);
     if (out && this.outbound && (!out.id || this.outbound.has(out.id))) return this.handleOutbound(sender, from, out.verb, out.id);
     const approval = trimmed.match(/^(yes|approve|ok|no|reject)\s+([a-f0-9]{6})\b/i);
@@ -478,7 +482,9 @@ export class Orchestrator {
     if (!g || !g.configured()) return "Google is not set up yet. Ask me to connect Google and I will send the one-time setup steps.";
     try {
       const account = g.account();
-      return account ? `Google is connected as ${account} (drafts, holds, and send or invite only with your approval of each). /google disconnect to revoke.` : 'Google is set up but not connected. Say "connect Google" for a sign-in link.';
+      if (!account) return 'Google is set up but not connected. Say "connect Google" for a sign-in link.';
+      const docs = (g.grantedScopes() ?? []).includes(DOCS_READONLY_SCOPE);
+      return `Google is connected as ${account} (drafts, holds, and send or invite only with your approval of each). Private Google Doc reading for a job you name: ${docs ? "enabled" : "not enabled (say \"docs consent\" for the one-time link that adds the optional read-only Docs permission)"}. /google disconnect to revoke.`;
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     }
@@ -487,6 +493,23 @@ export class Orchestrator {
   private async googleDisconnect(): Promise<string> {
     if (!this.google) return "Google is not set up.";
     return (await this.google.disconnect()) ? "Google disconnected: access revoked and the stored token deleted. Scheduled briefs will fail until you connect again." : "Google was not connected.";
+  }
+
+  /**
+   * Paul's own "docs consent": the one-time link that adds the optional read-only Google Docs
+   * permission to the existing Google grant. The consent is incremental (Google is asked to add the
+   * Docs permission on top of what the grant already carries), the callback validates the scopes
+   * Google actually returns, and a denial changes nothing. Without a Google connection at all this
+   * is the ordinary connect link, exactly as before.
+   */
+  private async handleDocsConsent(sender: string, from: string): Promise<void> {
+    if (!this.google) return void (await this.messenger.send(from, "Google is not set up, so there is no connection to add the Docs permission to."));
+    if (!this.google.configured()) return void (await this.messenger.send(from, "Google is not set up yet. Ask me to connect Google and I will send the one-time setup steps."));
+    const link = this.google.consentUrl(sender, from, { extraScopes: [DOCS_READONLY_SCOPE] });
+    await this.messenger.send(
+      from,
+      `One-time link (15 minutes) to add the read-only Google Docs permission to your existing Google connection: ${link}. Your Gmail and Calendar permission stays exactly as it is; nothing wider is asked for, and if you cancel or deny on Google's screen nothing changes.`,
+    );
   }
 
   /**
@@ -1380,6 +1403,7 @@ Send a file (CSV, PDF, screenshot, zip) and I save it privately for me and the w
 YES <id> or NO <id>: approve or reject an action
 send <id> or cancel <id>: approve or cancel an email or invitation the assistant prepared (you see its exact text first; it expires after 24 hours)
 read doc <id or link> for job <id>: read one private Google Doc you identified, through the connected Google account, and hand its text to that job alone (never read without you asking, and never sent anywhere else)
+docs consent: the one-time link that adds the optional read-only Google Docs permission to your existing Google connection (mail and calendar access is unchanged)
 /google: is Google connected; /google disconnect to revoke
 /followups: who is waiting on you, what you promised, who you are waiting on
 done <id>, snooze <id> 2d, draft nudge <id>: manage a follow-up

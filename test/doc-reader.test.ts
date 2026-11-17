@@ -131,8 +131,8 @@ test("the selector is a document ID or exactly one canonical link; everything el
     DOC_ID + ".extra",
     DOC_ID + "/edit",
     "../../etc/passwd",
-    "1SyntheticIdThatIsNotARealDocument000000000",
-    "1SyntheticIdWithSpace 0000000000000000000000",
+    "1Synthetic id with a space in it 00000000000",
+    "https://docs.google.com/document/d/" + DOC_ID + "?usp=sharing",
     "",
   ]) {
     let msg = "";
@@ -218,7 +218,7 @@ test("no gate, no read: a document Paul has not identified, no connection and no
     () => missingScope.r.read({ requester: PAUL, selector: DOC_ID }),
     (err: unknown) =>
       err instanceof DocReaderError &&
-      /does not include the read-only Google Docs permission/.test(err.message) &&
+      /does not include the .*read-only Google Docs permission/.test(err.message) &&
       /Gmail and Calendar permission is untouched/.test(err.message),
   );
   assert.equal(seen.length, 0, "without the Docs permission nothing is fetched");
