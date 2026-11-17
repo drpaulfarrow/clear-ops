@@ -6,7 +6,7 @@ import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { perJobModelError, provider, runRoute } from "./llm.js";
 import type { OtpRelay } from "./otp.js";
-import type { DocReader } from "./doc-reader.js";
+import { DocReaderError, type DocReader } from "./doc-reader.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -346,6 +346,14 @@ export class JobRunner {
       if (extra.reviewOnly !== true) delete extra.reviewOnly;
     }
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
+    // Prelaunch binding of a staged private source (src/doc-reader.ts): the snapshots Paul staged
+    // with his own "read doc <id>" are bound to this job before it is dispatched, so the worker
+    // receives them in its first prompt, never after it has started. Only writing kinds of the
+    // same owner are eligible, and a scheduled run is never given a staged source.
+    if (this.docs && !isScheduledRun(brief)) {
+      const bound = this.docs.bindStaged({ id: job.id, kind: job.kind, requestedBy: job.requestedBy });
+      if (bound) this.store.updateJob(job.id, { docSnapshot: true });
+    }
     return this.dispatch(job);
   }
 
@@ -957,11 +965,17 @@ export class JobRunner {
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
       const carryOn = job.savedWork ? `\n\n${savedWorkNote(job.savedWork)}` : "";
-      // The private Google Doc snapshot Paul bound to this job, if any (src/doc-reader.ts): its text is
-      // handed to this job's worker alone, fenced as untrusted data with its provenance. Every other
-      // job gets nothing, and no path or token is ever mentioned.
-      const docBlock = this.docs?.snapshotBlock(id) ?? "";
-      const docNote = docBlock ? `\n\n${docBlock}` : "";
+      // The private source bound to this job, if any (src/doc-reader.ts): its text is handed to
+      // this job's worker alone, fenced as untrusted data with its provenance. A job marked as
+      // carrying a bound source fails closed here if the source is absent: it never runs
+      // source-free by accident, and no path or token is ever mentioned.
+      let docNote = "";
+      if (this.docs) {
+        const marked = this.store.getJob(id)?.docSnapshot ?? job.docSnapshot;
+        const block = marked ? this.docs.requireBound(id) : this.docs.snapshotBlock(id);
+        if (marked && !block) throw new DocReaderError(`The private source bound to job ${id} produced no text, so the job refuses to run without it.`);
+        docNote = block ? `\n\n${block}` : "";
+      }
       const link = job.kind === "ea" ? bookingLink(this.store) : undefined;
       const permits =
         job.kind === "ea"

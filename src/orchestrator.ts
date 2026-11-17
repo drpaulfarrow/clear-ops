@@ -24,7 +24,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
-import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
+import { DOCS_READONLY_SCOPE, DOC_SOURCE_JOB_KINDS, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
@@ -524,19 +524,30 @@ export class Orchestrator {
       const job = this.store.getJob(cmd.forJob);
       if (!job) return void (await this.messenger.send(from, `No job ${cmd.forJob} to bind the document to.`));
       if (!isPaulsJob(job, isAllowed)) return void (await this.messenger.send(from, "Only a job started from your own chat can be given a document to read."));
+      if (!DOC_SOURCE_JOB_KINDS.includes(job.kind as (typeof DOC_SOURCE_JOB_KINDS)[number]))
+        return void (await this.messenger.send(from, `A ${job.kind} job cannot be given a document to read: only writing jobs (${DOC_SOURCE_JOB_KINDS.join(", ")}) can work from one.`));
+      if (job.status !== "queued")
+        return void (await this.messenger.send(
+          from,
+          job.status === "running"
+            ? `Job ${job.id} has already started, so the document cannot be bound to it. Stage it instead ("read doc <id or link>") before starting the next writing job, and the worker receives it as its first step.`
+            : `Job ${job.id} is ${job.status}, so the document cannot be bound to it. Stage it instead ("read doc <id or link>") before starting the next writing job, and the worker receives it as its first step.`,
+        ));
       jobId = job.id;
     }
     try {
-      const receipt = await this.docs!.read({ requester: sender, selector: cmd.selector, ...(jobId ? { forJob: jobId } : {}) });
+      const receipt = await this.docs!.read({ requester: sender, selector: cmd.selector, ...(jobId ? { forJob: jobId } : { stage: true }) });
       // The flag is the service's own mark that this job's output is kept out of the outputs
       // repository (src/output-folders.ts); the snapshot itself stays bound in the reader.
       if (jobId) this.store.updateJob(jobId, { docSnapshot: true });
       const revision = receipt.revisionKnown ? `revision ${receipt.revisionId}` : "revision not available from Google's reply";
       const extras = `${receipt.paragraphs.toLocaleString("en-GB")} paragraphs${receipt.note ? `, ${receipt.note}` : ""}`;
-      const bound = jobId ? ` and bound it to job ${jobId}` : "";
+      const tail = jobId
+        ? ` and bound it to job ${jobId}`
+        : ", staged for the next writing job (write, cv or advisor) you start from this chat: that worker receives it as its first step. To bind it to a job waiting in the queue instead, say read doc <id or link> for job <id>";
       return void (await this.messenger.send(
         from,
-        `Read "${receipt.title}" from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot${bound}.${jobId ? "" : " No job receives it until you bind one: read doc <id or link> for job <id>."}`,
+        `Read "${receipt.title}" from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot${tail}.`,
       ));
     } catch (err) {
       return void (await this.messenger.send(from, err instanceof Error ? err.message : "The document could not be read."));
