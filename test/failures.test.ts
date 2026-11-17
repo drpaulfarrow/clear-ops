@@ -246,7 +246,7 @@ test("the chief is told about failed jobs and a paused queue, and its own credit
     const call = async (name: string, args: unknown) => (await (tools[name].callback ?? tools[name].handler)(args, {})).content[0].text as string;
     replies.push(await call("job_status", { id: a.id }));
     replies.push(await call("job_status", {}));
-    replies.push(await call("start_job", { kind: "engineer", title: "Another fix", brief: "More", target: "product" }));
+    replies.push(await call("start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Another fix", brief: "More", target: "product" }));
     replies.push(await call("resume_jobs", {}));
     return { text: "ok", sessionId: "s1" };
   };

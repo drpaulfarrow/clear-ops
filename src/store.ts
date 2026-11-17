@@ -74,6 +74,8 @@ export interface Job {
   queuePos?: number;
   /** The pull request this job opened or is fixing (engineering kinds), as a URL or "#<number>". */
   pr?: string;
+  /** The finish line the chief set for an engineer job before it started; also the last section of its brief. */
+  doneWhen?: string;
   /** Engineer jobs started automatically to address a review: 1 for the first round, and so on. */
   fixRound?: number;
   /** Maintainer jobs started automatically after an engineering job: the id of that job. */
