@@ -24,6 +24,7 @@ const { Scheduler } = await import("../src/scheduler.js");
 const { bootstrapRepos, repoProblemsMessage } = await import("../src/bootstrap.js");
 const { jobLabel } = await import("../src/titles.js");
 import type { AgentRunner, RunResult } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 const waitFor = async (pred: () => boolean, ms = 5000) => {
@@ -301,7 +302,7 @@ function chief(calls: Array<[string, Record<string, unknown>]>, worker: AgentRun
   const results: Array<{ text: string; isError?: boolean }> = [];
   let systemPrompt = "";
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (!ops) return worker(o);
     systemPrompt = o.systemPrompt;
     const tools = ops.instance?._registeredTools;

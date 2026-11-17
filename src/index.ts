@@ -711,6 +711,11 @@ if (isMain) {
     if (imported.created) outputs.publish(imported.job);
   }
   const { app, orchestrator, jobs, startEaTimers, startHealth, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs, canary: defaultCanary() });
+  // Fail closed before listening: the chief's ops server must advertise the shape its namespace is
+  // pinned with (src/ops-schema.ts). A schema change that forgot its version bump stops the boot here,
+  // so the deploy's health check keeps the previous version serving rather than resumed chief sessions
+  // being advertised a stale schema.
+  await orchestrator.opsSchemaGuard;
   startEaTimers();
   // The board's own timers: one heartbeat a minute and the dependency checks every five. Both are
   // read-only and unref'd, so neither holds the process open nor waits on anything.

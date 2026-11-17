@@ -12,6 +12,7 @@ const { Store } = await import("../src/store.js");
 const { JobRunner, lockKey } = await import("../src/jobs.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner, RunOptions, RunResult } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 
@@ -309,7 +310,7 @@ test("the chief's start_job says a job was queued and behind which job; job_stat
   let systemPrompt = "";
   const g = gatedRunner();
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (!ops) return g.runner(o);
     systemPrompt = o.systemPrompt;
     const tools = ops.instance?._registeredTools;

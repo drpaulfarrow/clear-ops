@@ -26,6 +26,7 @@ const { ConsoleMessenger } = await import("../src/whatsapp.js");
 const { workerSpec, JOB_KINDS, readableDirs, UPLOADS_RULE } = await import("../src/agents.js");
 import type { AgentRunner, RunOptions } from "../src/agents.js";
 import type { Attachment } from "../src/uploads.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const fixedDate = () => new Date("2026-10-28T09:00:00Z");
 const freshDir = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-updir-")), "uploads");
@@ -282,7 +283,7 @@ function harness() {
   const uploads = new Uploads(path.join(dir, "uploads"), undefined, fixedDate);
   const runner: AgentRunner = async (o) => {
     calls.push(o);
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (ops && o.prompt.includes("please delete it")) {
       const t = ops.instance?._registeredTools?.delete_upload;
       const r = await (t?.callback ?? t?.handler)({ name: "Connections.csv" }, {});
