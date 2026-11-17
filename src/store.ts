@@ -103,6 +103,25 @@ export interface Job {
    * automatic follow-ups (review, fix rounds, loop rounds) and the bridge. Not necessarily his whole intent.
    */
   triggerMessage?: JobTrigger;
+  /**
+   * The provider model this one job's worker runs on, when the chief pinned one for it (start_job):
+   * one of PER_JOB_MODELS (src/llm.ts), an explicit id rather than an alias. Absent: the kind's own
+   * model. Never on a job from the Instinct bridge.
+   */
+  model?: string;
+  /**
+   * True when this engineering job opens its pull request for Paul to review himself: no automatic
+   * review, fix round or merge follows it, in code (src/jobs.ts) and not only in prose. The chief sets
+   * it from Paul's own start_job only; the bridge never carries it.
+   */
+  reviewOnly?: boolean;
+  /**
+   * Set by the service only (src/offboard-import.ts): this record is a one-use honest import of an
+   * already completed offboard run, not a run this service made. It holds the offboard run's own id,
+   * so a repeated import does nothing. No worker ran for it here, nothing was messaged for it, and its
+   * timestamps, model and cost are the imported run's own figures.
+   */
+  importedRun?: string;
   /** Research jobs: "deep" gets more turns and budget and writes a long, structured report. */
   depth?: "standard" | "deep";
   createdAt: string;
