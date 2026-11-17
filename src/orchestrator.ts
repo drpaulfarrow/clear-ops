@@ -16,6 +16,7 @@ import { describeToolUse, LiveStatus, type LiveStatusOptions } from "./status.js
 import { boardUrl } from "./jobs-board.js";
 import { PASSWORD_LINK_MINUTES, signIn } from "./sign-in.js";
 import { reportsUrl } from "./reports.js";
+import { readTrace, traceText } from "./trace.js";
 import { describeUploads, formatSize, inlineImages, receiptText, transcriptAsMessage, UploadError, Uploads, type Attachment, type SavedUpload, type VoiceNote } from "./uploads.js";
 import { isAudio, transcribe, TranscribeError, transcriptionAvailable, transcriptionUnavailableReason } from "./transcribe.js";
 import { GoogleAuth, setupSteps } from "./google.js";
@@ -206,6 +207,14 @@ export class Orchestrator {
       return this.messenger.send(from, "Started a fresh conversation. Jobs, schedules and notes are kept.");
     }
     if (/^\/jobs$/i.test(trimmed)) return this.messenger.send(from, this.jobsText());
+    // The saved trace of one job (src/trace.ts): what its worker actually did, step by step, and where
+    // it failed. Read from the file by the service, with no model call.
+    const traceCmd = trimmed.match(/^\/trace\s+([A-Za-z0-9_-]{4,40})$/i);
+    if (traceCmd) {
+      const j = this.store.getJob(traceCmd[1]);
+      if (!j) return this.messenger.send(from, `No job ${traceCmd[1]}. /jobs lists the recent ones with their ids.`);
+      return this.messenger.send(from, traceText(jobLabel(j), j.status === "failed" && j.failure ? `failed (${failureLabel(j.failure)})` : j.status, readTrace(j.id)));
+    }
     // The jobs board link: the same list as /jobs, as a page Paul can bookmark on his phone. The token
     // is minted once and kept in the store; only the read-only board is behind it, and behind the
     // sign-in below.
@@ -1322,6 +1331,7 @@ const HELP = `Talk to me normally. I answer quick things myself and delegate the
 Commands:
 /jobs: recent jobs
 /board: a link to the jobs board, a read-only page you can bookmark on your phone, behind your password
+/trace <id>: what one job's worker actually did, step by step, and where it failed (kept 14 days)
 /reports: a link to your saved reports, every finished job's output as a page you can read on your phone, behind your password
 /password: a private one-time link to set or change the password that opens the reports and the board (type it there, never in chat; setting it signs out every device)
 /spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free

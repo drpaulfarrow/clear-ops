@@ -2,6 +2,7 @@ import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMes
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
+import type { RawTraceEvent } from "./trace.js";
 import { githubAuth, workerGithubEnv } from "./github-auth.js";
 import { repoCredentialLabel } from "./repo-tokens.js";
 import { SEARCH_SECRETS } from "./search.js";
@@ -63,6 +64,11 @@ export interface RunOptions {
    * job runner can tell a working job from a stalled one. Must be cheap; it is called often.
    */
   onActivity?: () => void;
+  /**
+   * The durable trace (src/trace.ts): each tool call, each tool result, the agent's own remarks and how
+   * the run ended, as they happen, subagents included. The receiver clips and redacts; must be cheap.
+   */
+  onTrace?: (e: RawTraceEvent) => void;
   /** Called once with the run's session id as soon as the SDK reports it, so an interrupted job can resume the same conversation. */
   onSession?: (sessionId: string) => void;
   /** Aborting it stops the run and its process: a stalled, timed-out or cancelled job. */
@@ -214,6 +220,13 @@ export const sdkRunner: AgentRunner = async (o) => {
           }
         }
       }
+      if (o.onTrace) {
+        try {
+          traceMessage(message, o.onTrace);
+        } catch {
+          // A trace must never break the run.
+        }
+      }
       if (message.type === "assistant" && message.error && !message.parent_tool_use_id) sdkError = message.error;
       if (message.type === "assistant") noteCallCost(message, o.costMeter);
       if (message.type === "assistant" && o.onToolUse && !message.parent_tool_use_id) {
@@ -254,6 +267,30 @@ export const sdkRunner: AgentRunner = async (o) => {
   }
   return { text, sessionId, costUsd, ...(error ? { error } : {}) };
 };
+
+/** Reports one SDK message to the trace: tool calls, tool results, remarks and the end of the run. */
+export function traceMessage(message: unknown, emit: (e: RawTraceEvent) => void): void {
+  const m = message as { type?: string; subtype?: string; parent_tool_use_id?: string | null; num_turns?: number; is_error?: boolean; result?: string; errors?: string[]; message?: { content?: unknown } };
+  const sub = m.parent_tool_use_id ? { sub: true } : {};
+  const blocks = Array.isArray(m.message?.content) ? (m.message?.content as Array<Record<string, unknown>>) : [];
+  if (m.type === "assistant") {
+    for (const b of blocks) {
+      if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") emit({ type: "tool", id: b.id, name: b.name, input: (b.input ?? {}) as Record<string, unknown>, ...sub });
+      else if (b.type === "text" && typeof b.text === "string" && b.text.trim()) emit({ type: "text", text: b.text, ...sub });
+    }
+  } else if (m.type === "user") {
+    for (const b of blocks) {
+      if (b.type !== "tool_result" || typeof b.tool_use_id !== "string") continue;
+      const c = b.content;
+      const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: Record<string, unknown>) => (x?.type === "text" && typeof x.text === "string" ? x.text : "")).join("\n") : "";
+      emit({ type: "tool_result", id: b.tool_use_id, isError: b.is_error === true, text, ...sub });
+    }
+  } else if (m.type === "result") {
+    const failed = m.subtype !== "success" || m.is_error === true;
+    const outcome = m.subtype === "success" ? (m.is_error ? `API error: ${m.result ?? ""}` : "finished") : `${m.subtype}${m.errors?.length ? `: ${m.errors.join("; ")}` : ""}`;
+    emit({ type: "end", outcome, turns: m.num_turns, isError: failed });
+  }
+}
 
 /**
  * One user turn carrying images as well as text, so the model can actually see a screenshot.
