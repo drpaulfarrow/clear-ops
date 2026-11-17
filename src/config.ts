@@ -215,10 +215,21 @@ export const config = {
     enabled: (process.env.BROWSE ?? "on").toLowerCase() !== "off",
     maxActions: Number(process.env.BROWSE_MAX_ACTIONS ?? 60),
   },
+  /**
+   * Who merges pull requests on the workforce's own repository (SELF_REPO). "paul" (the default from
+   * 16 Nov 2026): the maintainer reviews and hands a mergeable pull request to Paul instead of merging,
+   * because every merge there redeploys the service. "maintainer": the maintainer merges, as before.
+   */
+  selfMerge: (process.env.SELF_MERGE ?? "paul").toLowerCase() === "maintainer" ? ("maintainer" as const) : ("paul" as const),
   models: {
     chief: process.env.CHIEF_MODEL ?? "haiku",
     worker: process.env.WORKER_MODEL ?? "haiku",
     engineer: process.env.ENGINEER_MODEL ?? "haiku",
+    /**
+     * The maintainer reviews and merges, so it gets its own setting (16 Nov 2026): a reviewer should be
+     * at least as strong as the engineer it reviews. Falls back to ENGINEER_MODEL when unset.
+     */
+    maintainer: process.env.MAINTAINER_MODEL || process.env.ENGINEER_MODEL || "haiku",
     /**
      * The executive assistant reads Paul's mail and calendar. Paul's call (13 Nov 2026): it runs on
      * Claude Sonnet on Anthropic's API directly, even when OPENROUTER_API_KEY sends everything else to

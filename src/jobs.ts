@@ -4,7 +4,7 @@ import { BROWSE_KINDS, SEARCH_KINDS, webToolsFor, type WebTools } from "./web-to
 import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
-import { provider, runRoute } from "./llm.js";
+import { perJobModelError, provider, runRoute } from "./llm.js";
 import type { OtpRelay } from "./otp.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -298,7 +298,7 @@ export class JobRunner {
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly"> = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
@@ -309,6 +309,10 @@ export class JobRunner {
       delete extra.permits;
       extra.origin = "instinct";
       delete extra.triggerMessage;
+      // Nor a model pin or the review-only flag: both are the owner's own start_job and nothing else's,
+      // so a bridge job never carries either, whatever a caller passed here.
+      delete extra.model;
+      delete extra.reviewOnly;
     } else delete extra.origin;
     if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds" || p === "send") : extra.permits;
     else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
@@ -321,6 +325,19 @@ export class JobRunner {
     // Only research has a depth; unlabelled research (a scheduled run, say) takes it from the brief.
     if (kind !== "research") delete extra.depth;
     else extra.depth = extra.depth === "deep" || extra.depth === "standard" ? extra.depth : detectDepth(brief);
+    // A model pinned for this one job, and the review-only flag, are validated here too, in the one
+    // function every job goes through: an unknown or alias model never reaches a run, and only a kind
+    // that opens a pull request can be review only. Both unset leave everything exactly as it was.
+    if (extra.model !== undefined) {
+      const refused = perJobModelError(extra.model);
+      if (refused) throw new Error(refused);
+      if (kind === "ea") throw new Error("The executive assistant always runs on Claude on Anthropic's API directly, so its model cannot be pinned for a job.");
+      extra.model = extra.model.trim();
+    }
+    if (extra.reviewOnly !== undefined) {
+      if (!PR_KINDS.includes(kind)) throw new Error(`A ${kind} job cannot be review only: only ${PR_KINDS.join(" and ")} open a pull request for Paul to review.`);
+      if (extra.reviewOnly !== true) delete extra.reviewOnly;
+    }
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
     return this.dispatch(job);
   }
@@ -960,8 +977,9 @@ export class JobRunner {
       //
       // On Anthropic directly there is no per-call price to read and the SDK's list-price cost is what
       // is billed, so the job's own cap is handed to the SDK itself and the measure is named as
-      // Anthropic's own list price.
-      const route = runRoute(job, spec.model);
+      // Anthropic's own list price. A model pinned for this job (PER_JOB_MODELS) is the model the run
+      // sends, not a label: it overrides the kind's own model here, on the way to the SDK.
+      const route = runRoute(job, job.model ?? spec.model);
       const onAnthropic = route.provider === "anthropic" || provider() === "anthropic";
       const cap: RunCap = onAnthropic
         ? { sdkUsd: limits.realBudgetUsd ?? limits.maxBudgetUsd, onAnthropic, isGuard: limits.realBudgetUsd === undefined }
@@ -1075,10 +1093,16 @@ export class JobRunner {
       // maintainer is not an engineering kind, so it runs at once and never waits for the lock.
       let chained = "";
       let escalation: string | undefined;
-      if (job.kind === "engineer" && job.commission) {
+      if (job.kind === "engineer" && (job.commission || job.reviewOnly)) {
         const pr = job.pr ?? findPrUrl(report);
         if (pr && !job.pr) this.store.updateJob(id, { pr });
-        chained = pr ? `Opened ${pr} for review. Nothing reviews or merges it automatically.` : "";
+        // A review-only job stops here in code, not only in the brief: the automatic review, its fix
+        // rounds and the merge are all downstream of the maintainer this branch never starts.
+        chained = pr
+          ? job.reviewOnly
+            ? `Opened ${pr} for review. This job is review only: you review and merge it yourself; nothing reviews or merges it automatically.`
+            : `Opened ${pr} for review. Nothing reviews or merges it automatically.`
+          : "";
       } else if (job.kind === "engineer") {
         // A fix round already knows its pull request; a fresh job's is read from its report.
         const pr = job.pr ?? findPrUrl(report);
@@ -1095,11 +1119,16 @@ export class JobRunner {
         chained = `Started ${jobLabel(m)} to review and merge.`;
       }
       // So is the agent-creator's, on the workforce repo. Only an explicit schedule verdict (no code
-      // written) skips the maintainer; a missing or garbled verdict still gets a review.
+      // written) skips the maintainer; a missing or garbled verdict still gets a review. A review-only
+      // one skips it too, and for the same reason as an engineer's: the pull request stays for Paul.
       if (job.kind === "create_agent") {
         if (isScheduleVerdict(report)) {
           const rec = scheduleRecommendation(report);
           chained = `No code needed: it fits ${rec.kind ? `a ${rec.kind} job` : "an existing kind"}${rec.cron ? ` on the schedule ${rec.cron}` : ""}. Say "set it up" and I will schedule it.`;
+        } else if (job.reviewOnly) {
+          const pr = job.pr ?? findPrUrl(report);
+          if (pr && !job.pr) this.store.updateJob(id, { pr });
+          chained = pr ? `Opened ${pr} for review. This job is review only: you review and merge it yourself; nothing reviews or merges it automatically.` : "";
         } else {
           const m = this.start(
             "maintain",

@@ -18,6 +18,7 @@ import { DiscordListener, inspectGuilds, readJobThread, readOwnerDm, soleDiscord
 import { RouterMessenger } from "./channels.js";
 import { isAllowed, isOversightSender } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
+import { importOffboardRun, OFFBOARD_RUN_ID } from "./offboard-import.js";
 import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoCredentialLine, repoProblemsMessage } from "./bootstrap.js";
 import { githubAuth, startTokenRefresher } from "./github-auth.js";
 import { repoRegistry } from "./repos.js";
@@ -737,6 +738,15 @@ if (isMain) {
     if (to) void messenger.send(to, text).catch(() => undefined);
   };
   const outputs = new OutputsPublisher(store, { onProblem: notifyPaul });
+  // One-off (17 Nov 2026): the completed offboard Doubleshift draft, imported as a truthful job record
+  // carrying its own status, timestamps, model and settled provider cost, with its preserved artifact
+  // as the saved output (src/offboard-import.ts). Idempotent: on a later boot the record is already in
+  // the store and nothing is written, messaged or published again.
+  const imported = importOffboardRun(store);
+  if (imported) {
+    console.log(imported.created ? `imported offboard run "${OFFBOARD_RUN_ID}" as job ${imported.job.id}` : `offboard run "${OFFBOARD_RUN_ID}" already imported as job ${imported.job.id}`);
+    if (imported.created) outputs.publish(imported.job);
+  }
   const { app, orchestrator, jobs, startEaTimers, startHealth, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs, canary: defaultCanary() });
   startEaTimers();
   // The board's own timers: one heartbeat a minute and the dependency checks every five. Both are

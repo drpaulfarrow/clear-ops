@@ -103,6 +103,25 @@ export interface Job {
    * automatic follow-ups (review, fix rounds, loop rounds) and the bridge. Not necessarily his whole intent.
    */
   triggerMessage?: JobTrigger;
+  /**
+   * The provider model this one job's worker runs on, when the chief pinned one for it (start_job):
+   * one of PER_JOB_MODELS (src/llm.ts), an explicit id rather than an alias. Absent: the kind's own
+   * model. Never on a job from the Instinct bridge.
+   */
+  model?: string;
+  /**
+   * True when this engineering job opens its pull request for Paul to review himself: no automatic
+   * review, fix round or merge follows it, in code (src/jobs.ts) and not only in prose. The chief sets
+   * it from Paul's own start_job only; the bridge never carries it.
+   */
+  reviewOnly?: boolean;
+  /**
+   * Set by the service only (src/offboard-import.ts): this record is a one-use honest import of an
+   * already completed offboard run, not a run this service made. It holds the offboard run's own id,
+   * so a repeated import does nothing. No worker ran for it here, nothing was messaged for it, and its
+   * timestamps, model and cost are the imported run's own figures.
+   */
+  importedRun?: string;
   /** Research jobs: "deep" gets more turns and budget and writes a long, structured report. */
   depth?: "standard" | "deep";
   createdAt: string;
@@ -534,6 +553,26 @@ export class Store {
     const job = this.state.jobs[id];
     if (!job) throw new Error(`No job ${id}`);
     Object.assign(job, patch);
+    this.save();
+    return job;
+  }
+  /**
+   * A record that arrives already finished and already marked as an import (src/offboard-import.ts):
+   * written whole in one atomic save, never through the queue, so no state of the store ever holds it
+   * queued or running and `interruptedJobs()` can never hand it to resume recovery as work to run. The
+   * output file its `outputPath` names must already be on disk: it is written before this call, so a
+   * failure there persists nothing at all and the next boot simply tries again. Only a completed
+   * record marked `importedRun` may take this path; nothing can use it to skip the queue.
+   */
+  importJob(record: Job): Job {
+    if (!record.importedRun?.trim()) throw new Error("importJob: only a record marked importedRun can be written this way");
+    if (record.status !== "done") throw new Error(`importJob: an imported record arrives finished, not "${record.status}"`);
+    if (this.state.jobs[record.id]) throw new Error(`importJob: job ${record.id} already exists`);
+    const job: Job = {
+      ...record,
+      title: record.title?.trim() || derivedJobTitle(record, (id) => this.state.jobs[id], Object.values(this.state.jobs), Object.values(this.state.schedules)),
+    };
+    this.state.jobs[job.id] = job;
     this.save();
     return job;
   }

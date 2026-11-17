@@ -1,0 +1,58 @@
+# The chief's eval suite (scripts/eval.ts): ordinary requests sent to the real chief on the models
+# fly.toml sets, with the workers stubbed, so it costs pennies. It needs live keys (OpenRouter, Brave,
+# Exa), so it never runs a branch's own code: branch authors here are agents, and a pull request
+# trigger would hand those keys to unreviewed code that could edit this very script. It runs on main
+# after a merge (code Paul has merged), and by hand from the Actions tab, where a model can be
+# overridden to compare one against another before switching. The job refuses any ref but main, so a
+# hand-started run on a branch (which an agent with an Actions token could start) never gets the keys.
+name: eval
+on:
+  workflow_dispatch:
+    inputs:
+      chief_model:
+        description: "Chief model to test (alias or OpenRouter id). Empty uses fly.toml."
+        required: false
+      repeat:
+        description: "Times to run each case"
+        required: false
+        default: "1"
+  push:
+    branches: [main]
+    paths:
+      - "src/orchestrator.ts"
+      - "src/agents.ts"
+      - "src/llm.ts"
+      - "src/retrieval.ts"
+      - "src/messages.ts"
+      - "fly.toml"
+      - "scripts/eval.ts"
+jobs:
+  chief:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Read the models fly.toml deploys with
+        run: |
+          for k in CHIEF_MODEL WORKER_MODEL ENGINEER_MODEL MAINTAINER_MODEL; do
+            v=$(sed -n "s/^ *$k *= *\"\(.*\)\"/\1/p" fly.toml | head -1)
+            [ -n "$v" ] && echo "$k=$v" >> "$GITHUB_ENV"
+          done
+          if [ -n "${{ inputs.chief_model }}" ]; then echo "CHIEF_MODEL=${{ inputs.chief_model }}" >> "$GITHUB_ENV"; fi
+      - name: Run the eval
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_HAIKU_MODEL: ${{ vars.OPENROUTER_HAIKU_MODEL }}
+          OPENROUTER_SONNET_MODEL: ${{ vars.OPENROUTER_SONNET_MODEL }}
+          OPENROUTER_OPUS_MODEL: ${{ vars.OPENROUTER_OPUS_MODEL }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          EVAL_REPEAT: ${{ inputs.repeat || '1' }}
+          EVAL_VERBOSE: "1"
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then echo "No OPENROUTER_API_KEY secret, so there is nothing to evaluate."; exit 0; fi
+          npm run eval

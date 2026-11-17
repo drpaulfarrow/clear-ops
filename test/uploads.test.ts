@@ -9,6 +9,10 @@ process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.ALLOWED_DISCORD_IDS = "424242";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-up-"));
 process.env.TELEGRAM_BOT_TOKEN = "123:SECRET-TOKEN";
+// These tests are about the upload store, not about the text inside a PDF, so the installed parser is
+// pinned out of the way: a CI runner has pdftotext, a development machine here does not, and the same
+// assertions must mean the same thing on both. The parser's own half is test/pdf-extract.test.ts.
+process.env.PDFTOTEXT_PATH = "/nonexistent/pdftotext-for-the-upload-tests";
 
 const { Uploads, sanitiseName, fetchCapped, UploadError, describeUploads, inlineImages, receiptText } = await import("../src/uploads.js");
 const { config, isAllowed } = await import("../src/config.js");
@@ -90,9 +94,9 @@ test("file names are sanitised so nothing escapes the uploads directory", () => 
   assert.ok(long.length <= 120 && long.endsWith(".xlsx"));
 });
 
-test("an upload is saved as <date>-<name>, owner-only, never overwriting an earlier one", () => {
+test("an upload is saved as <date>-<name>, owner-only, never overwriting an earlier one", async () => {
   const up = new Uploads(freshDir(), undefined, fixedDate);
-  const a = up.save("../Connections.csv", Buffer.from("First Name,Last Name\nAda,Lovelace\n"), "text/csv", "my LinkedIn export");
+  const a = await up.save("../Connections.csv", Buffer.from("First Name,Last Name\nAda,Lovelace\n"), "text/csv", "my LinkedIn export");
   assert.equal(a.name, "2026-10-28-Connections.csv");
   assert.equal(a.path, path.join(up.dir, a.name));
   assert.equal(a.originalName, "../Connections.csv");
@@ -100,7 +104,7 @@ test("an upload is saved as <date>-<name>, owner-only, never overwriting an earl
   assert.equal(a.caption, "my LinkedIn export");
   assert.equal(mode(up.dir), 0o700);
   assert.equal(mode(a.path), 0o600);
-  const b = up.save("Connections.csv", Buffer.from("second"));
+  const b = await up.save("Connections.csv", Buffer.from("second"));
   assert.equal(b.name, "2026-10-28-Connections-2.csv");
   assert.equal(b.mimeType, "text/csv", "type guessed from the extension");
   assert.equal(fs.readFileSync(a.path, "utf8").startsWith("First Name"), true, "the first file is untouched");
@@ -143,7 +147,7 @@ test("a download with no body, or no bytes, fails loudly instead of saving an em
 
 test("a zero-byte file is never saved as a success", async () => {
   const up = new Uploads(freshDir(), undefined, fixedDate);
-  assert.throws(() => up.save("empty.csv", Buffer.alloc(0)), (e: Error) => e instanceof UploadError && /empty \(0 bytes\)/.test(e.message));
+  await assert.rejects(() => up.save("empty.csv", Buffer.alloc(0)), (e: Error) => e instanceof UploadError && /empty \(0 bytes\)/.test(e.message));
   const empty = att("empty.csv", Buffer.alloc(0), "text/csv");
   await assert.rejects(() => up.ingest(empty), /the file is empty \(0 bytes\)/);
   assert.deepEqual(fs.readdirSync(up.dir), [], "nothing was written and no success was reported");
@@ -202,7 +206,7 @@ test("Discord attachments reach the handler only from allowlisted users, and onl
 
 /* ---------- archives ---------- */
 
-test("a zip is unpacked into its own new directory; traversal, absolute paths and links are skipped", () => {
+test("a zip is unpacked into its own new directory; traversal, absolute paths and links are skipped", async () => {
   const up = new Uploads(freshDir(), undefined, fixedDate);
   const archive = zip([
     { name: "export/Connections.csv", data: "a,b\n1,2\n", deflate: true },
@@ -213,7 +217,7 @@ test("a zip is unpacked into its own new directory; traversal, absolute paths an
     { name: "C:\\evil.txt", data: "no" },
     { name: "link", data: "/etc/passwd", symlink: true },
   ]);
-  const saved = up.save("linkedin.zip", archive, "application/zip");
+  const saved = await up.save("linkedin.zip", archive, "application/zip");
   const x = saved.extracted!;
   assert.equal(x.dir, path.join(up.dir, "2026-10-28-linkedin.zip-files"));
   assert.equal(x.files, 2);
@@ -228,28 +232,28 @@ test("a zip is unpacked into its own new directory; traversal, absolute paths an
   assert.equal(mode(path.join(x.dir, "notes.txt")), 0o600);
 });
 
-test("a zip that unpacks past the limit is stopped, and a corrupt one is reported, not thrown", () => {
+test("a zip that unpacks past the limit is stopped, and a corrupt one is reported, not thrown", async () => {
   const up = new Uploads(freshDir(), { maxBytes: 1024 * 1024, maxArchiveEntries: 3, maxArchiveBytes: 1000 }, fixedDate);
   const bomb = zip([{ name: "big.txt", data: "0".repeat(50_000), deflate: true }]);
   assert.ok(bomb.length < 1000, "small on the wire");
-  const r = up.save("bomb.zip", bomb, "application/zip");
+  const r = await up.save("bomb.zip", bomb, "application/zip");
   assert.match(r.extracted!.error!, /more than/);
   assert.equal(r.extracted!.files, 0);
-  const many = up.save("many.zip", zip([1, 2, 3, 4].map((i) => ({ name: `${i}.txt`, data: "x" }))), "application/zip");
+  const many = await up.save("many.zip", zip([1, 2, 3, 4].map((i) => ({ name: `${i}.txt`, data: "x" }))), "application/zip");
   assert.match(many.extracted!.error!, /more than 3 entries/);
   const broken = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(40)]);
-  const b = up.save("broken.zip", broken, "application/zip");
+  const b = await up.save("broken.zip", broken, "application/zip");
   assert.match(b.extracted!.error!, /zip|corrupt|could not be read/);
 });
 
 /* ---------- deletion ---------- */
 
-test("an upload can be deleted by its saved or original name, with anything unpacked from it", () => {
+test("an upload can be deleted by its saved or original name, with anything unpacked from it", async () => {
   const up = new Uploads(freshDir(), undefined, fixedDate);
-  up.save("Connections.csv", Buffer.from("x"));
-  up.save("linkedin.zip", zip([{ name: "a.txt", data: "a" }]), "application/zip");
-  up.save("deck.pdf", Buffer.from("%PDF"));
-  up.save("deck.pdf", Buffer.from("%PDF2"));
+  await up.save("Connections.csv", Buffer.from("x"));
+  await up.save("linkedin.zip", zip([{ name: "a.txt", data: "a" }]), "application/zip");
+  await up.save("deck.pdf", Buffer.from("%PDF"));
+  await up.save("deck.pdf", Buffer.from("%PDF2"));
 
   assert.match(up.delete("Connections.csv").message, /Deleted 2026-10-28-Connections.csv/);
   assert.equal(fs.existsSync(path.join(up.dir, "2026-10-28-Connections.csv")), false);
@@ -346,8 +350,8 @@ test("an empty download is reported to the chief, and no file is saved", async (
 
 test("/uploads lists files and /delete upload removes one; the chief can delete with a tool", async () => {
   const { orch, messenger, uploads } = harness();
-  uploads.save("Connections.csv", Buffer.from("x"));
-  uploads.save("deck.pdf", Buffer.from("y"));
+  await uploads.save("Connections.csv", Buffer.from("x"));
+  await uploads.save("deck.pdf", Buffer.from("y"));
   await orch.handle("tg:99887766", "/uploads");
   assert.match(messenger.sent.at(-1)!.text, /2026-10-28-Connections.csv \(1 B\)/);
   await orch.handle("tg:99887766", "/delete upload deck.pdf");
@@ -357,9 +361,9 @@ test("/uploads lists files and /delete upload removes one; the chief can delete 
   assert.equal(uploads.list().length, 0);
 });
 
-test("describe and receipt helpers stay short and complete", () => {
+test("describe and receipt helpers stay short and complete", async () => {
   const up = new Uploads(freshDir(), undefined, fixedDate);
-  const img = up.save("shot.png", Buffer.alloc(10), "image/png");
+  const img = await up.save("shot.png", Buffer.alloc(10), "image/png");
   const text = describeUploads([img], [{ name: "big.mov", reason: "too large" }], inlineImages([img]).length);
   assert.match(text, /Paul sent 2 file\(s\)/);
   assert.match(text, /big.mov was not saved: too large/);

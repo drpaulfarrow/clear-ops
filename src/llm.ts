@@ -95,6 +95,20 @@ export function resolveModel(model: string): string {
 }
 
 /**
+ * Models one job may be pinned to (the owner's start_job model). Explicit provider ids, never
+ * aliases: a pinned model reaches the worker's run as itself (resolveModel passes a non-alias
+ * through unchanged), so the job record says exactly which model ran. Paul's set (17 Nov 2026).
+ */
+export const PER_JOB_MODELS = ["z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro", "anthropic/claude-opus-5.5"] as const;
+
+/** Why a model a job was pinned to is refused, or undefined when it is one of PER_JOB_MODELS. */
+export function perJobModelError(model: string): string | undefined {
+  const id = model.trim();
+  if ((PER_JOB_MODELS as readonly string[]).includes(id)) return undefined;
+  return `"${model}" is not a model a job can be pinned to. Pick one of: ${PER_JOB_MODELS.join(", ")}.`;
+}
+
+/**
  * Environment for the SDK subprocess. With OpenRouter: its endpoint, the key as a bearer token, the
  * Anthropic key explicitly empty (OpenRouter's documented setup), every alias the CLI resolves
  * internally (subagents, the small fast model behind WebFetch summaries) mapped too, and no
@@ -223,5 +237,5 @@ export function modelNote(): string {
   }
   const m = openrouterModels();
   const alias = (a: string) => (isAlias(a) ? `${a} (${m[a.toLowerCase() as ModelAlias]})` : a);
-  return `\n\nModels: OpenRouter (src/llm.ts, OPENROUTER_API_KEY set). The aliases in the config are mapped to OpenRouter models by the code: chief ${alias(config.models.chief)}, workers ${alias(config.models.worker)}, engineers and maintainer ${alias(config.models.engineer)}, designer ${alias(config.design.model)}. The executive assistant runs on ${config.models.ea} on Anthropic's API directly, except "Draft nudge" follow-up jobs, which use the worker model. Claude Code's own background calls are mapped too. Nothing here needs changing to "use OpenRouter"; it already does.`;
+  return `\n\nModels: OpenRouter (src/llm.ts, OPENROUTER_API_KEY set). The aliases in the config are mapped to OpenRouter models by the code: chief ${alias(config.models.chief)}, workers ${alias(config.models.worker)}, engineers ${alias(config.models.engineer)}, maintainer ${alias(config.models.maintainer)}, designer ${alias(config.design.model)}. The executive assistant runs on ${config.models.ea} on Anthropic's API directly, except "Draft nudge" follow-up jobs, which use the worker model. Claude Code's own background calls are mapped too. Nothing here needs changing to "use OpenRouter"; it already does.`;
 }

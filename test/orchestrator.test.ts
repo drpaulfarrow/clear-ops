@@ -52,6 +52,24 @@ const fakeRunner: AgentRunner = async (o) => {
       const r = await handler({ kind: "create_agent", title: "Outreach agent", brief: o.prompt.slice(10).trim(), target: "product" }, {});
       return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
     }
+    if (o.prompt.startsWith("pin model:")) {
+      const server = (ops as any).instance;
+      const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
+      const r = await handler({ kind: "research", title: "Pinned research", brief: o.prompt.slice(10).trim(), model: "moonshotai/kimi-k3.1-pro" }, {});
+      return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
+    }
+    if (o.prompt.startsWith("review only:")) {
+      const server = (ops as any).instance;
+      const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
+      const r = await handler({ kind: "engineer", title: "Held change", brief: o.prompt.slice(12).trim(), target: "self", reviewOnly: true }, {});
+      return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
+    }
+    if (o.prompt.startsWith("bad model:")) {
+      const server = (ops as any).instance;
+      const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
+      const r = await handler({ kind: "research", title: "Bad model", brief: o.prompt.slice(10).trim(), model: "gpt-5.2" }, {});
+      return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
+    }
     return { text: `chief says: ${o.prompt}`, sessionId: "sess-1" };
   }
   return { text: `worker(${o.model}) did: ${o.prompt.slice(0, 40)}`, costUsd: 0.01 };
@@ -283,6 +301,39 @@ test("an agent-creator schedule verdict writes no code and starts no maintainer"
   assert.equal(isScheduleVerdict("  verdict: schedule\nKind: write"), true);
   assert.equal(isScheduleVerdict("VERDICT: new worker\nhttps://github.com/o/r/pull/1"), false);
   assert.equal(isScheduleVerdict("I opened a PR. VERDICT: schedule"), false, "only a leading verdict skips review");
+});
+
+test("the chief can pin a job's model: the reply says it, the record carries it and the run sends it", async () => {
+  await post(inbound("447700900123", "pin model: map who licenses GLM models for search answers"));
+  await waitFor(() => messenger.sent.some((m) => m.text.includes("Started: Pinned research")));
+  const job = store.listJobs(50).find((j) => j.title === "Pinned research")!;
+  assert.equal(job.model, "moonshotai/kimi-k3.1-pro", "the pin is persisted on the job record");
+  assert.match(messenger.sent.find((m) => m.text.includes("Started: Pinned research"))!.text, /Model: moonshotai\/kimi-k3\.1-pro \(pinned for this job\)\./);
+  assert.equal(job.reviewOnly, undefined, "research is not review only");
+  await waitFor(() => store.getJob(job.id)?.status === "done");
+  const run = calls.find((c) => c.prompt.startsWith("map who licenses GLM models"))!;
+  assert.equal(run.model, "moonshotai/kimi-k3.1-pro", "the pinned model is the model that actually ran");
+});
+
+test("a model outside the allowed three is refused: the chief relays it and nothing is started", async () => {
+  const before = store.allJobs().length;
+  await post(inbound("447700900123", "bad model: research the pricing page copy"));
+  await waitFor(() => messenger.sent.some((m) => m.text.includes("is not a model a job can be pinned to")));
+  const reply = messenger.sent.find((m) => m.text.includes("is not a model a job can be pinned to"))!;
+  assert.match(reply.text, /Nothing was started/);
+  assert.equal(store.allJobs().length, before, "no job record was created");
+});
+
+test("a review-only engineer job is flagged in the reply, and no maintainer follows it", async () => {
+  await post(inbound("447700900123", "review only: change the sign-in copy"));
+  await waitFor(() => messenger.sent.some((m) => m.text.includes("Started: Held change")));
+  const job = store.listJobs(50).find((j) => j.title === "Held change")!;
+  assert.equal(job.reviewOnly, true, "the flag is persisted on the job record");
+  assert.equal(job.model, undefined);
+  assert.match(messenger.sent.find((m) => m.text.includes("Started: Held change"))!.text, /Review only: no automatic review or merge; Paul reviews and merges it himself\./);
+  // The Finished message is sent after the chaining block, so waiting for it settles both.
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Finished: Held change · engineer, workforce · ${job.id}`)));
+  assert.ok(!store.listJobs(50).some((j) => j.kind === "maintain" && j.brief.includes("change the sign-in copy")), "no maintainer follows a review-only engineer");
 });
 
 test("the chief knows the design worker and can start the design loop with start_job", async () => {

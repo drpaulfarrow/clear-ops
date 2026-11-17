@@ -15,6 +15,11 @@ import type { AddressInfo } from "node:net";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docs-"));
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
+// These tests are about what the bridge's document route accepts and saves, not about the text inside a
+// PDF, so the installed parser is pinned out of the way: a CI runner has pdftotext, a development machine
+// here does not, and the same assertions must mean the same thing on both. The parser's own half, and the
+// text an upload ends up with, are test/pdf-extract.test.ts.
+process.env.PDFTOTEXT_PATH = "/nonexistent/pdftotext-for-the-document-tests";
 
 const { DocumentIngest, DocumentError, docxText, docxTextFrom, familyOf, contradictionReason, unsafeNameReason, documentBodyParser, DOCUMENTS_ROUTE } = await import("../src/documents.js");
 const { Uploads, formatSize } = await import("../src/uploads.js");
@@ -144,10 +149,10 @@ test("the text of a Word document comes out of it, paragraph by paragraph, with 
 
 /* ---------- the receipt ---------- */
 
-test("a document is saved privately and the receipt says its path, its size and its sha256", () => {
+test("a document is saved privately and the receipt says its path, its size and its sha256", async () => {
   const { ingest, dir } = ingester();
   const bytes = Buffer.from("First Name,Last Name\nAda,Lovelace\n");
-  const r = ingest.ingest({ name: "Connections.csv", mimeType: "text/csv", data: b64(bytes) });
+  const r = await ingest.ingest({ name: "Connections.csv", mimeType: "text/csv", data: b64(bytes) });
   assert.equal(r.name, "2026-11-16-Connections.csv");
   assert.equal(r.path, path.join(dir, "2026-11-16-Connections.csv"));
   assert.equal(r.originalName, "Connections.csv");
@@ -161,10 +166,10 @@ test("a document is saved privately and the receipt says its path, its size and 
   assert.equal(r.extracted, undefined);
 });
 
-test("a .docx becomes readable text on a path a worker can use, beside the .docx", () => {
+test("a .docx becomes readable text on a path a worker can use, beside the .docx", async () => {
   const { ingest } = ingester();
   const bytes = docx();
-  const r = ingest.ingest({ name: "Clear Exchange pitch.docx", data: b64(bytes) });
+  const r = await ingest.ingest({ name: "Clear Exchange pitch.docx", data: b64(bytes) });
   assert.equal(r.name, "2026-11-16-Clear_Exchange_pitch.docx");
   assert.equal(r.sha256, sha(bytes));
   assert.equal(fs.existsSync(r.path), true, "the original document is kept as it arrived");
@@ -178,18 +183,18 @@ test("a .docx becomes readable text on a path a worker can use, beside the .docx
   assert.equal(r.note, undefined);
 });
 
-test("a Word document with no text is saved and said so, never called a success with text", () => {
+test("a Word document with no text is saved and said so, never called a success with text", async () => {
   const { ingest } = ingester();
-  const r = ingest.ingest({ name: "scans.docx", data: b64(docx("<w:document><w:body><w:p><w:r><w:drawing/></w:r></w:p></w:body></w:document>")) });
+  const r = await ingest.ingest({ name: "scans.docx", data: b64(docx("<w:document><w:body><w:p><w:r><w:drawing/></w:r></w:p></w:body></w:document>")) });
   assert.equal(r.text, undefined);
   assert.match(r.note!, /no text could be read/);
   assert.equal(fs.existsSync(r.path), true);
 });
 
-test("a type this service does not turn into text says so rather than pretending", () => {
+test("a type this service does not turn into text says so rather than pretending", async () => {
   const { ingest } = ingester();
   const sheet = Buffer.from("PK\u0003\u0004"); // an xlsx would be a real zip; the note is about extraction, not the type
-  const r = ingest.ingest({ name: "accounts.xlsx", data: b64(zip([{ name: "xl/workbook.xml", data: "<x/>" }])) });
+  const r = await ingest.ingest({ name: "accounts.xlsx", data: b64(zip([{ name: "xl/workbook.xml", data: "<x/>" }])) });
   assert.equal(r.text, undefined);
   assert.match(r.note!, /saved as it is; no text was extracted/);
   assert.equal(r.size > sheet.length, true);
@@ -197,10 +202,10 @@ test("a type this service does not turn into text says so rather than pretending
 
 /* ---------- refusals ---------- */
 
-test("every refusal is plain, and none of them saves anything", () => {
+test("every refusal is plain, and none of them saves anything", async () => {
   const { ingest, dir, uploads } = ingester({ maxBytes: 1024, maxArchiveEntries: 10, maxArchiveBytes: 1000 });
-  const bad = (body: unknown, match: RegExp, status = 400) => {
-    assert.throws(
+  const bad = async (body: unknown, match: RegExp, status = 400) => {
+    await assert.rejects(
       () => ingest.ingest(body),
       (e: Error) => e instanceof DocumentError && e.status === status && match.test(e.message),
       `expected a refusal matching ${match}`,
@@ -208,37 +213,37 @@ test("every refusal is plain, and none of them saves anything", () => {
     assert.deepEqual(uploads.list(), [], "a refused document leaves nothing behind");
   };
 
-  bad({ name: "notes.txt", data: "" }, /no bytes in it/, 400); // empty input
-  bad({ name: "notes.txt" }, /no bytes in it/, 400); // no data at all
-  bad({ name: "notes.txt", data: 12345 }, /no bytes in it/, 400);
-  bad({ data: b64(Buffer.from("x")) }, /needs a file name/, 400);
-  bad({ name: "../../x.txt", data: b64(Buffer.from("x")) }, /no path in it/, 400);
-  bad({ name: "/etc/passwd", data: b64(Buffer.from("x")) }, /no path in it/, 400);
-  bad({ name: "notes.txt", data: "not base64 at all!!" }, /not valid base64/, 400); // malformed input
-  bad({ name: "notes.txt", data: "AAAAA" }, /not valid base64/, 400); // a truncated base64 length
-  bad({ name: "notes.txt", data: b64(Buffer.alloc(2048, 0x61)) }, /too large \(limit 1\.0 KB\)/, 413); // over the limit, checked before decoding
-  bad({ name: "notes.pdf", data: b64(Buffer.from("this is not a PDF")) }, /not one/, 400); // bytes contradict the declared type
-  bad({ name: "shot.png", data: b64(Buffer.from("not an image")) }, /not PNG, JPEG, GIF or WebP/, 400);
-  bad({ name: "pitch.docx", data: b64(Buffer.from("not a zip at all")) }, /not one/, 400); // a .docx the bytes contradict
-  bad({ name: "pitch.docx", data: b64(zip([{ name: "word/styles.xml", data: "<x/>" }])) }, /no readable body/, 400); // truncated
-  bad({ name: "report.md", mimeType: "image/png", data: b64(Buffer.from("# a heading\n")) }, /not PNG, JPEG, GIF or WebP/, 400); // the declared type contradicts what the name and bytes say
+  await bad({ name: "notes.txt", data: "" }, /no bytes in it/, 400); // empty input
+  await bad({ name: "notes.txt" }, /no bytes in it/, 400); // no data at all
+  await bad({ name: "notes.txt", data: 12345 }, /no bytes in it/, 400);
+  await bad({ data: b64(Buffer.from("x")) }, /needs a file name/, 400);
+  await bad({ name: "../../x.txt", data: b64(Buffer.from("x")) }, /no path in it/, 400);
+  await bad({ name: "/etc/passwd", data: b64(Buffer.from("x")) }, /no path in it/, 400);
+  await bad({ name: "notes.txt", data: "not base64 at all!!" }, /not valid base64/, 400); // malformed input
+  await bad({ name: "notes.txt", data: "AAAAA" }, /not valid base64/, 400); // a truncated base64 length
+  await bad({ name: "notes.txt", data: b64(Buffer.alloc(2048, 0x61)) }, /too large \(limit 1\.0 KB\)/, 413); // over the limit, checked before decoding
+  await bad({ name: "notes.pdf", data: b64(Buffer.from("this is not a PDF")) }, /not one/, 400); // bytes contradict the declared type
+  await bad({ name: "shot.png", data: b64(Buffer.from("not an image")) }, /not PNG, JPEG, GIF or WebP/, 400);
+  await bad({ name: "pitch.docx", data: b64(Buffer.from("not a zip at all")) }, /not one/, 400); // a .docx the bytes contradict
+  await bad({ name: "pitch.docx", data: b64(zip([{ name: "word/styles.xml", data: "<x/>" }])) }, /no readable body/, 400); // truncated
+  await bad({ name: "report.md", mimeType: "image/png", data: b64(Buffer.from("# a heading\n")) }, /not PNG, JPEG, GIF or WebP/, 400); // the declared type contradicts what the name and bytes say
 
   assert.deepEqual(fs.readdirSync(dir), [], "nothing was written by any refusal");
 });
 
-test("a document exactly at the limit is taken, and one byte over is refused", () => {
+test("a document exactly at the limit is taken, and one byte over is refused", async () => {
   const { ingest } = ingester({ maxBytes: 64, maxArchiveEntries: 10, maxArchiveBytes: 1000 });
-  const r = ingest.ingest({ name: "notes.txt", data: b64(Buffer.alloc(64, 0x61)) });
+  const r = await ingest.ingest({ name: "notes.txt", data: b64(Buffer.alloc(64, 0x61)) });
   assert.equal(r.size, 64);
-  assert.throws(() => ingest.ingest({ name: "notes.txt", data: b64(Buffer.alloc(65, 0x61)) }), (e: Error) => e instanceof DocumentError && e.status === 413 && /too large/.test(e.message));
+  await assert.rejects(() => ingest.ingest({ name: "notes.txt", data: b64(Buffer.alloc(65, 0x61)) }), (e: Error) => e instanceof DocumentError && e.status === 413 && /too large/.test(e.message));
 });
 
-test("the log records what arrived and what was refused, never the bytes", () => {
+test("the log records what arrived and what was refused, never the bytes", async () => {
   const { ingest, log } = ingester();
   const bytes = Buffer.from("a secret document body, unremarkable but private\n");
-  ingest.ingest({ name: "notes.txt", data: b64(bytes) });
+  await ingest.ingest({ name: "notes.txt", data: b64(bytes) });
   try {
-    ingest.ingest({ name: "notes.txt", data: "" });
+    await ingest.ingest({ name: "notes.txt", data: "" });
   } catch {
     /* refused, as it should be */
   }
