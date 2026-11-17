@@ -522,13 +522,14 @@ test("an empty page that still promises more stops the read, and is said as the 
 });
 
 test("a page marker the provider already handed back once is a loop, and the read stops rather than spins", async () => {
-  // Both pages carry the same continuation key: without the guard this would run to the page bound
-  // asking for the same page again and again. It stops on the repeat and says the history is partial.
+  // Both pages carry the same continuation key and row: without the guard this would run to the page
+  // bound asking for the same page again and again. It stops on the repeat, says the history is partial
+  // and does not add the repeated page's rows a second time.
   const loop = makeGate({
     api: {
       pages: [
         { lines: [{ bookingDate: "2026-11-14", description: "ONE", amount: "-1.00", currency: "GBP" }], continuationKey: "k1" },
-        { lines: [{ bookingDate: "2026-11-13", description: "TWO", amount: "-2.00", currency: "GBP" }], continuationKey: "k1" },
+        { lines: [{ bookingDate: "2026-11-14", description: "ONE", amount: "-1.00", currency: "GBP" }], continuationKey: "k1" },
         { lines: [{ bookingDate: "2026-11-12", description: "NEVER REACHED", amount: "-3.00", currency: "GBP" }], continuationKey: "k3" },
       ],
     },
@@ -537,7 +538,8 @@ test("a page marker the provider already handed back once is a loop, and the rea
   await loop.gate.choose([loop.gate.handle(HSBC.uid)]);
   const read = await loop.gate.transactions(loop.gate.handle(HSBC.uid), "2026-11-01", "2026-11-15");
   assert.equal(read.pages, 2, "the repeat is where it stopped, well before the bound of 10");
-  assert.equal(read.count, 2);
+  assert.equal(read.count, 1);
+  assert.deepEqual(read.lines.map((l) => l.description), ["ONE"], "the repeated page was not duplicated into the history");
   assert.equal(read.truncated, true);
   assert.match(read.partial ?? "", /same page marker twice/);
   assert.equal(loop.api.calls.filter((c) => c.op === "transactions").length, 2, "and the provider was not asked again");

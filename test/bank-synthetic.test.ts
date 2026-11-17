@@ -53,30 +53,33 @@ test("real-looking keys in the environment cannot silently enable the connector,
   assert.equal(bankReady(on), undefined, "only a synthetic literal that says so turns it on");
 });
 
-test("a bank test that would call the real provider fails loudly rather than leaving the machine", async () => {
+test("a bank test that would call the real provider fails loudly rather than leaving the machine, on any port", async () => {
   // A real client, complete synthetic settings, and no fetchImpl injected: the default fetch is the
   // boundary's wrapper, and the provider's own address is the one host the client may call — so this
   // is the closest a test can get to a real read, and it must not go anywhere.
-  const api = new BankApi({
-    settings: bankSettings({
-      BANK_ENABLED: "true",
-      BANK_APPLICATION_ID: "11111111-2222-3333-4444-555555555555",
-      BANK_JWT_PRIVATE_KEY: RSA_KEY,
-      BANK_CONNECTION_KEY: "a connection key long enough to be one",
-      BANK_REDIRECT_URL: "https://workforce.example/bank/callback",
-    }),
-  });
-  await assert.rejects(
-    () => api.listAspsps("GB"),
-    (err: unknown) => {
-      // The client turns the refusal into its own network failure, so a caller sees its plain
-      // sentence; the refusal itself must still be underneath it, not swallowed.
-      assert.ok(err instanceof BankApiError && err.kind === "network", "the client fails the read rather than reaching anyone");
-      assert.match(String((err.cause as Error | undefined)?.message ?? ""), /synthetic-only/, "and the boundary's own refusal is still visible on it");
-      return true;
-    },
-    "the boundary refuses the call before it leaves",
-  );
+  for (const baseUrl of [undefined, "https://api.enablebanking.com:8443"]) {
+    const api = new BankApi({
+      settings: bankSettings({
+        BANK_ENABLED: "true",
+        BANK_APPLICATION_ID: "11111111-2222-3333-4444-555555555555",
+        BANK_JWT_PRIVATE_KEY: RSA_KEY,
+        BANK_CONNECTION_KEY: "a connection key long enough to be one",
+        BANK_REDIRECT_URL: "https://workforce.example/bank/callback",
+        ...(baseUrl ? { BANK_API_BASE_URL: baseUrl } : {}),
+      }),
+    });
+    await assert.rejects(
+      () => api.listAspsps("GB"),
+      (err: unknown) => {
+        // The client turns the refusal into its own network failure, so a caller sees its plain
+        // sentence; the refusal itself must still be underneath it, not swallowed.
+        assert.ok(err instanceof BankApiError && err.kind === "network", "the client fails the read rather than reaching anyone");
+        assert.match(String((err.cause as Error | undefined)?.message ?? ""), /synthetic-only/, "and the boundary's own refusal is still visible on it");
+        return true;
+      },
+      `the boundary refuses the call before it leaves (${baseUrl ?? "the default address"})`,
+    );
+  }
 });
 
 test("the boundary covers every bank test file, and no bank test builds settings from the host's environment", () => {

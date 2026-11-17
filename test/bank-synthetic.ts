@@ -25,16 +25,16 @@ export function bankTestBoundary(): void {
   const real = globalThis.fetch;
   if ((real as unknown as { __bankTestBoundary?: boolean }).__bankTestBoundary) return;
   const wrapped = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    let host = "";
+    let hostname = "";
     try {
-      host = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).host;
+      hostname = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).hostname;
     } catch {
       // A malformed address never reaches the provider either; let the real fetch answer it.
     }
-    if (host) {
+    if (hostname) {
       const { BANK_API_HOSTS } = await import("../src/bank.js");
-      if (BANK_API_HOSTS.includes(host)) {
-        throw new Error(`A bank test called the real provider at ${host}: bank tests are synthetic-only, and no call may leave for the provider whatever credentials exist.`);
+      if (BANK_API_HOSTS.includes(hostname)) {
+        throw new Error(`A bank test called the real provider at ${hostname}: bank tests are synthetic-only, and no call may leave for the provider whatever credentials exist.`);
       }
     }
     return real(input, init);

@@ -483,6 +483,13 @@ export class BankGate {
     for (;;) {
       const page = await this.o.api.transactions(account.uid, { from, to, ...(key ? { continuationKey: key } : {}) });
       pages += 1;
+      if (page.continuationKey && seenKeys.has(page.continuationKey)) {
+        // The same page marker twice means this response cannot be trusted as another page. Stop before
+        // adding its lines: if it repeated the rows as well, accepting them would duplicate history.
+        truncated = true;
+        partial = "The provider returned the same page marker twice, so the read stopped rather than ask for the same page again: this history is partial, and narrowing the dates may get the rest.";
+        break;
+      }
       for (const line of page.lines) {
         collected.push({
           date: line.bookingDate,
@@ -499,13 +506,6 @@ export class BankGate {
         // read stops here and says so rather than loop over empty pages or pretend it ended.
         truncated = true;
         partial = "The provider returned an empty page but said there was more, so the read stopped there: this history is partial, and narrowing the dates may get the rest.";
-        break;
-      }
-      if (seenKeys.has(page.continuationKey)) {
-        // The same page marker twice means the provider is handing back the page it just gave: a
-        // loop, not more history. Stop, and say the history is partial.
-        truncated = true;
-        partial = "The provider returned the same page marker twice, so the read stopped rather than ask for the same page again: this history is partial, and narrowing the dates may get the rest.";
         break;
       }
       seenKeys.add(page.continuationKey);
