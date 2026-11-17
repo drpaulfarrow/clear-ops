@@ -28,6 +28,7 @@ import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
+import { JobTrace, type RawTraceEvent } from "./trace.js";
 import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
@@ -1030,6 +1031,8 @@ export class JobRunner {
         ? { sdkUsd: limits.realBudgetUsd ?? limits.maxBudgetUsd, onAnthropic, isGuard: limits.realBudgetUsd === undefined }
         : { sdkUsd: limits.maxBudgetUsd, onAnthropic, isGuard: true };
       costMeter = this.costWatch(cap.onAnthropic ? undefined : limits.realBudgetUsd, () => live.abort.abort());
+      const trace = new JobTrace(id, job.kind);
+      trace.note("start", `${job.kind} on ${job.target ?? "product"}, model ${route.model}${job.resumed ? `, resumed (${job.resumed})` : ""}${job.fixRound ? `, fix round ${job.fixRound}` : ""}`);
       progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
       const shown = progress;
       // Retrieval as a harness decision (src/retrieval.ts): before a search-carrying worker composes its
@@ -1063,6 +1066,7 @@ export class JobRunner {
         costMeter,
         abortController: live.abort,
         onActivity: () => this.touch(id, live),
+        onTrace: (e: RawTraceEvent) => trace.event(e),
         onToolUse: (name: string, input: Record<string, unknown>) => {
           const step = describeWorkerTool(name, input);
           live.step = step;
@@ -1284,6 +1288,7 @@ export class JobRunner {
       });
     }
     const failure = { kind: reason.kind, detail: reason.detail };
+    new JobTrace(job.id, job.kind).note("end", `stopped by the service (${failureLabel(reason.kind)}): ${reason.detail}`, true);
     const kept = saved ? `\n\n${savedWorkNote(saved)}` : "";
     const outputPath = this.store.writeOutput(job.id, `This job was stopped and did not finish, because ${failureReason(failure)}.\n\n${reason.detail}${kept}\n`);
     this.store.updateJob(job.id, {
@@ -1499,6 +1504,7 @@ export class JobRunner {
   private async recordFailure(job: Job, failure: RunFailure): Promise<void> {
     const finishedAt = new Date().toISOString();
     const reason = failureReason(failure);
+    new JobTrace(job.id, job.kind).note("end", `failed (${failureLabel(failure.kind)}): ${failure.detail}`, true);
     const outputPath = this.store.writeOutput(job.id, `This job failed and did no work, because ${reason}.\n\nError: ${failure.detail}\n`);
     this.store.updateJob(job.id, { status: "failed", finishedAt, error: failure.detail, failure: failure.kind, outputPath, summary: `Failed (${failureLabel(failure.kind)}): ${shortText(failure.detail, 200)}` });
     // A failed round leaves its loop waiting for Paul rather than stalled for good.
