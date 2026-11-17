@@ -19,6 +19,7 @@ const { Orchestrator } = await import("../src/orchestrator.js");
 const { Scheduler } = await import("../src/scheduler.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 /** A messenger that records sends and can open threads, standing in for Discord. */
 class ThreadMessenger extends ConsoleMessenger {
@@ -89,7 +90,7 @@ test("a job started from a Discord channel gets its own thread, and the maintain
   const store = new Store(process.env.DATA_DIR!);
   const messenger = new ThreadMessenger();
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (ops) {
       const handler = ops.instance?._registeredTools?.start_job?.callback ?? ops.instance?._registeredTools?.start_job?.handler;
       const r = await handler({ kind: "engineer", title: "Offers endpoint", brief: "Build the /offers endpoint", target: "product" }, {});

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-ea-"));
@@ -581,7 +582,7 @@ test("the chief's google_connect sends the setup steps when unconfigured and a l
   const { buildApp } = await import("../src/index.js");
   const outputs: string[] = [];
   const runner = async (o: any) => {
-    const tools = o.mcpServers?.ops?.instance?._registeredTools;
+    const tools = o.mcpServers?.[OPS_SERVER_NAME]?.instance?._registeredTools;
     if (tools) outputs.push((await (tools.google_connect.callback ?? tools.google_connect.handler)({}, {})).content[0].text);
     return { text: "ok" };
   };
