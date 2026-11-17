@@ -56,7 +56,10 @@ test("only the maintainer merges: engineers cannot merge or push the default bra
     assert.ok(eng.includes(rule), `engineer disallowedTools must include ${rule}`);
   }
   const jobs = src("jobs.ts");
-  assert.match(jobs, /job\.kind === "engineer"\)[\s\S]*?this\.start\(\s*"maintain"/, "a maintainer job must follow every engineer job");
+  assert.match(jobs, /job\.kind === "engineer"\)[\s\S]*?this\.start\(\s*"maintain"/, "a maintainer job must follow every engineer job, except one Paul asked to leave for himself (reviewOnly)");
+  // Paul's own start_job may pin a job as review only (17 Nov 2026): the pull request stays for him, so
+  // the automatic maintainer, its fix rounds and the merge are stopped in the code, not only in prose.
+  assert.match(jobs, /job\.kind === "engineer" && \(job\.commission \|\| job\.reviewOnly\)\)/, "a review-only or commissioned engineer opens its pull request for review and starts no maintainer");
 });
 
 test("agents run headless: nothing waits on an interactive permission prompt", () => {
@@ -124,7 +127,10 @@ test("the agent-creator has every engineer restriction and works only on the wor
 test("every kind that opens pull requests is followed by a maintainer review", () => {
   const jobs = src("jobs.ts");
   assert.match(src("agents.ts"), /export const PR_KINDS: JobKind\[\] = \[[^\]]*"engineer"[^\]]*"create_agent"[^\]]*\]/);
-  assert.match(jobs, /job\.kind === "create_agent"\)[\s\S]*?this\.start\(\s*"maintain"/, "a maintainer job must follow every agent-creator job that may have opened a pull request");
+  assert.match(jobs, /job\.kind === "create_agent"\)[\s\S]*?this\.start\(\s*"maintain"/, "a maintainer job must follow every agent-creator job that may have opened a pull request, except one Paul asked to leave for himself (reviewOnly)");
+  // Same gate as an engineer's: a review-only agent-creator opens its pull request for Paul and starts
+  // no maintainer, no fix round and no merge.
+  assert.match(jobs, /\} else if \(job\.reviewOnly\) \{/, "a review-only agent-creator starts no maintainer");
 });
 
 test("the agent-creator cannot be put on a schedule", () => {
