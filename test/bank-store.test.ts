@@ -13,8 +13,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { bankTestBoundary } from "./bank-synthetic.js";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-bank-store-"));
+// The synthetic-only boundary: no BANK_ variable of the host's reaches this process, and a call that
+// would leave for the provider fails loudly rather than going (test/bank-synthetic.ts).
+bankTestBoundary();
 
 const { seal, open, connectionKey, uidHash, accountLabel, sameSecret, BankStore, BankError, BANK_KEY_NOTE } = await import("../src/bank.js");
 

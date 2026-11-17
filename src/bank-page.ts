@@ -280,7 +280,7 @@ function readBlock(view: BankView): string {
     ? ledger(rows, ["Date", "Description", "Amount"], [2])
     : line("problem", `The provider returned no transactions between ${read.from} and ${read.to}.`);
   const totals = `Read ${read.count} transaction${read.count === 1 ? "" : "s"} over ${read.pages} page${read.pages === 1 ? "" : "s"}, showing ${read.shown}.`;
-  const cut = read.truncated ? " The read stopped at this connector's safety bound, so there is more in that range: narrow the dates to see it." : "";
+  const cut = read.truncated ? ` ${read.partial ?? "The read stopped at this connector's safety bound, so there is more in that range: narrow the dates to see it."}` : "";
   return `<section><h2>Transactions · ${escapeHtml(read.account)}</h2>${line("notice", `Read from the provider at ${when(read.at) ?? read.at} (London time), for ${read.from} to ${read.to}.`)}${table}<p class="tot">${escapeHtml(totals + cut)}</p><p class="note">Shown here and stored nowhere. Only the accounts you chose are read, and only when you press the button.</p><a class="back" href="${BANK_PATH}">Back to the bank page</a></section>`;
 }
 

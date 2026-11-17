@@ -1732,7 +1732,9 @@ export const actionExecutors: Record<string, ActionExecutor> = {
    * it is the founder's own command, approved by him in chat, and a deploy needs the service's own
    * secrets to reach Fly (`FLY_API_TOKEN`). Nothing a worker or a repository supplies ever reaches it,
    * and the bank connector's keys are taken out of it (`withoutBankSecrets`, src/bank.ts), as they are
-   * out of every other subprocess this service starts.
+   * out of every other subprocess this service starts. That is not handed over, not isolation: this
+   * command runs as the same user as the service, and no live-bank safety claim rests on the strip
+   * (see the note on `withoutBankSecrets` in src/bank.ts).
    */
   async run_command(action) {
     const command = String(action.payload.command ?? "");

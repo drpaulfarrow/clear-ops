@@ -717,7 +717,9 @@ export const waitForProductDeploy: DeployWait = async (since) => {
       // other is the founder's approved shell command, src/jobs.ts `run_command`): gh reads the service's
       // GitHub credential from it to see the product's runs. The bank connector's keys are taken out
       // (`withoutBankSecrets`, src/bank.ts), as they are out of every other subprocess here, and nothing
-      // a page or a repository supplies reaches this command.
+      // a page or a repository supplies reaches this command. Not handed over is not the same as
+      // unreachable: this runs as the same user as the service, and no live-bank safety claim rests
+      // on the strip (see the note on `withoutBankSecrets` in src/bank.ts).
       const { stdout } = await exec("gh", ["run", "list", "--repo", repo, "--branch", "main", "--event", "push", "--limit", "5", "--json", "status,createdAt"], { timeout: 30_000, env: withoutBankSecrets() });
       const runs = (JSON.parse(stdout) as Array<{ status: string; createdAt: string }>).filter((r) => Date.parse(r.createdAt) >= since.getTime() - 5 * 60_000);
       if (runs.length && runs.every((r) => r.status === "completed")) return sleep(60_000);

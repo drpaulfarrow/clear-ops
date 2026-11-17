@@ -48,7 +48,15 @@ import { addDays, londonYmd } from "./london.js";
 import { SESSION_COOKIE, cookieValue } from "./sign-in.js";
 import type { Store } from "./store.js";
 
-/** How long a consent is asked for, in days. The provider gives it an end date; the page shows it. */
+/**
+ * How long a consent is asked for, in days: an ask, not a promise. The provider's published
+ * specification caps `valid_until` per bank (`maximum_consent_validity`, in the /aspsps reply) and says
+ * it adjusts the value to the bank's own minimum; whatever the provider then grants is what the
+ * session reply reports in `access.valid_until`, and that is the end date the page shows. The 90 days
+ * itself is unverified against HSBC UK specifically (no live call has ever been made): a bank that
+ * refuses or shortens it is refused or shortened visibly, never silently, and nothing is connected on
+ * the strength of this number alone.
+ */
 export const BANK_CONSENT_DAYS = 90;
 
 const iso = (at: number) => new Date(at).toISOString();
@@ -121,7 +129,10 @@ export interface TransactionRead {
   lines: ReadTransaction[];
   count: number;
   shown: number;
+  /** Whether the read stopped for any reason other than the provider saying there is no more. */
   truncated: boolean;
+  /** When truncated, one plain sentence saying why, so a partial history is never smoothed over. */
+  partial?: string;
   pages: number;
 }
 
@@ -369,8 +380,16 @@ export class BankGate {
     return this.bank.state(this.s.connectionKey);
   }
 
-  /** The stored connection, or a plain error. A disconnected one is never read from. */
+  /**
+   * The stored connection, or a plain error. A disconnected one is never read from. The disabled flag
+   * is checked here as well, so a stored record is dead the moment the connector is switched off:
+   * every read and every action that reaches the provider through the gate resolves through here
+   * first (accounts, choose, balances, transactions), and a stale POST against a stored record of a
+   * disabled connector is refused before anything is asked of the provider.
+   */
   connection(): BankConnection {
+    const off = this.off();
+    if (off) throw new BankError(off);
     const state = this.state();
     if (state.kind === "off" || state.kind === "unreadable") throw new BankError(state.reason);
     if (state.kind === "none") throw new BankError("There is no bank connection to read from. Connect first.");
@@ -443,8 +462,12 @@ export class BankGate {
   }
 
   /**
-   * One account's transactions over a checked window, paged to the end or to the safety bound, and
-   * kept nowhere. A bound that stops the read early is reported as such, never smoothed over.
+   * One account's transactions over a checked window, paged to the end or to a safety bound, and
+   * kept nowhere. The end is the provider's own: its documented `continuation_key` is "null if there
+   * are no more pages", and only that is a complete history. Everything else that stops the read
+   * early — the page or row bound, an empty page that still promises more, a page marker the
+   * provider has already handed back once — is reported as a partial read with the reason, never
+   * smoothed over and never looped over.
    */
   async transactions(value: string, fromInput: string, toInput: string): Promise<TransactionRead> {
     const today = londonYmd(new Date(this.now()));
@@ -452,9 +475,11 @@ export class BankGate {
     const { account, label } = await this.resolve(value);
     const at = iso(this.now());
     const collected: ReadTransaction[] = [];
+    const seenKeys = new Set<string>();
     let pages = 0;
     let key: string | undefined;
     let truncated = false;
+    let partial: string | undefined;
     for (;;) {
       const page = await this.o.api.transactions(account.uid, { from, to, ...(key ? { continuationKey: key } : {}) });
       pages += 1;
@@ -468,7 +493,22 @@ export class BankGate {
           ...(line.status ? { status: line.status } : {}),
         });
       }
-      if (!page.continuationKey || !page.lines.length) break;
+      if (!page.continuationKey) break; // the provider's own end: the history is complete
+      if (!page.lines.length) {
+        // An empty page that still says there is more: the provider's paging has gone odd, and the
+        // read stops here and says so rather than loop over empty pages or pretend it ended.
+        truncated = true;
+        partial = "The provider returned an empty page but said there was more, so the read stopped there: this history is partial, and narrowing the dates may get the rest.";
+        break;
+      }
+      if (seenKeys.has(page.continuationKey)) {
+        // The same page marker twice means the provider is handing back the page it just gave: a
+        // loop, not more history. Stop, and say the history is partial.
+        truncated = true;
+        partial = "The provider returned the same page marker twice, so the read stopped rather than ask for the same page again: this history is partial, and narrowing the dates may get the rest.";
+        break;
+      }
+      seenKeys.add(page.continuationKey);
       if (pages >= this.s.pagesMax || collected.length >= this.s.rowsMax) {
         truncated = true;
         break;
@@ -477,7 +517,7 @@ export class BankGate {
     }
     this.bank.touch(this.s.connectionKey, at);
     const lines = collected.slice(0, Math.min(this.s.rowsMax, BANK_RENDER_ROWS_MAX));
-    return { at, account: label, from, to, lines, count: collected.length, shown: lines.length, truncated, pages };
+    return { at, account: label, from, to, lines, count: collected.length, shown: lines.length, truncated, ...(partial ? { partial } : {}), pages };
   }
 
   /* ---------- Disconnect ---------- */
@@ -489,6 +529,10 @@ export class BankGate {
    * claimed here to have been revoked: the report says what to do about it.
    */
   async disconnect(): Promise<DisconnectReport> {
+    // As every read: a disabled connector calls no provider operation, not even the session delete a
+    // stale Disconnect POST would ask for. The stored record is left exactly as it is.
+    const off = this.off();
+    if (off) throw new BankError(off);
     const state = this.state();
     if (state.kind === "off" || state.kind === "unreadable") throw new BankError(state.reason);
     if (state.kind === "none") throw new BankError("There is no bank connection stored here, so there is nothing to disconnect.");

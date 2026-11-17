@@ -46,8 +46,8 @@ const SAVER = { uid: "acc-saver", name: "Online Bonus Saver", iban: "GB00XXXX000
 const ISA = { uid: "acc-isa", name: "Cash ISA", iban: "GB00XXXX00000000999999" };
 
 const BALANCES = [
-  { type: "interimBooked", name: "Booked", amount: "2431.19", currency: "GBP" },
-  { type: "interimAvailable", name: "Available", amount: "2401.19", currency: "GBP" },
+  { type: "ITBD", name: "Booked", amount: "2431.19", currency: "GBP" },
+  { type: "ITAV", name: "Available", amount: "2401.19", currency: "GBP" },
 ];
 
 const TRANSACTIONS = [

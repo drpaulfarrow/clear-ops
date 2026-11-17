@@ -19,17 +19,23 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { bankTestBoundary } from "./bank-synthetic.js";
 
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-bank-page-"));
 process.env.PUBLIC_URL = "https://workforce.example";
 process.env.INSTINCT_BRIDGE_TOKEN = "the-instinct-bridge-token-for-this-test";
+// The synthetic-only boundary: no BANK_ variable of the host's reaches this process, and a call that
+// would leave for the provider fails loudly rather than going (test/bank-synthetic.ts). The loopback
+// server this file talks to passes through it untouched.
+bankTestBoundary();
 
 const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
 const { SignIn, SIGN_IN_PATH, SESSION_COOKIE } = await import("../src/sign-in.js");
 const { BankStore, bankSettings, BANK_PATH, BANK_CALLBACK_PATH, BANK_CONNECT_PATH, BANK_START_PATH, BANK_COMPLETE_PATH, BANK_CANCEL_PATH, BANK_ACCOUNTS_PATH, BANK_BALANCES_PATH, BANK_TRANSACTIONS_PATH, BANK_DISCONNECT_PATH, BANK_REFRESH_PATH } = await import("../src/bank.js");
 const { BankApiError } = await import("../src/bank-api.js");
+const { BankGate, sessionFingerprint } = await import("../src/bank-gate.js");
 const { boardToken } = await import("../src/jobs-board.js");
 const { reportsToken } = await import("../src/reports.js");
 import type { AgentRunner } from "../src/agents.js";
@@ -77,24 +83,26 @@ function fakeApi(over: Record<string, unknown> = {}) {
     balances: async (uid: string) => {
       calls.push(`balances ${uid}`);
       if (over.balanceFails) throw over.balanceFails;
-      return [{ type: "interimBooked", name: "<Booked>", amount: "1234.56", currency: "GBP" }];
+      return [{ type: "ITBD", name: "<Booked>", amount: "1234.56", currency: "GBP" }];
     },
     transactions: async (uid: string, q: { from: string; to: string }) => {
       calls.push(`transactions ${uid} ${q.from}..${q.to}`);
-      if (over.truncates) return { lines: [{ bookingDate: "2026-11-14", description: `<script>alert(1)</script> "quoted" & done`, amount: "-4.20", currency: "GBP" }], continuationKey: "more" };
+      // Each page a fresh marker, so the truncating read runs to the page bound rather than being
+      // stopped early by the repeated-marker guard (the gate's own tests cover that guard).
+      if (over.truncates) return { lines: [{ bookingDate: "2026-11-14", description: `<script>alert(1)</script> "quoted" & done`, amount: "-4.20", currency: "GBP" }], continuationKey: `more-${calls.length}` };
       return { lines: [{ bookingDate: "2026-11-14", description: "COFFEE SHOP", amount: "-4.20", currency: "GBP" }] };
     },
   };
 }
 
-/** A fresh app, store and provider for one test. */
-async function setup(over: { settings?: ReturnType<typeof bankSettings>; api?: Record<string, unknown> } = {}) {
+/** A fresh app, store and provider for one test. A test may bring its own record store. */
+async function setup(over: { settings?: ReturnType<typeof bankSettings>; api?: Record<string, unknown>; bankStore?: InstanceType<typeof BankStore> } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-bank-page-"));
   let now = NOW;
   const store = new Store(dir);
   const signIn = new SignIn(() => now, async () => {});
   signIn.setPassword(store, PASSWORD);
-  const bankStore = new BankStore(path.join(dir, "bank"));
+  const bankStore = over.bankStore ?? new BankStore(path.join(dir, "bank"));
   const api = fakeApi(over.api);
   const settings =
     over.settings ??
@@ -579,6 +587,54 @@ test("switched off, the page says exactly that and offers nothing", async () => 
   } finally {
     h.scheduler.stopAll();
     await h.close();
+  }
+});
+
+test("a stored connection behind a switched-off connector: stale POSTs are refused before the provider, and the record is left alone", async () => {
+  // First app, enabled: connect and choose, so a real sealed record exists on the disk.
+  const live = await setup();
+  try {
+    const liveCookie = await live.signInNow();
+    await connect(live, liveCookie);
+  } finally {
+    live.scheduler.stopAll();
+    await live.close();
+  }
+  assert.equal(live.bankStore.state(CONNECTION_KEY).kind, "connection", "a stored record is on the disk before anything is switched off");
+
+  // Second app over the same record store: every credential present, BANK_ENABLED unset. A tab left
+  // open from before could still carry the owner's own session and a form's CSRF token, so the POSTs
+  // below are exactly that: a valid session, a valid token, actions that used to work.
+  const offSettings = bankSettings({
+    BANK_APPLICATION_ID: APP_ID,
+    BANK_JWT_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----",
+    BANK_CONNECTION_KEY: CONNECTION_KEY,
+    BANK_REDIRECT_URL: "https://workforce.example/bank/callback",
+  });
+  const off = await setup({ settings: offSettings, bankStore: live.bankStore });
+  try {
+    const cookie = await off.signInNow();
+    const html = await off.text(await off.get(BANK_PATH, cookie));
+    assert.match(html, /switched off here \(BANK_ENABLED is not set\)/, "the page says so up front");
+    assert.equal(html.includes("<form"), false, "and it offers no button at all");
+
+    const gate = new BankGate({ store: off.store, settings: offSettings, api: off.api as never, bankStore: live.bankStore });
+    const csrf = gate.csrf(sessionFingerprint(cookie)) ?? "";
+    assert.ok(csrf.length > 20, "a token this session would accept, minted the way the gate mints it");
+    for (const [path, body] of [
+      [BANK_REFRESH_PATH, {}],
+      [BANK_BALANCES_PATH, { account: "anything" }],
+      [BANK_TRANSACTIONS_PATH, { account: "anything", from: "2026-11-01", to: "2026-11-15" }],
+      [BANK_DISCONNECT_PATH, {}],
+    ] as const) {
+      const page = await off.text(await off.post(path, { csrf, ...body }, cookie));
+      assert.match(page, /switched off here \(BANK_ENABLED is not set\)/, `${path} says why and calls nothing`);
+    }
+    assert.equal(off.api.calls.length, 0, "no provider call on any stale POST: the flag is checked before any read or disconnect");
+    assert.equal(live.bankStore.state(CONNECTION_KEY).kind, "connection", "and the stored record was not destroyed, disconnected or altered");
+  } finally {
+    off.scheduler.stopAll();
+    await off.close();
   }
 });
 

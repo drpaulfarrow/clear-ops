@@ -72,8 +72,16 @@ export const BANK_SECRETS = ["BANK_APPLICATION_ID", "BANK_JWT_PRIVATE_KEY", "BAN
  * `installerEnv`, and the browser's own), and none of them ever gets this one. The two that must keep the
  * service's environment, because they need a credential that lives there, are the founder's own approved
  * shell command (src/jobs.ts `run_command`, which deploys with FLY_API_TOKEN) and the gh call that
- * watches the product's deploy (src/design.ts). They are handed this instead, so the bank's keys are the
- * one thing no subprocess of this service can read, whatever it was started for.
+ * watches the product's deploy (src/design.ts). They are handed this instead.
+ *
+ * What this is and is not: it is defence in depth — the bank's keys are not handed to any subprocess,
+ * whatever it was started for — and it is NOT isolation. Every subprocess of this service runs as the
+ * same user in the same process tree, and a same-user process can read another process's environment
+ * (through /proc, for instance) whether or not its own environment was scrubbed. No live-bank claim in
+ * this repository rests on environment stripping: real isolation for real bank data would need its own
+ * work (a separate user, machine or secret store, and a review of it), which is deliberately not done
+ * here. Until then the connector stays synthetic-only, off by default, and live-bank readiness stays
+ * blocked (docs/BANK.md).
  */
 export function withoutBankSecrets(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...env };

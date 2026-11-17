@@ -14,10 +14,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { bankTestBoundary } from "./bank-synthetic.js";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-bank-connect-"));
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
 process.env.PUBLIC_URL = "https://workforce.example";
+// The synthetic-only boundary: no BANK_ variable of the host's reaches this process, and a call that
+// would leave for the provider fails loudly rather than going (test/bank-synthetic.ts).
+bankTestBoundary();
 
 const { Store } = await import("../src/store.js");
 const { SignIn, SESSION_COOKIE } = await import("../src/sign-in.js");
@@ -86,8 +90,8 @@ function fakeApi(over: Partial<Record<string, unknown>> = {}) {
       calls.push({ op: "balances", args });
       if (over.balanceFails) throw over.balanceFails;
       return [
-        { type: "interimBooked", amount: "1234.56", currency: "GBP" },
-        { type: "interimAvailable", amount: "-12.34", currency: "GBP", asOf: "2026-11-15" },
+        { type: "ITBD", amount: "1234.56", currency: "GBP" },
+        { type: "ITAV", amount: "-12.34", currency: "GBP", asOf: "2026-11-15" },
       ];
     },
     transactions: async (...args: unknown[]) => {
@@ -145,6 +149,43 @@ test("with nothing configured the connector says why and starts nothing", async 
   const disabled = makeGate({ settings: bankSettings({}) });
   assert.match(disabled.gate.off() ?? "", /switched off here \(BANK_ENABLED is not set\)/);
   assert.equal(disabled.api.calls.length, 0, "and nothing was asked of the provider");
+});
+
+test("a stored connection is dead the moment the connector is switched off: zero provider calls, record untouched", async () => {
+  // Connect and choose while it is on, over a store of this test's own.
+  const live = makeGate();
+  await complete(live);
+  await live.gate.choose([live.gate.handle(HSBC.uid)]);
+  assert.equal(live.bankStore.state(CONNECTION_KEY).kind, "connection");
+
+  // The same store, the same key, every credential present — but BANK_ENABLED unset. The stored
+  // record is still there, still readable, and every path that could reach the provider refuses
+  // before anything is asked: this is the disabled-flag gap the review found (the start/callback/page
+  // paths had the check; the stored-record paths did not).
+  const offSettings = bankSettings({
+    BANK_APPLICATION_ID: "11111111-2222-3333-4444-555555555555",
+    BANK_JWT_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nnot really a key\n-----END PRIVATE KEY-----",
+    BANK_CONNECTION_KEY: CONNECTION_KEY,
+    BANK_REDIRECT_URL: REDIRECT,
+  });
+  assert.equal(offSettings.enabled, false);
+  const off = makeGate({ settings: offSettings, bankStore: live.bankStore });
+  assert.equal(off.bankStore.state(CONNECTION_KEY).kind, "connection", "the record is exactly as it was");
+
+  await assert.rejects(() => off.gate.accounts(), /switched off here \(BANK_ENABLED is not set\)/);
+  await assert.rejects(() => off.gate.accounts(true), /switched off here/);
+  await assert.rejects(() => off.gate.choose([off.gate.handle(HSBC.uid)]), /switched off here/);
+  await assert.rejects(() => off.gate.balances(off.gate.handle(HSBC.uid)), /switched off here/);
+  await assert.rejects(() => off.gate.transactions(off.gate.handle(HSBC.uid), "2026-11-01", "2026-11-15"), /switched off here/);
+  // Even disconnect — the one provider write a stale POST could reach — refuses before the provider.
+  await assert.rejects(() => off.gate.disconnect(), /switched off here/);
+  // And the connect paths refuse too, stale action or not.
+  await assert.rejects(() => off.gate.start(off.gate.newAction(FP1).token, FP1), /switched off here/);
+  await assert.rejects(() => off.gate.complete(FP1), /switched off here/);
+
+  assert.equal(off.api.calls.length, 0, "the disabled gate made no provider call at all, on any path");
+  assert.equal(live.bankStore.state(CONNECTION_KEY).kind, "connection", "and the stored record was neither read from nor destroyed");
+  assert.equal((live.bankStore.state(CONNECTION_KEY) as { connection: { disconnectedAt?: string } }).connection.disconnectedAt, undefined, "least of all marked disconnected");
 });
 
 /* ---------- The connect action ---------- */
@@ -372,6 +413,19 @@ test("an account the provider no longer lists is refused rather than guessed at"
   await assert.rejects(() => h.gate.balances(h.gate.handle(HSBC.uid)), /no longer lists that account/);
 });
 
+test("a credit-card account is only ever one the provider's own session listed, never support invented here", async () => {
+  // The goal includes credit cards; the provider's own enum is personal and business only, and this
+  // connector invents no card type and no card support. A card is whatever the bank's session lists
+  // among its accounts, choosable and readable exactly like any other, with the label it was given.
+  const h = makeGate({ api: { sessionAccounts: [HSBC, { uid: "acc-card", name: "Credit Card" }] } });
+  await complete(h);
+  const saved = await h.gate.choose([h.gate.handle("acc-card")]);
+  assert.equal(saved.accounts.length, 1);
+  assert.equal(saved.accounts[0].label, "Credit Card", "the provider's own name for it, and nothing added");
+  const read = await h.gate.balances(h.gate.handle("acc-card"));
+  assert.equal(read.account, "Credit Card");
+});
+
 test("a disconnected connection is never read from, whatever the record says", async () => {
   const h = makeGate();
   await complete(h);
@@ -441,7 +495,52 @@ test("transactions page to the end, and a safety bound that stops one early is s
   assert.equal(clipped.pages, 10);
   assert.equal(clipped.count, 10);
   assert.equal(clipped.shown, 10);
+  assert.equal(clipped.partial, undefined, "the bound has its own words on the page; the gate adds none here");
   assert.ok(!handle.startsWith("acc-"), "and a handle is never the provider's id");
+});
+
+test("an empty page that still promises more stops the read, and is said as the partial history it is", async () => {
+  // Page two is empty but still carries a continuation key: the provider's paging has gone odd, and
+  // the read must neither loop over empty pages nor pretend the history ended cleanly there.
+  const empty = makeGate({
+    api: {
+      pages: [
+        { lines: [{ bookingDate: "2026-11-14", description: "ONE", amount: "-1.00", currency: "GBP" }], continuationKey: "k1" },
+        { lines: [], continuationKey: "k2" },
+        { lines: [{ bookingDate: "2026-11-12", description: "NEVER REACHED", amount: "-3.00", currency: "GBP" }] },
+      ],
+    },
+  });
+  await complete(empty);
+  await empty.gate.choose([empty.gate.handle(HSBC.uid)]);
+  const read = await empty.gate.transactions(empty.gate.handle(HSBC.uid), "2026-11-01", "2026-11-15");
+  assert.equal(read.pages, 2, "it stopped on the empty page");
+  assert.equal(read.count, 1, "the one real line it had");
+  assert.equal(read.truncated, true, "and it is not smoothed over as a clean end");
+  assert.match(read.partial ?? "", /empty page but said there was more/);
+  assert.equal(empty.api.calls.filter((c) => c.op === "transactions").length, 2, "the page after the empty one was never asked for");
+});
+
+test("a page marker the provider already handed back once is a loop, and the read stops rather than spins", async () => {
+  // Both pages carry the same continuation key: without the guard this would run to the page bound
+  // asking for the same page again and again. It stops on the repeat and says the history is partial.
+  const loop = makeGate({
+    api: {
+      pages: [
+        { lines: [{ bookingDate: "2026-11-14", description: "ONE", amount: "-1.00", currency: "GBP" }], continuationKey: "k1" },
+        { lines: [{ bookingDate: "2026-11-13", description: "TWO", amount: "-2.00", currency: "GBP" }], continuationKey: "k1" },
+        { lines: [{ bookingDate: "2026-11-12", description: "NEVER REACHED", amount: "-3.00", currency: "GBP" }], continuationKey: "k3" },
+      ],
+    },
+  });
+  await complete(loop);
+  await loop.gate.choose([loop.gate.handle(HSBC.uid)]);
+  const read = await loop.gate.transactions(loop.gate.handle(HSBC.uid), "2026-11-01", "2026-11-15");
+  assert.equal(read.pages, 2, "the repeat is where it stopped, well before the bound of 10");
+  assert.equal(read.count, 2);
+  assert.equal(read.truncated, true);
+  assert.match(read.partial ?? "", /same page marker twice/);
+  assert.equal(loop.api.calls.filter((c) => c.op === "transactions").length, 2, "and the provider was not asked again");
 });
 
 test("a read that the provider refuses is one plain sentence, and nothing is stored", async () => {
@@ -516,7 +615,9 @@ test("the record blocks local reads before the provider is called at all", async
 /* ---------- The settings the gate depends on ---------- */
 
 test("the redirect address and the country are exactly what was configured", async () => {
-  const h = makeGate({ settings: bankSettings({ ...process.env, BANK_ENABLED: "true", BANK_APPLICATION_ID: "app", BANK_JWT_PRIVATE_KEY: "key", BANK_CONNECTION_KEY: CONNECTION_KEY, BANK_REDIRECT_URL: "https://workforce.example/bank/callback", BANK_COUNTRY: "gb" }) });
+  // Settings from a synthetic literal, never from this process's own environment: a bank test must
+  // not be able to load real credentials even on a host that has them.
+  const h = makeGate({ settings: bankSettings({ BANK_ENABLED: "true", BANK_APPLICATION_ID: "app", BANK_JWT_PRIVATE_KEY: "key", BANK_CONNECTION_KEY: CONNECTION_KEY, BANK_REDIRECT_URL: "https://workforce.example/bank/callback", BANK_COUNTRY: "gb" }) });
   await h.gate.start(h.gate.newAction(FP1).token, FP1);
   assert.deepEqual(h.api.calls.find((c) => c.op === "listAspsps")?.args[0], "GB");
   assert.equal((h.api.calls.find((c) => c.op === "startAuthorisation")?.args[0] as { redirectUrl: string }).redirectUrl, "https://workforce.example/bank/callback");

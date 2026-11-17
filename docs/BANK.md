@@ -23,7 +23,8 @@ has been read.
 - `scripts/bank-preview.ts` (`npm run bank-preview`): the synthetic preview that produced
   `docs/bank-page/`. A fake provider, a fake bank page and a real browser; no network.
 - `test/bank-store.test.ts`, `test/bank-api.test.ts`, `test/bank-connect.test.ts`,
-  `test/bank-page.test.ts`: the offline tests (a fake provider and a real app on a loopback port).
+  `test/bank-page.test.ts`, `test/bank-synthetic.test.ts`: the offline tests (a fake provider and a
+  real app on a loopback port).
   `test/invariants.test.ts` carries the bank block that holds the shape of all of this.
 
 ## How it works
@@ -37,9 +38,12 @@ has been read.
    fingerprint of the owner's own session cookie, valid ten minutes and usable once. The confirm page
    shows the bank, the consent length and the exact registered redirect URL; pressing Go to HSBC asks
    the provider for its bank list, picks the HSBC UK **personal** entry from that reply (never by name
-   guess: the provider's own `psu_type` is preferred, a business entry is excluded, and an ambiguous
-   list is refused rather than guessed), starts the authorisation and parks a flow in memory with 32
-   random bytes of state, bound to the same session.
+   guess: the provider's own `psu_types` is decisive, an entry it marks as non-personal is never a
+   candidate whatever it is called, and an ambiguous list is refused rather than guessed), starts the
+   authorisation and parks a flow in memory with 32 random bytes of state, bound to the same session.
+   The consent length is an **ask, not a promise** (see "What is unverified" below): the provider caps
+   the requested `valid_until` per bank and may adjust it to the bank's own minimum, and the end date
+   the page shows is the one the provider's own session reply reports.
 3. **The bank.** The waiting page offers the bank's own address as a link, which the owner follows. It
    is a link and not a redirect on purpose: every page here is served with `form-action 'self'`, and a
    browser applies that policy to the redirects of a form submission too, so a 303 to the bank would be
@@ -62,8 +66,12 @@ has been read.
 7. **Read.** Balances, and a transaction list over a checked London-date window, for one chosen account
    at a time. Every read resolves the handle against the stored selection first and the provider's
    session second, so an account that was never chosen is refused even though the session can see it.
-   Transactions page to the end, or stop at the safety bound (`BANK_PAGES_MAX` pages, `BANK_ROWS_MAX`
-   rows) and say they stopped there. Nothing read is stored anywhere.
+   Transactions page until the provider itself says there is no more (its documented
+   `continuation_key` is null at the end, and only that is a complete history). A read that stops for
+   any other reason is shown as **partial** with the reason, never smoothed over and never looped:
+   the safety bound (`BANK_PAGES_MAX` pages, `BANK_ROWS_MAX` rows), an empty page that still
+   promises more, or a page marker the provider has already handed back once (a loop, not history).
+   Nothing read is stored anywhere.
 8. **Disconnect.** Local reads are blocked first (written down before the provider is called, so a
    process that stops half way leaves a connection that cannot be read, not one that still can), then
    the documented session delete is called, then the local record is destroyed. The three things are
@@ -115,7 +123,15 @@ browser's own). The only two that must keep the service's environment, because t
 that lives in it, are the founder's own approved shell command (`src/jobs.ts` `run_command`, which
 deploys with `FLY_API_TOKEN`) and the `gh` call that watches the product's deploy (`src/design.ts`), and
 both take the bank secrets out first with `withoutBankSecrets` (`src/bank.ts`), so no subprocess of this
-service can read a bank key whatever it was started for.
+service is *handed* a bank key whatever it was started for.
+
+**What that is not: isolation.** These subprocesses run as the same user as the service itself, in the
+same process tree, and a same-user process can read another process's environment (through `/proc`, for
+instance) whether or not its own environment was scrubbed. Environment stripping is defence in depth
+only, and **no live-bank safety claim in this repository rests on it**. Real isolation for real bank
+data would need its own work and review: a separate user or machine for the service, a secrets store
+the connector's helpers cannot reach, and a look at the data volume's own boundaries. That work is
+deliberately not done here, which is one reason live-bank readiness stays blocked (below).
 
 `test/invariants.test.ts` asserts all of that over every worker kind and every subprocess entry point,
 and that no bank module is reachable from a model, a worker or the job store.
@@ -203,19 +219,52 @@ Tested, with synthetic data only (`test/bank-api.test.ts`, `test/bank-connect.te
   provider rather than called a connection;
 - provider failures, rate limits, pagination, a truncated read and expired or revoked consent each
   producing a truthful state on the page;
+- the paging guards: a read that ends only when the provider says so, and an empty page that still
+  promises more, a repeated page marker and the page/row bounds each stopping the read and being
+  reported as **partial** with the reason (test/bank-connect.test.ts, test/bank-page.test.ts);
+- the disabled flag enforced over a stored record: with `BANK_ENABLED` unset, every read and every
+  action that could reach the provider — including stale POSTs and Disconnect against a connection
+  that is already stored — is refused before anything is asked of it, with zero provider calls;
+- the provider's own list deciding the bank: a lone HSBC UK entry the provider marks as business-only
+  is refused (an explicit non-personal marking is never fallen back past), and only an entry the
+  provider marks personal, or does not mark at all, may be used;
+- the read-session reply in its documented shape (accounts as id strings with the uids repeated in
+  `accounts_data`, and no session id of its own in the reply), alongside the create-session shape;
+- the synthetic-only test boundary (`test/bank-synthetic.ts`, called by every bank test file): no
+  `BANK_` variable from the host survives into a bank test process, no bank test builds settings out
+  of the host's environment, and a call that would leave for the provider's own address fails loudly
+  rather than going, so real keys on the host cannot silently enable real reads during this work;
 - every bank secret stripped from every worker kind and every subprocess entry point, and no bank module
   reachable from a model, a worker or the job store;
 - the rendered page, escaped, on a desktop and a phone viewport (`docs/bank-page/`, made by
   `npm run bank-preview` against a fake provider and a fake bank page).
 
+**Checked against the provider's published specification, and what that still leaves open:**
+
+The request and reply shapes were checked against Enable Banking's published OpenAPI specification
+(`enablebanking.com/docs/api/reference`, read 17 Nov 2026; no live application, no account, no call):
+the operation paths, `StartAuthorizationRequest` (`access` with `valid_until`, `aspsp`, `state`,
+`redirect_url`, `psu_type`), `GetAspspsResponse` with the `personal`/`business` `psu_types` enum,
+`AuthorizeSessionResponse`, the read-session reply `GetSessionResponse` (accounts as id strings with
+the uids repeated in `accounts_data`, and no session id of its own), `HalTransactions` with its
+`continuation_key` ("null if there are no more pages"), and the balance and transaction field names
+(the balance types are ISO 20022 codes such as `CLBD` and `ITAV`, shown as the provider's own words).
+
 **Not tested, and not verified by anyone yet:**
 
 - **Any real Enable Banking call.** No application has been registered, no key has been issued and no
-  request has left for the provider. The paths, field names, the RS256 JWT, the `psu_type` values and
-  the reply shapes come from the provider's public documentation and general knowledge of the AIS
-  standard, written without a live application. The first real run may well find a field this parser
-  does not read; it is written to say plainly when a reply is not in a shape it understands rather than
-  guessing, but the shapes themselves are unverified.
+  request has left for the provider. The specification was read, not exercised: the first real run may
+  still find a field this parser does not read, and it is written to say plainly when a reply is not in
+  a shape it understands rather than guessing.
+- **The consent length, as asked.** The connector asks for 90 days (`BANK_CONSENT_DAYS`), but that
+  number is unverified against HSBC UK: the specification caps the requested `valid_until` per bank
+  (`maximum_consent_validity`, in the /aspsps reply) and says the provider adjusts it to the bank's own
+  minimum, so 90 days is an ask and not a promise. What the page shows as the consent's end is the
+  provider's own answer (`access.valid_until`), never this connector's request.
+- **Credit-card support.** The goal includes credit-card accounts, and the provider's `psu_type` enum
+  is `personal` and `business` only: there is no card type, and this connector invents none. A
+  credit-card account appears only if the bank's own session lists it among its accounts, and whether
+  HSBC UK lists credit cards in an AIS session is unverified.
 - **A real bank authorisation, and the real redirect.** The callback has been exercised with synthetic
   query strings on a loopback address. Whether HSBC's own page and the provider's redirect behave
   exactly as documented is unverified.
@@ -225,3 +274,10 @@ Tested, with synthetic data only (`test/bank-api.test.ts`, `test/bank-connect.te
   goes, and what it reports, is unverified.
 - **Real account data of any kind.** None has been read, and none should be until Paul decides to
   register an application and connect deliberately.
+- **Live-bank readiness, deliberately blocked.** Turning this on for real is not only a matter of
+  setting the four variables: the connector would then hold real bank session records on a machine
+  whose workers, browsers and subprocesses run as the same user, and environment stripping is not
+  isolation (see "Configuration" above). Real use needs an isolation review first — separate user or
+  machine, secrets partitioning, the data volume's boundaries — which has deliberately not been built
+  here, and until it exists nothing in this repository should be read as claiming live-bank
+  compatibility.

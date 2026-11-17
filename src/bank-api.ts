@@ -19,9 +19,15 @@
  *
  * The reply shapes are parsed defensively: this connector shows what the provider actually said, and
  * says plainly when a reply is not in a shape it understands, rather than guessing. The shapes
- * themselves (paths, field names, the RS256 JWT the provider takes) come from the provider's public
- * documentation and general knowledge of the AIS standard; they have been written here without a live
- * application, and the tests use synthetic replies in those shapes only.
+ * themselves (paths, field names, the RS256 JWT the provider takes) were checked against the
+ * provider's published OpenAPI specification (enablebanking.com/docs/api/reference, read 17 Nov 2026,
+ * no live application): the operation paths, `StartAuthorizationRequest` (access/aspsp/state/
+ * redirect_url/psu_type), `GetAspspsResponse` with the `personal`/`business` `psu_types` enum,
+ * `AuthorizeSessionResponse`, the read-session reply (`GetSessionResponse`, whose accounts are id
+ * strings with the uids repeated in `accounts_data`, and which carries no session id of its own),
+ * `HalTransactions` with its `continuation_key` ("null if there are no more pages") and the balance
+ * and transaction field names. What that specification cannot settle without a live run remains
+ * labelled in docs/BANK.md: what HSBC UK itself allows, and what the provider actually answers.
  */
 import { createHash, createPrivateKey, createSign } from "node:crypto";
 import { BANK_JWT_TTL_SECONDS_MAX, BankError, checkBaseUrl, type BankSettings } from "./bank.js";
@@ -108,8 +114,10 @@ export class BankApiError extends Error {
     message: string,
     readonly status?: number,
     readonly retryAfterMs?: number,
+    /** The error underneath, when there was one: a test's synthetic-only refusal stays visible on it. */
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -236,7 +244,7 @@ export interface BankSessionInfo {
 }
 
 export interface BankBalanceLine {
-  /** The provider's own type words, e.g. interimAvailable. Never invented when it is missing. */
+  /** The provider's own type words, its documented ISO 20022 codes (CLBD, ITAV, ITBD...). Never invented when missing. */
   type: string;
   name?: string;
   amount: string;
@@ -290,10 +298,16 @@ const NOT_PERSONAL = /(business|corporate|commercial|invest|markets|global|merch
 
 /**
  * Which bank the authorisation is for, taken from the provider's own list rather than guessed: the
- * HSBC entry for the configured country that is not a business or corporate one, with a preference for
- * the entry the provider itself marks as usable by a personal customer. One candidate is used; none, or
- * more than one, is refused in plain words, because picking by name where the list is ambiguous is
- * exactly the guess this connector must not make.
+ * HSBC entry for the configured country that is not a business or corporate one, and that the
+ * provider's own `psu_types` does not mark as non-personal. The provider's enum is `personal` and
+ * `business` only (its published specification, read 17 Nov 2026): there is no card or
+ * credit-card type, and this connector invents none — a credit-card account is only ever one the
+ * bank's own session lists among its accounts. An entry whose `psu_types` is there and does not
+ * include `personal` is never a candidate, whatever it is called: there is no fallback past an
+ * explicit non-personal marking, so a lone business-only HSBC entry is refused rather than used.
+ * An entry with no `psu_types` at all stays eligible (the provider did not say). One candidate is
+ * used; none, or more than one, is refused in plain words, because picking by name where the list
+ * is ambiguous is exactly the guess this connector must not make.
  */
 export function pickHsbcUkPersonal(aspsps: BankAspsp[], country = "GB"): BankAspsp {
   const wanted = country.toUpperCase();
@@ -302,10 +316,9 @@ export function pickHsbcUkPersonal(aspsps: BankAspsp[], country = "GB"): BankAsp
   const hsbc = inCountry.filter((a) => /hsbc/i.test(a.name));
   if (!hsbc.length) throw new BankApiError("config", `The provider returned ${inCountry.length} ${wanted} banks and none of them is HSBC, so nothing was started.`);
   const personal = hsbc.filter((a) => !NOT_PERSONAL.test(a.name));
-  // What the provider itself says the entry is for comes first: an entry it marks as business-only is
-  // not the personal one, whatever it is called.
-  const personalOnly = personal.filter((a) => !a.psuTypes || a.psuTypes.includes("personal"));
-  const candidates = personalOnly.length ? personalOnly : personal;
+  // What the provider itself says the entry is for is decisive: an entry marked as business-only is
+  // not the personal one, whatever it is called, and there is no fallback past that marking.
+  const candidates = personal.filter((a) => !a.psuTypes || a.psuTypes.includes("personal"));
   if (!candidates.length) throw new BankApiError("config", `The provider's only HSBC ${wanted} entries are business ones (${hsbc.map((a) => a.name).join(", ")}), so nothing was started.`);
   // The plainest name for the bank, if there is exactly one of those, is the personal entry.
   const exact = candidates.filter((a) => /^hsbc( uk| bank uk| uk bank)?( plc| ltd)?$/i.test(a.name.trim()));
@@ -330,19 +343,46 @@ export function authUrlOk(value: unknown, allowLoopback = false): { ok: true; ur
   return { ok: false, reason: "The provider's authorisation address is not https, so it was not followed." };
 }
 
-export function parseSession(reply: unknown): BankSessionInfo {
+/**
+ * One session reply, in either of the two documented shapes. `POST /sessions` answers with
+ * `AuthorizeSessionResponse`: a `session_id`, and accounts as full objects (`AccountResource`, with a
+ * `uid`, a name, a currency and an `account_id`). `GET /sessions/{session}` answers with
+ * `GetSessionResponse`, which carries no session id of its own (the id is the one in the path, passed
+ * here by the caller) and whose `accounts` are bare id strings, with the same uids repeated in
+ * `accounts_data` and no names among them — so an account known only from a read-session has a uid to
+ * read by and no label, and the page says "unnamed account" rather than inventing one.
+ */
+export function parseSession(reply: unknown, sessionId?: string): BankSessionInfo {
   if (!isObj(reply)) throw new BankApiError("shape", BANK_FAILURE_SENTENCES.shape);
-  const sessionId = firstString(reply.session_id, reply.sessionId);
-  if (!sessionId) throw new BankApiError("shape", BANK_FAILURE_SENTENCES.shape);
+  const id = firstString(reply.session_id, reply.sessionId) ?? (typeof sessionId === "string" ? sessionId.trim() : undefined);
+  if (!id) throw new BankApiError("shape", BANK_FAILURE_SENTENCES.shape);
   const accountsRaw = Array.isArray(reply.accounts) ? reply.accounts : [];
   const accounts: BankAccount[] = [];
+  const seen = new Set<string>();
+  const add = (a: BankAccount): void => {
+    if (seen.has(a.uid)) return;
+    seen.add(a.uid);
+    accounts.push(a);
+  };
   for (const a of accountsRaw) {
-    if (!isObj(a)) continue;
-    const uid = asString(a.uid);
-    if (!uid) continue;
-    const id = isObj(a.account_id) ? a.account_id : {};
-    const iban = firstString(id.iban, isObj(id.other) ? id.other.identification : undefined);
-    accounts.push({ uid, ...(asString(a.name) ? { name: asString(a.name) } : {}), ...(iban ? { iban } : {}), ...(asString(a.currency) ? { currency: asString(a.currency) } : {}) });
+    if (isObj(a)) {
+      const uid = asString(a.uid);
+      if (!uid) continue;
+      const accountId = isObj(a.account_id) ? a.account_id : {};
+      const iban = firstString(accountId.iban, isObj(accountId.other) ? accountId.other.identification : undefined);
+      add({ uid, ...(asString(a.name) ? { name: asString(a.name) } : {}), ...(iban ? { iban } : {}), ...(asString(a.currency) ? { currency: asString(a.currency) } : {}) });
+    } else {
+      // A read-session's own shape: the account list is a list of ids, not of objects.
+      const uid = asString(a);
+      if (uid) add({ uid });
+    }
+  }
+  // The read-session documents the same ids again in `accounts_data` (uid plus identification hashes);
+  // they are the same accounts, and anything new there is kept rather than dropped.
+  for (const d of Array.isArray(reply.accounts_data) ? reply.accounts_data : []) {
+    if (!isObj(d)) continue;
+    const uid = asString(d.uid);
+    if (uid) add({ uid });
   }
   const aspsp = isObj(reply.aspsp) ? reply.aspsp : {};
   const access = isObj(reply.access) ? reply.access : {};
@@ -350,7 +390,7 @@ export function parseSession(reply: unknown): BankSessionInfo {
   // The provider's own words for the consent's scope, however it writes them.
   const scope = [...stringsOf(reply.scope), ...stringsOf(access.scope), ...stringsOf(reply.access)];
   return {
-    sessionId,
+    sessionId: id,
     accounts,
     aspsp: { name: firstString(aspsp.name) ?? "the bank", country: (firstString(aspsp.country) ?? "").toUpperCase() },
     scope,
@@ -496,7 +536,9 @@ export class BankApi {
     } catch (err) {
       const name = (err as { name?: string }).name ?? "";
       if (name === "AbortError" || name === "TimeoutError") throw new BankApiError("network", "The provider took too long to answer, so nothing was read.");
-      throw new BankApiError("network", BANK_FAILURE_SENTENCES.network);
+      // The cause is kept: in a test the error underneath is the synthetic-only boundary's refusal,
+      // and it must stay visible on the failure the caller sees, not be swallowed by this sentence.
+      throw new BankApiError("network", BANK_FAILURE_SENTENCES.network, undefined, undefined, { cause: err });
     }
 
     const body = (await res.text().catch(() => "")).slice(0, MAX_BODY_BYTES);
@@ -548,7 +590,9 @@ export class BankApi {
   }
 
   async readSession(sessionId: string): Promise<BankSessionInfo> {
-    return parseSession(await this.call("read-session", { params: { session: sessionId } }));
+    // The read-session reply carries no id of its own (GetSessionResponse): the id this caller asked
+    // by is the id the parsed session gets, and the parse takes the documented string-shaped accounts.
+    return parseSession(await this.call("read-session", { params: { session: sessionId } }), sessionId);
   }
 
   async accountDetails(uid: string): Promise<Record<string, unknown>> {

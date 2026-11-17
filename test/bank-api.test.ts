@@ -14,9 +14,13 @@ import { generateKeyPairSync } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { bankTestBoundary } from "./bank-synthetic.js";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-bank-api-"));
 process.env.PUBLIC_URL = "https://workforce.example";
+// The synthetic-only boundary: no BANK_ variable of the host's reaches this process, and a call that
+// would leave for the provider fails loudly rather than going (test/bank-synthetic.ts).
+bankTestBoundary();
 
 const {
   BANK_OPERATIONS,
@@ -265,6 +269,18 @@ test("the bank list is read as the provider sent it, and the HSBC UK personal en
   const marked = parseAspsps({ aspsps: [{ name: "HSBC UK", country: "GB", psu_types: ["business"] }, { name: "HSBC Bank plc", country: "GB", psu_types: ["personal"] }] });
   assert.equal(pickHsbcUkPersonal(marked).name, "HSBC Bank plc");
 
+  // An explicit non-personal marking is never fallen back past, whatever the entry is called: a lone
+  // business-only HSBC entry (even one whose name looks personal) is refused, not used.
+  for (const lone of [
+    [{ name: "HSBC UK", country: "GB", psu_types: ["business"] }],
+    [{ name: "HSBCUK", country: "GB", psu_types: ["business"] }],
+  ] as const) {
+    assert.throws(() => pickHsbcUkPersonal(parseAspsps({ aspsps: [...lone] })), /business ones/, `${lone[0].name} is business-only and must not be used`);
+  }
+  // An entry the provider marks as personal is the supported one, and an unmarked entry stays eligible.
+  assert.equal(pickHsbcUkPersonal(parseAspsps({ aspsps: [{ name: "HSBC UK", country: "GB", psu_types: ["personal"] }] })).name, "HSBC UK");
+  assert.equal(pickHsbcUkPersonal(parseAspsps({ aspsps: [{ name: "HSBC UK", country: "GB" }] })).name, "HSBC UK", "no psu_types at all is the provider not saying, not a refusal");
+
   // Nothing to pick, or more than one thing that could be it, is refused in plain words rather than guessed.
   assert.throws(() => pickHsbcUkPersonal(parseAspsps({ aspsps: [{ name: "Monzo", country: "GB" }] })), /none of them is HSBC/);
   assert.throws(() => pickHsbcUkPersonal(parseAspsps({ aspsps: [{ name: "HSBC UK Business", country: "GB" }] })), /only HSBC GB entries are business ones/);
@@ -298,15 +314,15 @@ test("a session, a balance list and a page of transactions are read as they come
 
   const balances = parseBalances({
     balances: [
-      { name: "Booked", balance_type: "interimBooked", balance_amount: { currency: "gbp", amount: "1234.56" } },
-      { balance_type: "interimAvailable", balance_amount: { currency: "GBP", amount: "-12.34" }, reference_date: "2026-11-15" },
+      { name: "Booked", balance_type: "ITBD", balance_amount: { currency: "gbp", amount: "1234.56" } },
+      { balance_type: "ITAV", balance_amount: { currency: "GBP", amount: "-12.34" }, reference_date: "2026-11-15" },
       { balance_type: "no amount" },
       { name: "odd", balance_type: "weird", balance_amount: { currency: "GBP", amount: "not a number at all really" } },
     ],
   });
   assert.equal(balances.length, 3);
   assert.equal(balances[0].currency, "GBP");
-  assert.equal(balances[0].type, "interimBooked");
+  assert.equal(balances[0].type, "ITBD", "the provider's documented ISO 20022 codes, shown as its own words");
   assert.equal(balances[1].amount, "-12.34");
   assert.equal(balances[1].asOf, "2026-11-15");
   assert.equal(balances[2].amount, "not a number at all really", "an amount that is not a number is shown as the provider's words, not as a guess");
@@ -327,6 +343,38 @@ test("a session, a balance list and a page of transactions are read as they come
   assert.equal(txns.lines[2].bookingDate, "", "a missing date is left empty, not invented");
   assert.equal(txns.continuationKey, "next-page");
   assert.throws(() => parseTransactions({ transactions: "no" }), /not in a shape/);
+});
+
+test("a read-session reply is read in its own documented shape, not the create-session's", () => {
+  // GET /sessions/{session} (GetSessionResponse in the provider's published specification): no session
+  // id of its own, accounts as bare id strings, the same uids again in `accounts_data` with no names
+  // among them. (POST /sessions answers with the full AccountResource objects the test above uses.)
+  const read = parseSession(
+    {
+      status: "AUTHORIZED",
+      accounts: ["497f6eca-6276-4993-bfeb-53cbbbba6f08", "0f4a2d1e-1111-2222-3333-444455556666"],
+      accounts_data: [
+        { uid: "497f6eca-6276-4993-bfeb-53cbbbba6f08", identification_hash: "hash-a", identification_hashes: ["hash-a"] },
+        { uid: "c4f3aaaa-7777-8888-9999-000000001111", identification_hash: "hash-c", identification_hashes: ["hash-c"] },
+      ],
+      aspsp: { name: "HSBC UK", country: "GB" },
+      psu_type: "personal",
+      access: { valid_until: "2027-02-13T00:00:00Z", balances: true, transactions: true },
+      created: "2026-11-15T09:00:00Z",
+    },
+    "sess-1",
+  );
+  assert.equal(read.sessionId, "sess-1", "the id is the one from the path: the reply carries none of its own");
+  assert.deepEqual(
+    read.accounts.map((a) => a.uid),
+    ["497f6eca-6276-4993-bfeb-53cbbbba6f08", "0f4a2d1e-1111-2222-3333-444455556666", "c4f3aaaa-7777-8888-9999-000000001111"],
+    "both documented lists, deduped, and nothing dropped",
+  );
+  assert.ok(read.accounts.every((a) => a.name === undefined && a.iban === undefined), "a read-session account is a uid and no label: the page says unnamed rather than inventing one");
+  assert.equal(read.accessValidUntil, "2027-02-13T00:00:00Z");
+  // And a reply with no id anywhere is still a shape error, never a guess.
+  assert.throws(() => parseSession({ accounts: ["x"] }), /not in a shape/);
+  assert.throws(() => parseSession({ accounts: ["x"] }, "  "), /not in a shape/);
 });
 
 test("the address the bank sends the browser to must be https", () => {
