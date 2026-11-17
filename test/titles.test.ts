@@ -18,6 +18,7 @@ const { describeToolUse } = await import("../src/status.js");
 const { validateTitle, deriveTitle, jobLabel, jobTitle, TITLE_MAX_CHARS } = await import("../src/titles.js");
 import type { AgentRunner } from "../src/agents.js";
 import type { FollowUp } from "../src/store.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 const PR = "https://github.com/acme/clear-exchange/pull/7";
@@ -44,7 +45,7 @@ class ThreadMessenger extends ConsoleMessenger {
 function chiefCalling(calls: Array<[string, Record<string, unknown>]>, worker: AgentRunner = async () => ({ text: "done" })) {
   const results: Array<{ text: string; isError?: boolean }> = [];
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (!ops) return worker(o);
     const tools = ops.instance?._registeredTools;
     for (const [name, args] of calls) {
@@ -258,7 +259,7 @@ test("the chief is told to pick a short, specific title for every job and schedu
     ["list_schedules", {}],
   ]);
   const wrapped: AgentRunner = async (o) => {
-    if (o.mcpServers?.ops) prompt = o.systemPrompt;
+    if (o.mcpServers?.[OPS_SERVER_NAME]) prompt = o.systemPrompt;
     return runner(o);
   };
   const jobs = new JobRunner(store, new ConsoleMessenger(), wrapped);

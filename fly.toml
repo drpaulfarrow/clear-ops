@@ -18,6 +18,9 @@ primary_region = "lhr"
   # haiku = DeepSeek V4.1 Flash, sonnet = GLM 5.3, opus = Kimi K3.1 Pro. The flash model stays on the
   # high-volume, low-stakes work (research summaries, drafts, design notes); the chief, which routes every
   # message, and the engineer get GLM; the maintainer, which reviews what the engineer wrote, gets Kimi.
+  # The agents run on OpenRouter, full stop. Without OPENROUTER_API_KEY they fail with a plain message;
+  # they never fall back to Claude on the Anthropic key (the executive assistant uses that key by design).
+  LLM_PROVIDER = "openrouter"
   CHIEF_MODEL = "sonnet"
   WORKER_MODEL = "haiku"
   ENGINEER_MODEL = "sonnet"

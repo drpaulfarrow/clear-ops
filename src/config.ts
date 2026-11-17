@@ -113,6 +113,13 @@ export const config = {
    * (src/llm.ts). The aliases the roles use map to OPENROUTER_HAIKU_MODEL, _SONNET_, _OPUS_ and
    * _FABLE_ (defaults in src/llm.ts); OPENROUTER_PRICES (JSON) prices models the defaults do not cover.
    */
+  /**
+   * Which provider the agents are meant to run on: "openrouter", "anthropic", or unset (inferred: OpenRouter
+   * when OPENROUTER_API_KEY is set, else Anthropic). Set it (16 Nov 2026) so that a missing OpenRouter key
+   * stops the runs with a plain failure instead of quietly sending every agent to Claude on the Anthropic
+   * key. The executive assistant runs on Anthropic whatever this says.
+   */
+  llmProvider: ((v) => (v === "openrouter" || v === "anthropic" ? v : ""))((process.env.LLM_PROVIDER ?? "").trim().toLowerCase()) as "openrouter" | "anthropic" | "",
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     models: {

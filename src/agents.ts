@@ -6,7 +6,7 @@ import { githubAuth, workerGithubEnv } from "./github-auth.js";
 import { repoCredentialLabel } from "./repo-tokens.js";
 import { SEARCH_SECRETS } from "./search.js";
 import { TRANSCRIBE_SECRETS } from "./transcribe.js";
-import { DIRECT_STRIPPED, LLM_STRIPPED, llmEnv, llmManagedSettings, provider, resolveModel } from "./llm.js";
+import { DIRECT_STRIPPED, LLM_STRIPPED, OPENROUTER_KEY_MISSING, llmEnv, llmManagedSettings, openRouterKeyMissing, provider, resolveModel } from "./llm.js";
 import type { JobKind, JobTarget } from "./store.js";
 import { CV_TOOLS, cvDir, cvServer } from "./cv.js";
 import { DECK_TOOLS, deckDir, deckServer } from "./decks.js";
@@ -160,6 +160,9 @@ export const sdkRunner: AgentRunner = async (o) => {
   const direct = o.provider === "anthropic";
   if (direct && !process.env.ANTHROPIC_API_KEY) {
     return { text: "", error: { kind: "auth", detail: "ANTHROPIC_API_KEY is not set, and this agent runs only on Anthropic's API." } };
+  }
+  if (!direct && openRouterKeyMissing(o.apiKey ?? config.openrouter.apiKey)) {
+    return { text: "", error: { kind: "auth", detail: OPENROUTER_KEY_MISSING } };
   }
   try {
     for await (const message of query({

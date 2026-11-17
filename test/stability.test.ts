@@ -50,3 +50,42 @@ test("the maintainer has its own model setting", () => {
   assert.equal(typeof config.models.maintainer, "string");
   assert.ok(config.models.maintainer.length > 0);
 });
+
+test("LLM_PROVIDER=openrouter with no key refuses every run instead of falling back to Claude", async () => {
+  const { provider, openRouterKeyMissing, resolveModel, llmEnv } = await import("../src/llm.js");
+  const { sdkRunner } = await import("../src/agents.js");
+  const saved = { p: config.llmProvider, k: config.openrouter.apiKey, a: process.env.ANTHROPIC_API_KEY };
+  try {
+    (config as { llmProvider: string }).llmProvider = "openrouter";
+    config.openrouter.apiKey = "";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-would-be-used-by-a-fallback";
+    assert.equal(provider(), "openrouter");
+    assert.equal(openRouterKeyMissing(), true);
+    // The aliases still resolve to OpenRouter ids, and the SDK is never pointed at Anthropic.
+    assert.notEqual(resolveModel("sonnet"), "sonnet");
+    assert.equal(llmEnv().ANTHROPIC_API_KEY, "");
+    const r = await sdkRunner({ prompt: "hi", systemPrompt: "x", model: "sonnet", allowedTools: [] } as never);
+    assert.equal(r.error?.kind, "auth");
+    assert.match(r.error?.detail ?? "", /never fall back to Claude/);
+  } finally {
+    (config as { llmProvider: string }).llmProvider = saved.p;
+    config.openrouter.apiKey = saved.k;
+    if (saved.a === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = saved.a;
+  }
+});
+
+test("with no LLM_PROVIDER, the provider is still inferred from the key as before", async () => {
+  const { provider } = await import("../src/llm.js");
+  const saved = { p: config.llmProvider, k: config.openrouter.apiKey };
+  try {
+    (config as { llmProvider: string }).llmProvider = "";
+    config.openrouter.apiKey = "";
+    assert.equal(provider(), "anthropic");
+    config.openrouter.apiKey = "sk-or-v1-test";
+    assert.equal(provider(), "openrouter");
+  } finally {
+    (config as { llmProvider: string }).llmProvider = saved.p;
+    config.openrouter.apiKey = saved.k;
+  }
+});

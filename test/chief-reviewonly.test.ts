@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 process.env.ALLOWED_NUMBERS = "447700900123";
 process.env.ALLOWED_TELEGRAM_IDS = "99887766";
@@ -32,14 +33,22 @@ const wireTurns: WireTurn[] = [];
 /** One script per chief turn, in order: each drives that turn's ops server over the MCP wire. */
 const scripts: Array<(client: InstanceType<typeof Client>, turn: WireTurn) => Promise<void>> = [];
 
+/** How each chief turn registered the ops server: its namespace key and the allowedTools it was granted. */
+const chiefRuns: Array<{ namespace: string; allowedTools: string[] }> = [];
+
 const runner: AgentRunner = async (o) => {
-  const ops = o.mcpServers?.ops as { instance?: unknown } | undefined;
+  const ops = o.mcpServers?.[OPS_SERVER_NAME] as { instance?: unknown } | undefined;
   if (!ops) {
     // A worker run: a synthetic engineer's report ending in a pull request URL.
     return { text: `Synthetic worker report.\nOpened ${PR_URL} for review.` };
   }
-  // A chief turn: stand in for the Agent SDK, which connects the ops server over an in-memory
-  // transport and advertises its tools to the model fresh on every turn, resumed or not.
+  // A chief turn: stand in for the Agent SDK and connect the ops server over an in-memory transport,
+  // the same wiring the SDK gives it. What this proves is the server the orchestrator built: its
+  // namespace, its advertised schema and its dispatch. What it cannot prove is what the real CLI
+  // advertises to a resumed session; that is pinned against the real SDK in
+  // test/chief-schema-resume.test.ts.
+  chiefRuns.push({ namespace: OPS_SERVER_NAME, allowedTools: o.allowedTools ?? [] });
+  assert.deepEqual(Object.keys(o.mcpServers ?? {}).filter((k) => k.startsWith("ops")), [OPS_SERVER_NAME], "the ops server is registered under the versioned namespace and nothing else");
   const turn: WireTurn = { systemPrompt: o.systemPrompt, resume: o.resume, calls: [] };
   wireTurns.push(turn);
   const client = new Client({ name: "clear-ops-wire-test", version: "0.0.0" });
@@ -106,7 +115,9 @@ test("the schema advertised to a chief session carries reviewOnly, and the promp
   assert.match(flag.description, /Engineer and create_agent only/);
   assert.match(flag.description, /only when Paul himself asked for the pull request to be left for him/);
   assert.deepEqual(schema.required, ["kind", "title", "brief"], "reviewOnly stays optional on the wire");
-  // The incident's cause was the prompt, not the plumbing: the chief is now told the flag exists.
+  // The prompt now tells the chief the flag exists (PR101's guidance, kept); whether a resumed session
+  // can see the flag's schema at all is the namespace question, covered below and in
+  // test/chief-schema-resume.test.ts.
   assert.match(turn.systemPrompt, /pass reviewOnly: true on that job's start_job/, "the chief's prompt says when to pass reviewOnly");
   assert.match(turn.systemPrompt, /Clean room rule/, "the prompt keeps its clean-room rule");
 });
@@ -149,15 +160,19 @@ test("reviewOnly on a kind that opens no pull request is refused over the wire, 
   assert.equal(store.allJobs().length, before, "no job record was created");
 });
 
-test("a resumed chief session is advertised the same current schema: no restart or session reset is needed", async () => {
+test("the chief's ops server is registered under the schema-versioned namespace, with allowedTools to match, and a resumed turn keeps the session", async () => {
   scripts.push(async (client, turn) => {
     turn.advertised = (await client.listTools()) as any;
   });
   const turn = await chiefTurn("wire: and now, resumed");
   assert.equal(turn.resume, CHIEF_SESSION, "the later turn resumes the stored session");
+  // The namespace carries the schema version (src/ops-schema.ts): a resumed Agent SDK session reuses
+  // the tool schemas it recorded for a server name it already knows, so the name must change whenever
+  // the schema does. The real CLI's resumed-session behaviour is pinned by test/chief-schema-resume.test.ts.
+  assert.match(OPS_SERVER_NAME, /^ops_v\d+$/, "the chief's ops namespace is schema-versioned");
+  assert.ok(chiefRuns.every((r) => r.namespace === OPS_SERVER_NAME), "every chief turn registers the ops server under the versioned namespace");
+  assert.ok(chiefRuns.every((r) => r.allowedTools.includes(`mcp__${OPS_SERVER_NAME}__*`)), "allowedTools matches the versioned namespace");
   const schema = advertisedStartJob(turn);
-  const first = advertisedStartJob(wireTurns[0]!);
-  assert.deepEqual(schema.properties.reviewOnly, first.properties.reviewOnly, "a resumed session sees the same advertised reviewOnly");
-  assert.deepEqual(schema.required, first.required);
-  assert.ok(!schema.required.includes("reviewOnly"), "reviewOnly stays optional for a resumed session");
+  assert.ok(schema.properties.reviewOnly, "the advertised schema still carries reviewOnly");
+  assert.deepEqual(schema.required, ["kind", "title", "brief"], "reviewOnly stays optional on the wire");
 });

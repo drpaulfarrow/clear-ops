@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 import type { FailureKind } from "./failures.js";
 import type { RetrievalRecord } from "./retrieval.js";
+import type { OpsToolShape } from "./ops-schema.js";
 
 /** How many of the chief's own retrieval decisions are kept, newest last (src/retrieval.ts). */
 export const RETRIEVAL_TURNS_KEPT = 20;
@@ -463,6 +464,8 @@ interface State {
   usageStart?: { ymd: string; usd: number; at: string };
   /** The chief's own retrieval decisions, newest last, bounded (src/retrieval.ts). Never mail or uploads. */
   retrievalTurns?: RetrievalRecord[];
+  /** The ops tool shape pinned per chief MCP namespace, for the fail-closed schema guard (src/ops-schema.ts). */
+  opsSchemas?: Record<string, OpsToolShape[]>;
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -520,6 +523,17 @@ export class Store {
   // Sessions
   getSession(number: string): string | undefined {
     return this.state.sessions[number];
+  }
+
+  // The ops schema guard (src/ops-schema.ts): the shape a chief MCP namespace advertised when it was
+  // first pinned, one entry per schema version. Old namespaces keep their entries: they are tiny, and
+  // they are the record of what each version advertised.
+  opsSchema(namespace: string): OpsToolShape[] | undefined {
+    return this.state.opsSchemas?.[namespace];
+  }
+  pinOpsSchema(namespace: string, shapes: OpsToolShape[]): void {
+    (this.state.opsSchemas ??= {})[namespace] = shapes;
+    this.save();
   }
   setSession(number: string, sessionId: string): void {
     this.state.sessions[number] = sessionId;

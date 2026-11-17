@@ -18,6 +18,7 @@ const { Orchestrator } = await import("../src/orchestrator.js");
 const { Scheduler } = await import("../src/scheduler.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 const PR = "https://github.com/acme/clear-exchange/pull/9";
@@ -211,7 +212,7 @@ test("threadMention links Discord channels and threads only", () => {
 function chiefCalling(calls: Array<[string, Record<string, unknown>]>, worker: AgentRunner) {
   const results: Array<{ text: string; isError?: boolean }> = [];
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (!ops) return worker(o);
     const tools = ops.instance?._registeredTools;
     for (const [name, args] of calls) {

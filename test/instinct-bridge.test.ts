@@ -23,6 +23,9 @@ const { BRIDGE_READ_DENY } = await import("../src/agents.js");
 const { webToolsFor } = await import("../src/web-tools.js");
 const { snapshotRepos } = await import("../src/bridge-snapshot.js");
 const { Orchestrator } = await import("../src/orchestrator.js");
+// Paul's own chief turns register their ops server under the schema-versioned namespace (src/ops-schema.ts);
+// the bridge's and the device's fixed read-only server stays under the plain "ops" name.
+const { OPS_SERVER_NAME } = await import("../src/ops-schema.js");
 const { Scheduler } = await import("../src/scheduler.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 const { config } = await import("../src/config.js");
@@ -362,7 +365,8 @@ test("context: Paul's own message is captured by the service for the turn that s
   const messenger = { send: async () => undefined } as never;
   let turn = 0;
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as { instance?: any } | undefined;
+    // The chief's own turn (Paul typed): the versioned ops namespace. Bridge turns use "ops" and have no start_job.
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as { instance?: any } | undefined;
     if (ops && !o.systemPrompt.includes("talking to Paul's assistant") && ops.instance?._registeredTools?.start_job) {
       turn++;
       const reg = ops.instance._registeredTools;

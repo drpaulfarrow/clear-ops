@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { OPS_SCHEMA_VERSION, OPS_SERVER_NAME, OPS_TOOLS, guardOpsSchema } from "./ops-schema.js";
 import { z } from "zod";
 import { BRIDGE_JOBS_PER_DAY, bridgeJobView, BRIDGE_KINDS_LIST, BRIDGE_REPLY_TO, BRIDGE_SENDER, bridgeMessageWrapper, bridgePrompt, bridgeJobBrief } from "./instinct-chat.js";
 import { bookingLink, config, isAllowed, isOversightSender } from "./config.js";
@@ -122,7 +123,16 @@ export class Orchestrator {
     private readonly purchase?: PurchaseGate,
     /** The one-time code relay. Without it, "code <id> <the code>" does nothing. */
     private readonly otp?: OtpRelay,
-  ) {}
+  ) {
+    // Fail closed at boot on a schema change without a version bump (src/ops-schema.ts): the guard
+    // pins the advertised shape per namespace in the store, and index.ts awaits it before listening.
+    // Started here rather than run per turn so a refusal can never land inside a chief turn, where it
+    // would look like a broken conversation.
+    this.opsSchemaGuard = guardOpsSchema(OPS_SERVER_NAME, () => this.opsServer("schema-check", "schema-check"), this.store);
+  }
+
+  /** Resolves when the chief's ops server is confirmed to advertise the shape its namespace is pinned with; rejects (before the service listens, in production) on an unversioned schema change. */
+  readonly opsSchemaGuard: Promise<void>;
 
   /**
    * Serialise messages per conversation so a quick second message does not race the first.
@@ -306,6 +316,9 @@ export class Orchestrator {
   private async askChief(sender: string, from: string, messageId: string | undefined, prompt: string, images?: Array<{ mediaType: string; data: string }>, trigger?: Pick<JobTrigger, "text" | "kind">): Promise<void> {
     // The chief of staff answers. While it works, the founder sees a typing indicator
     // and one status line, edited in place from the chief's tool calls and removed when the reply is ready.
+    // The ops schema guard first (src/ops-schema.ts): it is normally already settled, and a refusal
+    // must surface before anything of this turn starts, never as a cleared session mid-conversation.
+    await this.opsSchemaGuard;
     const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
     try {
       const context = await this.threadContext(from);
@@ -323,10 +336,12 @@ export class Orchestrator {
         systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes() + `\n\n${EVIDENCE_RULE}`,
         model: config.models.chief,
         resume: this.store.getSession(from),
-        allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*", ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
+        allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", OPS_TOOLS, ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
         tools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep"],
         // The chief gets the service's own search for quick answers; the browser is for workers only.
-        mcpServers: { ops: this.opsServer(sender, from, messageId, trigger ? { ...trigger, sender, conversation: from, ...(messageId ? { messageId } : {}), receivedAt: new Date().toISOString() } : undefined), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+        // The ops server's namespace carries its schema version (src/ops-schema.ts): a resumed session
+        // reuses the schemas recorded for a name it knows, so a schema change must come with a new name.
+        mcpServers: { [OPS_SERVER_NAME]: this.opsServer(sender, from, messageId, trigger ? { ...trigger, sender, conversation: from, ...(messageId ? { messageId } : {}), receivedAt: new Date().toISOString() } : undefined), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
         maxTurns: 25,
         // The chief's own turn gets the same runaway guard as a job: not a cap, only a backstop. It has
         // no per-job cap, because nothing counts a real-dollar figure for a chat turn (a job's cap is
@@ -958,8 +973,10 @@ export class Orchestrator {
     const scheduleKind = z.enum(JOB_KINDS.filter((k) => k !== "create_agent") as [JobKind, ...JobKind[]]);
 
     return createSdkMcpServer({
-      name: "ops",
-      version: "1.0.0",
+      // The namespace is versioned by schema and the server version mirrors it (src/ops-schema.ts):
+      // bump OPS_SCHEMA_VERSION whenever a tool's parameters change, never the name alone.
+      name: OPS_SERVER_NAME,
+      version: `${OPS_SCHEMA_VERSION}.0.0`,
       tools: [
         tool(
           "start_job",
