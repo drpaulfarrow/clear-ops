@@ -131,7 +131,8 @@ test("the selector is a document ID or exactly one canonical link; everything el
     DOC_ID + ".extra",
     DOC_ID + "/edit",
     "../../etc/passwd",
-    "1LHA830x EdmzEEsscbqMjjABa6Fx9vKfozFAjC4vJj0s",
+    "1SyntheticIdThatIsNotARealDocument000000000",
+    "1SyntheticIdWithSpace 0000000000000000000000",
     "",
   ]) {
     let msg = "";

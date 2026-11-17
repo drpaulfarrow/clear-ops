@@ -368,7 +368,7 @@ See `.env.example`. The important ones:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The OAuth client for the executive assistant (see above). |
 | `GOOGLE_ACCOUNT` | The only Google account that may be connected. |
 | `GOOGLE_TOKEN_KEY` | Encrypts the stored Google refresh token. Without it a key is derived from the client secret. |
-| `GOOGLE_DOC_IDS` | Comma-separated Google Doc IDs Paul identified for `read doc` (the app-level allowlist, separate from the Google permission). Defaults to the one document named as the book's voice source. |
+| `GOOGLE_DOC_IDS` | Comma-separated Google Doc IDs Paul identified for `read doc` (the app-level allowlist, separate from the Google permission). Empty by default: no document is readable until the owner lists one. |
 | `EA_BOOKING_LINK` | Paul's appointment-schedule link, offered in scheduling drafts. Set as an Actions variable (not a secret). Optional; `/booking <link>` in chat sets it at runtime and takes precedence. |
 | `OUTBOUND_DAILY_CAP` | Most sends, invitations and cancellations per London day. Default 10. |
 | `OUTBOUND_MAX_RECIPIENTS` | Most recipients (To, Cc, Bcc) or attendees per item. Default 10. |
