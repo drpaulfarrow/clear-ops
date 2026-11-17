@@ -228,7 +228,7 @@ export class DocReader {
   async read(opts: { requester: string; selector: string; forJob?: string; stage?: boolean }): Promise<DocReadReceipt> {
     const parsed = parseDocSelector(opts.selector);
     try {
-      return await this.readValidated({ requester: opts.requester, parsed, forJob: opts.forJob });
+      return await this.readValidated({ requester: opts.requester, parsed, forJob: opts.forJob, stage: opts.stage });
     } catch (err) {
       if (err instanceof DocReaderError) throw err;
       // Anything unexpected (network, malformed reply) is a closed failure; no half-saved snapshot.

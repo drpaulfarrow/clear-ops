@@ -417,9 +417,9 @@ test("sending mail and inviting people happen only through the approval gate: on
 /* ---------- Private Google Docs: a narrow owner-requested read, bound to one job (extends the rules above, weakens none) ---------- */
 
 test("the Google Docs reader stays a narrow owner-requested read: no wider grant, one host, one command, and only the bound job is handed the text", async () => {
-  const { DOCS_READONLY_SCOPE } = await import("../src/doc-reader.js");
-  const { GOOGLE_SCOPES } = await import("../src/google.js");
-  // The existing grant is untouched: exactly the four Gmail and Calendar scopes, with no Docs or Drive scope inside it.
+  const { DOCS_READONLY_SCOPE, DOC_SOURCE_JOB_KINDS } = await import("../src/doc-reader.js");
+  const { GOOGLE_SCOPES, GoogleAuth } = await import("../src/google.js");
+  // The default grant is untouched: exactly the four Gmail and Calendar scopes, with no Docs or Drive scope inside it.
   assert.deepEqual(GOOGLE_SCOPES, [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
@@ -427,8 +427,26 @@ test("the Google Docs reader stays a narrow owner-requested read: no wider grant
     "https://www.googleapis.com/auth/calendar.events",
   ]);
   assert.equal(DOCS_READONLY_SCOPE, "https://www.googleapis.com/auth/documents.readonly");
-  // The consent flow still asks for exactly those four scopes: this change adds no grant and no flow.
-  assert.match(src("google.ts"), /scope: GOOGLE_SCOPES\.join\(" "\)/);
+  // The one optional addition is the read-only Docs scope, and only on the consent flow Paul asks
+  // for by name: the default link still requests exactly the four Gmail and Calendar scopes, and a
+  // Docs link requests exactly those four plus documents.readonly, incrementally, never a Drive or
+  // write scope, and never anything a link did not name.
+  const auth = new GoogleAuth({ clientId: "cid", clientSecret: "csecret", account: "", tokenKey: "k", redirectUri: "https://x/callback", dataDir: "/tmp/clear-ops-invariants-consent" });
+  const plain = new URL(auth.consentUrl("s", "s"));
+  assert.equal(plain.searchParams.get("scope"), GOOGLE_SCOPES.join(" "), "the ordinary connect flow asks for exactly the four scopes, unchanged");
+  assert.ok(!plain.searchParams.get("scope")!.includes("documents"), "no Docs scope rides along unasked");
+  assert.equal(plain.searchParams.get("include_granted_scopes"), "false", "the ordinary flow never asks Google to widen an existing grant");
+  const docs = new URL(auth.consentUrl("s", "s", { extraScopes: [DOCS_READONLY_SCOPE] }));
+  assert.deepEqual((docs.searchParams.get("scope") ?? "").split(" "), [...GOOGLE_SCOPES, DOCS_READONLY_SCOPE], "the Docs consent adds exactly one read-only scope");
+  assert.ok(!/drive|documents\.(?!readonly)/.test(docs.searchParams.get("scope")!), "never a Drive-wide or write scope");
+  assert.equal(docs.searchParams.get("include_granted_scopes"), "true", "the Docs consent is incremental: Google is asked to add to the grant");
+  assert.throws(() => auth.consentUrl("s", "s", { extraScopes: [GOOGLE_SCOPES[0]!] }), /Only new optional scopes/, "a consent link cannot re-ask for a scope it already has");
+  // The callback validates what Google actually returned against what the link asked for, and an
+  // incremental consent that returns no new refresh token keeps the stored one.
+  const google = src("google.ts");
+  assert.match(google, /const missing = p\.scopes\.filter\(\(sc\) => !granted\.includes\(sc\)\)/, "the returned scopes are validated against the requested ones");
+  assert.match(google, /refreshToken = stored\.refreshToken/, "an incremental consent preserves the stored refresh token");
+  assert.match(google, /stored\.account !== account/, "and only for the same account");
   const reader = src("doc-reader.ts");
   assert.ok(!/auth\/drive|drive\.googleapis\.com/.test(reader), "no Drive-wide scope or API");
   assert.ok(!/accounts\.google\.com|consentUrl|refresh_token|refreshToken/.test(reader), "the reader never mints a consent link or touches a refresh token");
@@ -438,6 +456,7 @@ test("the Google Docs reader stays a narrow owner-requested read: no wider grant
   assert.match(reader, /0o700/, "the snapshot directory is owner-only");
   assert.match(reader, /flag: "wx"/, "a snapshot is created exclusively, never overwritten");
   assert.match(reader, /fence\(randomBytes\(6\)\.toString\("hex"\), "GOOGLE DOC"/, "the snapshot reaches a worker only inside the untrusted-content fence");
+  assert.deepEqual(DOC_SOURCE_JOB_KINDS, ["write", "cv", "advisor"], "only writing kinds may receive a source");
   // One module reads documents, one place wires it, and the snapshots live only in the data volume.
   const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
   for (const f of files) {
@@ -454,12 +473,18 @@ test("the Google Docs reader stays a narrow owner-requested read: no wider grant
   assert.ok(allowAt > -1 && docAt > allowAt && chiefAt > docAt, "read doc is parsed after the allowlist check and before any model");
   assert.ok(docAt > uploadAt, "an upload caption cannot select a document");
   assert.match(orch, /isPaulsJob\(job, isAllowed\)/, "binding is limited to a job started from Paul's own chat");
-  // Only the running job is handed its own snapshot, from the one place prompts are built.
-  assert.match(src("jobs.ts"), /this\.docs\?\.snapshotBlock\(id\)/);
+  assert.match(orch, /job\.status !== "queued"/, "a running or finished job can never be bound: the source is bound prelaunch or not at all");
+  assert.match(orch, /DOC_SOURCE_JOB_KINDS\.includes\(job\.kind/, "only a writing job can be bound to a source");
+  assert.match(orch, /docs consent/, "the optional Docs consent is Paul's own whole-message command");
+  // The source is bound before dispatch and delivered on the worker's first call, and a job marked
+  // for a source fails closed when the source is absent: it never runs source-free.
+  const jobs = src("jobs.ts");
+  assert.match(jobs, /this\.docs\.bindStaged\(/, "staged snapshots are bound between creating the job and dispatching it");
+  assert.match(jobs, /this\.docs\.requireBound\(id\)/, "a marked job is handed its source through the fail-closed reader");
   // The service's own mark that a job's output must never reach the outputs repository.
   const { classify } = await import("../src/output-folders.js");
-  assert.deepEqual(classify({ kind: "write", title: "Book opening", brief: "Write it.", docSnapshot: true }, "some output"), { excluded: "bound to a private Google Doc snapshot" });
-  assert.deepEqual(classify({ kind: "write", title: "Book opening", brief: "Write it." }, "some output"), { folder: "other" });
+  assert.deepEqual(classify({ kind: "write", title: "A writing job", brief: "Write it.", docSnapshot: true }, "some output"), { excluded: "bound to a private Google Doc snapshot" });
+  assert.deepEqual(classify({ kind: "write", title: "A writing job", brief: "Write it." }, "some output"), { folder: "other" });
 });
 
 test("email is untrusted: the assistant's prompt says so, it has no WebFetch, and only chat grants it write permits", async () => {
