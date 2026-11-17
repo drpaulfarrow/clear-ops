@@ -50,6 +50,7 @@ import { defaultProbes, HealthProbes } from "./health.js";
 import { defaultCanary, type Canary } from "./auto-resume.js";
 import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
 import { DocumentIngest } from "./documents.js";
+import { DocReader, DOCS_READONLY_SCOPE } from "./doc-reader.js";
 import { Uploads } from "./uploads.js";
 import { DeviceBudget, DEVICE_PATH, DEVICE_TEXT_MAX_CHARS, DEVICE_TURNS_PER_DAY, DeviceRegistry, deviceRouter } from "./device.js";
 import { BridgeChat, BRIDGE_REPLY_TO } from "./instinct-chat.js";
@@ -235,13 +236,19 @@ export function buildApp(deps: AppDeps) {
   // Google connection above) or asks him in chat, and types it into the page itself (src/otp.ts). No
   // model, log, output or stored session ever holds a code, and Paul's own message goes once it is used.
   const otp = new OtpRelay({ messenger: deps.messenger, ...(deps.mailbox ? { mailbox: deps.mailbox } : { mailbox: new GmailCodeReader(googleApi) }) });
-  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, ...(deps.canary ? { canary: deps.canary } : {}) });
+  // The private Google Docs reader (src/doc-reader.ts): Paul's own "read doc <id or link>" reads one
+  // document he identified, on the same Google connection as the assistant, and stages it as a
+  // private source for the one writing job he starts with its handle. The reader itself carries the
+  // gates (app-level allowlist, the grant's own scopes, no redirects, bounded reads); nothing else
+  // here can read a document.
+  const docs = new DocReader({ auth: google, dataDir: config.dataDir, allow: config.googleDocs.allow, ...(deps.googleFetch ? { fetch: deps.googleFetch } : {}) });
+  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, docs, ...(deps.canary ? { canary: deps.canary } : {}) });
   const scheduler = new Scheduler(deps.store, jobs);
   // One private uploads store for the whole service: chat attachments and the documents the bridge takes in
   // (src/documents.ts) land in the same place, under the same name rules and the same size limit.
   const uploads = new Uploads();
   const documents = new DocumentIngest(uploads, path.join(config.dataDir, "bridge-documents.jsonl"));
-  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, uploads, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
+  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, uploads, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp, docs);
   scheduler.boot();
   const bridgeBudget = new DeviceBudget(path.join(config.dataDir, "bridge-chat-budget.json"), () => config.bridgeChatBudgetUsd, "the bridge chat");
   orchestrator.bridgeBudget = bridgeBudget;
@@ -339,17 +346,32 @@ export function buildApp(deps: AppDeps) {
   app.get(GOOGLE_CALLBACK_PATH, async (req, res) => {
     const state = typeof req.query.state === "string" ? req.query.state : "";
     const code = typeof req.query.code === "string" ? req.query.code : "";
+    // A denial (or any Google-side error) is reported plainly and changes nothing: no token is
+    // exchanged, nothing is stored, and the existing grant is untouched.
+    if (typeof req.query.error === "string" && req.query.error) {
+      const denied = req.query.error === "access_denied";
+      return res.status(400).type("html").send(page("Not connected", denied ? "You declined the permissions, so nothing was changed. Ask for a new link in chat whenever you want to try again." : "Google did not grant access. Ask for a new link in chat if you want to try again."));
+    }
     if (!state || !code) {
       return res.status(400).type("html").send(page("Not connected", "Google did not grant access. Ask for a new link in chat if you want to try again."));
     }
     try {
       const r = await google.completeConsent(state, code);
-      res.type("html").send(page("Connected", "Your assistant can now read your mail and calendars, write drafts and place holds. It can send an email or invite people only after you approve that exact item in chat. You can close this tab."));
+      const docs = r.scopes.includes(DOCS_READONLY_SCOPE);
+      res.type("html").send(
+        page(
+          "Connected",
+          docs
+            ? "Your assistant can now read your mail and calendars, write drafts and place holds, and read the Google Doc you name for a job you choose. It can send an email or invite people only after you approve that exact item in chat. You can close this tab."
+            : "Your assistant can now read your mail and calendars, write drafts and place holds. It can send an email or invite people only after you approve that exact item in chat. You can close this tab.",
+        ),
+      );
       deps.store.setSetting("eaReplyTo", r.replyTo);
       const made = ensureEaSchedules(scheduler, r.requestedBy, r.replyTo);
       const lines = made.map((m) => `${m.name} ${m.cron} (${m.id}${m.created ? "" : ", already set"})`).join("; ");
+      const docsNote = docs ? " You also approved the optional read-only Google Docs permission: a document you name can now be read for one job at a time." : "";
       await deps.messenger
-        .send(r.replyTo, `Google connected as ${r.account}: drafts plus holds; it sends mail or invites people only when you approve each one in chat. Weekday briefs scheduled: ${lines}. Tell me to move or cancel either.`)
+        .send(r.replyTo, `Google connected as ${r.account}: drafts plus holds; it sends mail or invites people only when you approve each one in chat.${docsNote} Weekday briefs scheduled: ${lines}. Tell me to move or cancel either.`)
         .catch(() => undefined);
     } catch (err) {
       const msg = err instanceof GoogleError ? err.message : "Something went wrong talking to Google. Ask for a new link in chat.";

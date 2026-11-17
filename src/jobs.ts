@@ -6,6 +6,7 @@ import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { perJobModelError, provider, runRoute } from "./llm.js";
 import type { OtpRelay } from "./otp.js";
+import { DocReaderError, type DocReader } from "./doc-reader.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -230,6 +231,13 @@ export class JobRunner {
    */
   private readonly otp?: OtpRelay;
   /**
+   * The private Google Docs reader (src/doc-reader.ts). A snapshot is bound to one job only when
+   * Paul starts that job with the private source handle a staged read handed him (never through a
+   * chat command, which is refused before any fetch), and snapshotBlock hands its text to that job
+   * alone.
+   */
+  private readonly docs?: DocReader;
+  /**
    * Where the spend figure comes from (src/spend.ts): the provider's own usage where it can be read,
    * and the SDK's estimate only as the internal stand-in the daily cap falls back to. Only the
    * provider's figure is ever shown; `spendDisplay` is the one way it reaches a message.
@@ -265,6 +273,7 @@ export class JobRunner {
       liveness?: LivenessOptions;
       purchase?: PurchaseGate;
       otp?: OtpRelay;
+      docs?: DocReader;
       slots?: number;
       /** Engineering jobs at once across all repositories; defaults to config.engineerTotal. */
       total?: number;
@@ -283,6 +292,7 @@ export class JobRunner {
     this.onOutput = opts.onOutput;
     this.purchase = opts.purchase;
     this.otp = opts.otp;
+    this.docs = opts.docs;
     this.spend = opts.spend ?? storeMeter(store);
     this.setup = opts.setup ?? preparedCopies;
     this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
@@ -297,7 +307,7 @@ export class JobRunner {
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly"> = {}, launch: { source?: string } = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
@@ -337,7 +347,29 @@ export class JobRunner {
       if (!PR_KINDS.includes(kind)) throw new Error(`A ${kind} job cannot be review only: only ${PR_KINDS.join(" and ")} open a pull request for Paul to review.`);
       if (extra.reviewOnly !== true) delete extra.reviewOnly;
     }
+    // Explicit owner-selected prelaunch binding of a private source (src/doc-reader.ts): the one
+    // staged snapshot behind the private handle passed with the start is bound to this job between
+    // creating it and dispatching it, so the worker receives exactly that explicitly selected
+    // source in its first prompt. There is no ambient next-job binding: without a handle nothing
+    // is ever bound. Every refusal of the handle (not one of ours, lapsed, another owner's, a
+    // kind that cannot work from a source, no reader wired) happens in checkSource, before the
+    // job is created, so a refusal starts nothing. A job marked for a source never runs
+    // source-free: a bind that could not happen fails the job closed.
+    if (launch.source !== undefined) {
+      const docs = this.docs;
+      if (!docs) throw new DocReaderError("A private source was requested, but the document reader is not available, so nothing was started.");
+      docs.checkSource(launch.source, { kind, requestedBy });
+    }
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
+    if (launch.source !== undefined) {
+      const docs = this.docs!;
+      const bound = docs.bindSource(launch.source, job.id);
+      if (!bound) {
+        this.store.updateJob(job.id, { status: "failed", finishedAt: new Date().toISOString(), error: "The private source could not be bound to this job, so it was not started.", failure: "error" });
+        throw new DocReaderError("The private source could not be bound to this job, so it was not started.");
+      }
+      this.store.updateJob(job.id, { docSnapshot: true });
+    }
     return this.dispatch(job);
   }
 
@@ -949,6 +981,20 @@ export class JobRunner {
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
       const carryOn = job.savedWork ? `\n\n${savedWorkNote(job.savedWork)}` : "";
+      // The private source bound to this job, if any (src/doc-reader.ts): its text is handed to
+      // this job's worker alone, fenced as untrusted data with its provenance, after the snapshot
+      // is verified against the fingerprint recorded when it was read. A job marked as carrying a
+      // bound source fails closed here if the source is absent, corrupt, modified, or the reader
+      // itself is missing: it never runs source-free by accident, and no path, token or source
+      // detail is ever mentioned in the failure.
+      const marked = this.store.getJob(id)?.docSnapshot ?? job.docSnapshot;
+      if (marked && !this.docs) throw new DocReaderError(`The private source bound to job ${id} cannot be checked because the document reader is not available, so the job refuses to run without it.`);
+      let docNote = "";
+      if (this.docs) {
+        const block = marked ? this.docs.requireBound(id) : this.docs.snapshotBlock(id);
+        if (marked && !block) throw new DocReaderError(`The private source bound to job ${id} produced no text, so the job refuses to run without it.`);
+        docNote = block ? `\n\n${block}` : "";
+      }
       const link = job.kind === "ea" ? bookingLink(this.store) : undefined;
       const permits =
         job.kind === "ea"
@@ -997,7 +1043,7 @@ export class JobRunner {
       }
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {
-        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
+        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
         cwd: bridged && snapshot ? snapshot : spec.cwd,

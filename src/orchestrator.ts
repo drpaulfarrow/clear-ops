@@ -24,6 +24,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
+import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
@@ -123,6 +124,8 @@ export class Orchestrator {
     private readonly purchase?: PurchaseGate,
     /** The one-time code relay. Without it, "code <id> <the code>" does nothing. */
     private readonly otp?: OtpRelay,
+    /** The private Google Docs reader (src/doc-reader.ts). Without it, "read doc <id>" does nothing. */
+    private readonly docs?: DocReader,
   ) {
     // Fail closed at boot on a schema change without a version bump (src/ops-schema.ts): the guard
     // pins the advertised shape per namespace in the store, and index.ts awaits it before listening.
@@ -197,6 +200,19 @@ export class Orchestrator {
       this.store.setSetting("actAsMe", r.sites.length ? r.sites : undefined);
       return this.messenger.send(from, r.text);
     }
+    // Reading a private Google Doc (src/doc-reader.ts): only his own whole message
+    // "read doc <id or link>", parsed here after the allowlist and before any model, like every
+    // other owner-only selection, so no voice note, bridge post, email, page, job output or upload
+    // can select a document. An upload caption cannot either: attachments are handled above, before
+    // this line. The "for job <id>" suffix of that message is refused inside, before any fetch: no
+    // owner command binds a job, because a command that checked a queued target and then awaited
+    // Google's fetch could land the source on a job that had already started.
+    const docCmd = parseDocReadCommand(trimmed);
+    if (docCmd && this.docs) return this.handleDocRead(sender, from, docCmd);
+    // The optional Docs consent: his own whole message asks for the one-time link that adds the
+    // read-only Google Docs permission to the existing grant. Parsed here, before any model, like
+    // every other owner-only command; the Google screen itself is the owner's step to approve.
+    if (/^(?:docs consent|connect docs|\/docs)$/i.test(trimmed)) return this.handleDocsConsent(sender, from);
     const out = parseOutboundCommand(trimmed);
     if (out && this.outbound && (!out.id || this.outbound.has(out.id))) return this.handleOutbound(sender, from, out.verb, out.id);
     const approval = trimmed.match(/^(yes|approve|ok|no|reject)\s+([a-f0-9]{6})\b/i);
@@ -468,7 +484,9 @@ export class Orchestrator {
     if (!g || !g.configured()) return "Google is not set up yet. Ask me to connect Google and I will send the one-time setup steps.";
     try {
       const account = g.account();
-      return account ? `Google is connected as ${account} (drafts, holds, and send or invite only with your approval of each). /google disconnect to revoke.` : 'Google is set up but not connected. Say "connect Google" for a sign-in link.';
+      if (!account) return 'Google is set up but not connected. Say "connect Google" for a sign-in link.';
+      const docs = (g.grantedScopes() ?? []).includes(DOCS_READONLY_SCOPE);
+      return `Google is connected as ${account} (drafts, holds, and send or invite only with your approval of each). Private Google Doc reading: ${docs ? "enabled" : "not enabled (say \"docs consent\" for the one-time link that adds the optional read-only Docs permission)"}. /google disconnect to revoke.`;
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     }
@@ -477,6 +495,60 @@ export class Orchestrator {
   private async googleDisconnect(): Promise<string> {
     if (!this.google) return "Google is not set up.";
     return (await this.google.disconnect()) ? "Google disconnected: access revoked and the stored token deleted. Scheduled briefs will fail until you connect again." : "Google was not connected.";
+  }
+
+  /**
+   * Paul's own "docs consent": the one-time link that adds the optional read-only Google Docs
+   * permission to the existing Google grant. The consent is incremental (Google is asked to add the
+   * Docs permission on top of what the grant already carries), the callback validates the scopes
+   * Google actually returns, and a denial changes nothing. Without a Google connection at all this
+   * is the ordinary connect link, exactly as before.
+   */
+  private async handleDocsConsent(sender: string, from: string): Promise<void> {
+    if (!this.google) return void (await this.messenger.send(from, "Google is not set up, so there is no connection to add the Docs permission to."));
+    if (!this.google.configured()) return void (await this.messenger.send(from, "Google is not set up yet. Ask me to connect Google and I will send the one-time setup steps."));
+    const link = this.google.consentUrl(sender, from, { extraScopes: [DOCS_READONLY_SCOPE] });
+    await this.messenger.send(
+      from,
+      `One-time link (15 minutes) to add the read-only Google Docs permission to your existing Google connection: ${link}. Your Gmail and Calendar permission stays exactly as it is; nothing wider is asked for, and if you cancel or deny on Google's screen nothing changes.`,
+    );
+  }
+
+  /**
+   * Paul's own "read doc <id or link>" (src/doc-reader.ts). The read, its gates and its snapshot are
+   * the reader's; what belongs here is refusing the legacy "for job <id>" suffix before anything is
+   * fetched and telling him what happened in a line or two. The document's text, title, ID and URL
+   * never appear in the reply, which stays short enough for a phone: a staged read tells him the
+   * private opaque source handle he passes when starting the one writing job it is for.
+   */
+  private async handleDocRead(sender: string, from: string, cmd: DocReadCommand): Promise<void> {
+    // The direct "for job <id>" binding is removed, and this refusal is the whole of what the suffix
+    // now does. The old route checked a queued job and then awaited Google's fetch, so the target
+    // could start while the fetch was pending and run on without the source, while the reply
+    // claimed a successful binding to a job that had already missed it. No owner command may race a
+    // job with an awaited fetch, so the suffix is refused here - before any fetch, snapshot,
+    // binding or job lookup, whatever state the named job is in - and the only way a source
+    // reaches a job is the explicit private handle Paul passes when starting it (src/jobs.ts
+    // checkSource and bindSource, prelaunch).
+    if (cmd.forJob)
+      return void (await this.messenger.send(
+        from,
+        'A document can no longer be bound with "for job <id>": a job waiting in the queue can start while the read is still fetching from Google, and its worker would run without the source. Read it with "read doc <id or link>" on its own, then start the writing job you want it for and pass the private source reference the read gives you. Nothing was read and nothing was changed.',
+      ));
+    try {
+      const receipt = await this.docs!.read({ requester: sender, selector: cmd.selector, stage: true });
+      const revision = receipt.revisionKnown ? `revision ${receipt.revisionId}` : "revision not available from Google's reply";
+      const extras = `${receipt.paragraphs.toLocaleString("en-GB")} paragraphs${receipt.note ? `, ${receipt.note}` : ""}`;
+      // The reply says what was read, never which document: no title, ID or URL appears in it, only
+      // the size, the revision and the private opaque handle Paul passes when starting the one
+      // writing job the source is for.
+      return void (await this.messenger.send(
+        from,
+        `Read the document from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot, staged as private source ${receipt.handle}: start the writing job you want it for (write, cv or advisor) and pass that source reference with it. It goes to that job alone, never to another, and it lapses after a day.`,
+      ));
+    } catch (err) {
+      return void (await this.messenger.send(from, err instanceof Error ? err.message : "The document could not be read."));
+    }
   }
 
   private standingNotes(): string {
@@ -1010,8 +1082,12 @@ export class Orchestrator {
               .boolean()
               .optional()
               .describe('Engineer and create_agent only, and only when Paul himself asked for the pull request to be left for him: true means no automatic maintainer review, fix rounds or merge follows the job; Paul reviews and merges it himself. Omit for the normal behaviour (a maintainer reviews and merges automatically).'),
+            source: z
+              .string()
+              .optional()
+              .describe('Only when Paul asks for this job to work from a private source he staged with his own "read doc" command: the private source reference exactly as the read gave it to him, which the job passes on with. Never a document ID, a link or any document text in the brief or title, only that reference. Writing jobs only (write, cv, advisor); the source is handed to that one job alone, before its worker starts.'),
           },
-          async ({ kind, title: rawTitle, brief, repo: repoName, target: legacyTarget, loop, continueLoop, depth, permits, model, reviewOnly }) => {
+          async ({ kind, title: rawTitle, brief, repo: repoName, target: legacyTarget, loop, continueLoop, depth, permits, model, reviewOnly, source }) => {
             const looping = kind === "design" && (loop || continueLoop);
             const chosen = repoName ?? legacyTarget;
             const managed = repoRegistry.find(chosen ?? "product");
@@ -1047,7 +1123,7 @@ export class Orchestrator {
             // a kind that opens no pull request, is refused there and nothing is started.
             let job: Job;
             try {
-              job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(model ? { model } : {}), ...(reviewOnly ? { reviewOnly: true } : {}), ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}), ...(trigger ? { triggerMessage: trigger } : {}) });
+              job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(model ? { model } : {}), ...(reviewOnly ? { reviewOnly: true } : {}), ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}), ...(trigger ? { triggerMessage: trigger } : {}) }, source ? { source } : {});
             } catch (err) {
               return { content: [{ type: "text", text: `${err instanceof Error ? err.message : String(err)} Nothing was started; call start_job again without it, or with a valid value.` }], isError: true };
             }
@@ -1338,6 +1414,8 @@ Send a file (CSV, PDF, screenshot, zip) and I save it privately for me and the w
 /delete upload <name>: delete one (or "all")
 YES <id> or NO <id>: approve or reject an action
 send <id> or cancel <id>: approve or cancel an email or invitation the assistant prepared (you see its exact text first; it expires after 24 hours)
+read doc <id or link>: read one private Google Doc you identified, through the connected Google account, and stage it as a private source; start the writing job you want it for and pass the private source reference the read gives you (it goes to that one job alone, lapses after a day, and is never sent anywhere else)
+docs consent: the one-time link that adds the optional read-only Google Docs permission to your existing Google connection (mail and calendar access is unchanged)
 /google: is Google connected; /google disconnect to revoke
 /followups: who is waiting on you, what you promised, who you are waiting on
 done <id>, snooze <id> 2d, draft nudge <id>: manage a follow-up

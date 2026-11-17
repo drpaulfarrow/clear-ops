@@ -117,6 +117,13 @@ export interface Job {
    */
   reviewOnly?: boolean;
   /**
+   * Set by the service only, prelaunch, when Paul starts this job with the private source handle a
+   * staged "read doc" gave him (src/doc-reader.ts; the legacy "for job <id>" chat binding is
+   * refused before any fetch): the worker of this job alone receives the snapshot, and the job's
+   * output is kept out of the outputs repository. Never set by a model.
+   */
+  docSnapshot?: true;
+  /**
    * Set by the service only (src/offboard-import.ts): this record is a one-use honest import of an
    * already completed offboard run, not a run this service made. It holds the offboard run's own id,
    * so a repeated import does nothing. No worker ran for it here, nothing was messaged for it, and its
