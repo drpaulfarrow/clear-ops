@@ -133,6 +133,7 @@ test("the selector is a document ID or exactly one canonical link; everything el
     DOC_ID + "/edit",
     "../../etc/passwd",
     "1Synthetic id with a space in it 00000000000",
+    "1AAAAAAA AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "https://docs.google.com/document/d/" + DOC_ID + "?usp=sharing",
     "",
   ]) {
