@@ -1,5 +1,6 @@
 import type { Messenger } from "./whatsapp.js";
 import { validateTitle } from "./titles.js";
+import { OPS_TOOL_NAME } from "./ops-schema.js";
 
 const clip = (s: unknown, max = 60): string => {
   const t = String(s ?? "").replace(/\s+/g, " ").trim();
@@ -21,7 +22,9 @@ function repoWords(repo: unknown): string {
 
 export function describeToolUse(name: string, input: Record<string, unknown> = {}): string {
   const id = typeof input.id === "string" && input.id ? input.id : undefined;
-  switch (name.replace(/^mcp__ops__/, "")) {
+  // Any schema version of the chief's ops namespace (src/ops-schema.ts): mcp__ops__ before the first
+  // version, mcp__ops_v2__ and later since.
+  switch (name.replace(OPS_TOOL_NAME, "")) {
     case "job_status":
       return id ? `Checking job ${id}…` : "Checking job status…";
     case "get_output":
