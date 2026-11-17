@@ -556,6 +556,26 @@ export class Store {
     this.save();
     return job;
   }
+  /**
+   * A record that arrives already finished and already marked as an import (src/offboard-import.ts):
+   * written whole in one atomic save, never through the queue, so no state of the store ever holds it
+   * queued or running and `interruptedJobs()` can never hand it to resume recovery as work to run. The
+   * output file its `outputPath` names must already be on disk: it is written before this call, so a
+   * failure there persists nothing at all and the next boot simply tries again. Only a completed
+   * record marked `importedRun` may take this path; nothing can use it to skip the queue.
+   */
+  importJob(record: Job): Job {
+    if (!record.importedRun?.trim()) throw new Error("importJob: only a record marked importedRun can be written this way");
+    if (record.status !== "done") throw new Error(`importJob: an imported record arrives finished, not "${record.status}"`);
+    if (this.state.jobs[record.id]) throw new Error(`importJob: job ${record.id} already exists`);
+    const job: Job = {
+      ...record,
+      title: record.title?.trim() || derivedJobTitle(record, (id) => this.state.jobs[id], Object.values(this.state.jobs), Object.values(this.state.schedules)),
+    };
+    this.state.jobs[job.id] = job;
+    this.save();
+    return job;
+  }
   getJob(id: string): Job | undefined {
     return this.state.jobs[id];
   }

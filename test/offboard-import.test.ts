@@ -9,6 +9,9 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-import-"
 
 const { Store } = await import("../src/store.js");
 const { importOffboardRun, OFFBOARD_DIR, OFFBOARD_RUN_ID } = await import("../src/offboard-import.js");
+const { JobRunner } = await import("../src/jobs.js");
+const { ConsoleMessenger } = await import("../src/whatsapp.js");
+import type { AgentRunner, RunOptions } from "../src/agents.js";
 
 /** The run's own files, with the real run's facts (the 17 Nov 2026 offboard draft). */
 function writeRun(dir: string, over: { status?: object; result?: object; output?: string } = {}) {
@@ -97,6 +100,87 @@ async function quietRejection(store: InstanceType<typeof Store>, dir: string) {
     console.warn = original;
   }
 }
+
+/**
+ * The next boot after a failure or a crash: the store is reloaded from disk and the ordinary resume
+ * recovery runs, with a worker that records every call so a run the recovery must never start shows up.
+ */
+async function resumeOnReload(storeDir: string) {
+  const reloaded = new Store(storeDir);
+  const calls: RunOptions[] = [];
+  const runner: AgentRunner = async (o) => {
+    calls.push(o);
+    return { text: "A run that must never happen for an import." };
+  };
+  const resumed = await new JobRunner(reloaded, new ConsoleMessenger(), runner).resumeInterrupted();
+  return { reloaded, calls, resumed };
+}
+
+test("an artifact write failure imports nothing, and resume recovery on a reload runs no worker", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-run-"));
+  writeRun(dir);
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-import-store-"));
+  class FullDisk extends Store {
+    override writeOutput(): string {
+      throw new Error("no space left on device");
+    }
+  }
+  const { warns, result } = await quietRejection(new FullDisk(storeDir), dir);
+  assert.equal(result, undefined, "nothing is imported when the artifact cannot be written");
+  assert.ok(warns.some((w) => /no space left on device/.test(w) && w.endsWith("Nothing was imported.")), "the failure is said, once");
+  const { reloaded, calls, resumed } = await resumeOnReload(storeDir);
+  assert.equal(reloaded.allJobs().length, 0, "nothing was persisted at all");
+  assert.equal(resumed, 0, "no interrupted job is found");
+  assert.equal(calls.length, 0, "no new worker run is started for the failed import");
+});
+
+test("a crash or state-write failure after the artifact leaves no runnable record, and the next boot completes the import exactly once", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-run-"));
+  writeRun(dir);
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-import-store-"));
+  const store = new Store(storeDir);
+  // Exactly the boundary between the artifact write and the record save: a directory at state.json's
+  // temp path makes every save fail, as a full disk or a process death at that point would.
+  fs.mkdirSync(path.join(storeDir, "state.json.tmp"));
+  const { result } = await quietRejection(store, dir);
+  assert.equal(result, undefined, "nothing is imported when the record cannot be saved");
+  assert.equal(fs.readdirSync(path.join(storeDir, "outputs")).length, 1, "the artifact reached the disk; no record names it");
+  const { reloaded, calls, resumed } = await resumeOnReload(storeDir);
+  assert.equal(reloaded.allJobs().length, 0, "no record was persisted");
+  assert.equal(resumed, 0, "the orphan artifact is not an interrupted job");
+  assert.equal(calls.length, 0, "resume recovery starts no worker for it");
+  // The next boot, after recovery: the import runs again and this time completes, exactly once.
+  fs.rmdirSync(path.join(storeDir, "state.json.tmp"));
+  const retry = importOffboardRun(reloaded, dir)!;
+  assert.ok(retry.created, "the retry imports the record");
+  assert.equal(reloaded.allJobs().length, 1, "exactly one record, no duplicate");
+  assert.equal(retry.job.status, "done");
+  assert.equal(retry.job.importedRun, OFFBOARD_RUN_ID);
+  assert.equal(reloaded.readOutput(retry.job.id), fs.readFileSync(path.join(dir, "strategy.output.md"), "utf8"), "the artifact is preserved");
+  const again = importOffboardRun(reloaded, dir)!;
+  assert.ok(!again.created && again.job.id === retry.job.id, "and it is still idempotent");
+});
+
+test("the imported record survives a reload as finished, and resume recovery leaves it alone", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-run-"));
+  writeRun(dir);
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-import-store-"));
+  const store = new Store(storeDir);
+  const first = importOffboardRun(store, dir)!;
+  assert.ok(first.created);
+  const { reloaded, calls, resumed } = await resumeOnReload(storeDir);
+  assert.equal(resumed, 0, "the finished import is not an interrupted job");
+  assert.equal(calls.length, 0, "no worker runs for it");
+  assert.equal(reloaded.interruptedJobs().length, 0);
+  const job = reloaded.getJob(first.job.id)!;
+  assert.equal(job.status, "done");
+  assert.equal(job.importedRun, OFFBOARD_RUN_ID);
+  assert.equal(job.model, "moonshotai/kimi-k3.1-pro");
+  assert.equal(job.costUsd, 0.84);
+  assert.equal(job.createdAt, "2026-11-17T02:53:09.424Z", "the run's own timestamps survive the reload");
+  assert.equal(reloaded.readOutput(job.id), fs.readFileSync(path.join(dir, "strategy.output.md"), "utf8"), "the artifact survives the reload");
+  assert.equal(reloaded.allJobs().length, 1, "no duplicate record");
+});
 
 test("the import refuses what is not the completed run, and creates nothing", async () => {
   for (const case_ of [

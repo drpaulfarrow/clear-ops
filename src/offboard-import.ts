@@ -14,6 +14,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { shortId } from "./store.js";
 import type { Job, Store } from "./store.js";
 
 /** The only directory ever read: the offboard run's own, from the night of 17 Nov 2026. */
@@ -109,9 +110,12 @@ export interface OffboardImport {
 
 /**
  * The one-use import: reads the offboard run's three files and writes the job record for them through
- * the store (never state.json by hand). Idempotent on the record itself: once a job carries
- * `importedRun: strategy`, a later call returns that job and writes nothing. Refused files mean
- * nothing is created. Never throws and never sends anything to anyone.
+ * the store (never state.json by hand). The record is born finished: its artifact is written first and
+ * the record then lands in one atomic save, already `done` and already marked `importedRun`, so no
+ * intermediate queued state ever exists for a restart to resume as a new run. Idempotent on the record
+ * itself: once a job carries `importedRun: strategy`, a later call returns that job and writes nothing.
+ * Refused files, or a write that fails at any point, mean nothing is created and the next boot tries
+ * again. Never throws and never sends anything to anyone.
  */
 export function importOffboardRun(store: Store, dir: string = OFFBOARD_DIR): OffboardImport | undefined {
   const existing = store.allJobs().find((j) => j.importedRun === OFFBOARD_RUN_ID);
@@ -130,19 +134,38 @@ export function importOffboardRun(store: Store, dir: string = OFFBOARD_DIR): Off
     "Nothing ran for it here and nothing was messaged for it. This record carries no trigger, permit or automatic follow-up, only the run's own status, timestamps, model and settled provider cost, and its preserved artifact as the saved output.",
     `Source: ${STATUS_FILE}, ${RESULT_FILE} and ${OUTPUT_FILE} in ${dir}. No log, session transcript, prompt, internal manual or secret is imported.`,
   ].join("\n\n");
-  const job = store.createJob("write", brief, REQUESTER, "doubleshift", undefined, { title: TITLE });
-  const outputPath = store.writeOutput(job.id, output);
-  const imported = store.updateJob(job.id, {
-    status: "done",
-    importedRun: OFFBOARD_RUN_ID,
-    model: facts.model,
-    createdAt: facts.startedAt,
-    startedAt: facts.startedAt,
-    finishedAt: facts.finishedAt,
-    ...(facts.lastActivityAt ? { lastActivityAt: facts.lastActivityAt } : {}),
-    costUsd: facts.costUsd,
-    summary: `Imported: the Doubleshift strategy pack from the completed offboard "${OFFBOARD_RUN_ID}" run (${facts.model}, ${settled}).`,
-    outputPath,
-  });
-  return { job: imported, created: true };
+  // The record is written whole or not at all, so it is never a queued job a restart could run. Its
+  // artifact goes to disk first; the record itself is then created in one atomic store save
+  // (`Store.importJob`), already finished and already marked as the import from its first and only
+  // persisted state. A failure or a process death at any point leaves either nothing at all (the next
+  // boot imports again) or the complete record (a later call writes nothing); no state exists from
+  // which resume recovery could resume it as work, duplicate it, or run a new worker for it.
+  let id = shortId();
+  while (store.getJob(id)) id = shortId();
+  try {
+    store.writeOutput(id, output);
+    const job = store.importJob({
+      id,
+      kind: "write",
+      target: "doubleshift",
+      title: TITLE,
+      brief,
+      requestedBy: REQUESTER,
+      replyTo: REQUESTER,
+      status: "done",
+      importedRun: OFFBOARD_RUN_ID,
+      model: facts.model,
+      createdAt: facts.startedAt,
+      startedAt: facts.startedAt,
+      finishedAt: facts.finishedAt,
+      ...(facts.lastActivityAt ? { lastActivityAt: facts.lastActivityAt } : {}),
+      costUsd: facts.costUsd,
+      summary: `Imported: the Doubleshift strategy pack from the completed offboard "${OFFBOARD_RUN_ID}" run (${facts.model}, ${settled}).`,
+      outputPath: store.outputPath(id),
+    });
+    return { job, created: true };
+  } catch (err) {
+    console.warn(`offboard import: ${err instanceof Error ? err.message : err}. Nothing was imported.`);
+    return undefined;
+  }
 }
