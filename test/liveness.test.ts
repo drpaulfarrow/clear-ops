@@ -14,6 +14,7 @@ const { JobRunner, stashWork, savedWorkNote, duration } = await import("../src/j
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner, RunOptions, RunResult } from "../src/agents.js";
 import type { Job, SavedWork } from "../src/store.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 const MIN = 60_000;
@@ -273,7 +274,7 @@ test("the chief can check liveness, cancel and reorder, with Paul's wording in t
   let described: Record<string, string> = {};
   let ids: { a: string; b: string; c: string } = { a: "", b: "", c: "" };
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (!ops) return w.runner(o);
     systemPrompt = o.systemPrompt;
     const tools = ops.instance._registeredTools;

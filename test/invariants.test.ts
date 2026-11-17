@@ -182,7 +182,7 @@ test("the design worker is read-only plus its own scoped tools: no Edit, Write, 
     const allowed = new Set(["WebSearch", "WebFetch", "Read", "Glob", "Grep", ...DESIGN_TOOLS]);
     for (const t of s.allowedTools) assert.ok(allowed.has(t), `design must not be allowed ${t}`);
     for (const t of s.tools ?? []) assert.ok(["WebSearch", "WebFetch", "Read", "Glob", "Grep"].includes(t), `design must not see built-in ${t}`);
-    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops__)/.test(t)), "design gets no Edit, Write, Bash or the chief's tools");
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops)/.test(t)), "design gets no Edit, Write, Bash or the chief's tools");
     assert.match(s.prompt, /never edit the repositories, open or merge pull requests, send email or messages, post publicly, sign anything or spend money/);
     assert.match(s.prompt, /not production code/);
     assert.ok(!s.prompt.includes("This task is on the workforce itself"), "design never works on the workforce as an engineer");
@@ -567,7 +567,7 @@ test("the cv worker is read-only apart from one confined save tool, never sends 
     const s = workerSpec("cv" as any, target);
     assert.deepEqual(s.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__cv__save_cv_file"], "cv gets read-only tools plus its own save tool");
     assert.deepEqual(s.tools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
-    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops__|mcp__google__|mcp__repos__|mcp__design__)/.test(t)), "cv gets no Edit, Write, Bash, mail or chief tools");
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops|mcp__google__|mcp__repos__|mcp__design__)/.test(t)), "cv gets no Edit, Write, Bash, mail or chief tools");
     assert.ok(s.prompt.includes("Clean room rule"), "cv carries the clean-room rule");
     assert.ok(s.prompt.includes("Messaging rule from Paul"), "cv carries the messaging rule");
     assert.match(s.prompt, /Your message to Paul is three or four plain sentences/);
@@ -601,7 +601,7 @@ test("the dns worker reads and prepares only: no Bash, Edit, Write or web, no ap
     const s = workerSpec("dns" as any, target);
     assert.deepEqual(s.allowedTools, ["mcp__dns__*", "Read", "Glob", "Grep"], "dns gets its own server plus read-only repository tools");
     assert.deepEqual(s.tools, ["Read", "Glob", "Grep"]);
-    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|WebFetch|WebSearch|mcp__ops__|mcp__google__|mcp__repos__|mcp__design__|mcp__cv__)/.test(t)), "dns gets no Edit, Write, Bash, web, mail or chief tools");
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|WebFetch|WebSearch|mcp__ops|mcp__google__|mcp__repos__|mcp__design__|mcp__cv__)/.test(t)), "dns gets no Edit, Write, Bash, web, mail or chief tools");
     assert.ok(s.prompt.includes("Clean room rule"), "dns carries the clean-room rule");
     assert.ok(s.prompt.includes("Messaging rule from Paul"), "dns carries the messaging rule");
     assert.match(s.prompt, /Your message to Paul is three or four plain sentences/);
@@ -745,7 +745,7 @@ test("the advisor worker is read-only apart from one confined deck save tool, ne
     const s = workerSpec("advisor" as any, target);
     assert.deepEqual(s.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__decks__save_deck_file"]);
     assert.deepEqual(s.tools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
-    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops__|mcp__google__|mcp__repos__|mcp__design__|mcp__cv__)/.test(t)), "advisor gets no Edit, Write, Bash, mail or chief tools");
+    assert.ok(!s.allowedTools.some((t) => /^(Edit|Write|Bash|mcp__ops|mcp__google__|mcp__repos__|mcp__design__|mcp__cv__)/.test(t)), "advisor gets no Edit, Write, Bash, mail or chief tools");
     assert.ok(s.prompt.includes("Clean room rule"), "advisor carries the clean-room rule");
     assert.ok(s.prompt.includes("Messaging rule from Paul"), "advisor carries the messaging rule");
     assert.match(s.prompt, /Your message to Paul is three or four plain sentences/);

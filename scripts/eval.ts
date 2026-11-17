@@ -24,6 +24,7 @@ process.env.CHANNELS = "";
 process.env.VOICE = "off";
 
 const { config } = await import("../src/config.js");
+const { OPS_SERVER_NAME } = await import("../src/ops-schema.js");
 const { sdkRunner } = await import("../src/agents.js");
 const { buildApp } = await import("../src/index.js");
 const { Store } = await import("../src/store.js");
@@ -37,7 +38,7 @@ const me = config.allowedTelegramIds[0].startsWith("tg:") ? config.allowedTelegr
 /** The chief is the only run given the ops tool server; everything else is a worker and is stubbed. */
 let chiefErrors: string[] = [];
 const runner: AgentRunner = async (o) => {
-  if (o.mcpServers?.ops) {
+  if (o.mcpServers?.[OPS_SERVER_NAME]) {
     const r = await sdkRunner(o);
     // A provider or SDK failure is never a pass, however politely the chief words it to Paul.
     if (r.error) chiefErrors.push(`${r.error.kind}: ${r.error.detail ?? ""}`.slice(0, 200));
