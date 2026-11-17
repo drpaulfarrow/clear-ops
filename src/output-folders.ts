@@ -29,8 +29,11 @@ const UPLOAD_MARKERS = [/\/data\/up(?:loads)\b/i, /\bConnections\.csv\b/i, /\bco
 
 export type Verdict = { folder: string } | { excluded: string };
 
-export function classify(job: Pick<Job, "kind" | "title" | "brief">, text: string): Verdict {
+export function classify(job: Pick<Job, "kind" | "title" | "brief" | "docSnapshot">, text: string): Verdict {
   if (EXCLUDED_KINDS.has(job.kind)) return { excluded: `${job.kind} outputs are not copied` };
+  // A job that read a private Google Doc snapshot Paul bound to it (src/doc-reader.ts): the document's
+  // words can reach its output, so the output is never mirrored to the public outputs repository.
+  if (job.docSnapshot) return { excluded: "bound to a private Google Doc snapshot" };
   // Code work (engineer, create_agent, maintain) talks about the uploads feature without holding anyone's data.
   const code = job.kind === "engineer" || job.kind === "create_agent" || job.kind === "maintain";
   const hay = `${job.brief ?? ""}\n${text}`;

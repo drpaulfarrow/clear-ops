@@ -6,6 +6,7 @@ import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { perJobModelError, provider, runRoute } from "./llm.js";
 import type { OtpRelay } from "./otp.js";
+import type { DocReader } from "./doc-reader.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -230,6 +231,11 @@ export class JobRunner {
    */
   private readonly otp?: OtpRelay;
   /**
+   * The private Google Docs reader (src/doc-reader.ts). A snapshot exists only when Paul bound it to
+   * one job with his own chat message, and snapshotBlock hands its text to that job alone.
+   */
+  private readonly docs?: DocReader;
+  /**
    * Where the spend figure comes from (src/spend.ts): the provider's own usage where it can be read,
    * and the SDK's estimate only as the internal stand-in the daily cap falls back to. Only the
    * provider's figure is ever shown; `spendDisplay` is the one way it reaches a message.
@@ -265,6 +271,7 @@ export class JobRunner {
       liveness?: LivenessOptions;
       purchase?: PurchaseGate;
       otp?: OtpRelay;
+      docs?: DocReader;
       slots?: number;
       /** Engineering jobs at once across all repositories; defaults to config.engineerTotal. */
       total?: number;
@@ -283,6 +290,7 @@ export class JobRunner {
     this.onOutput = opts.onOutput;
     this.purchase = opts.purchase;
     this.otp = opts.otp;
+    this.docs = opts.docs;
     this.spend = opts.spend ?? storeMeter(store);
     this.setup = opts.setup ?? preparedCopies;
     this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
@@ -949,6 +957,11 @@ export class JobRunner {
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
       const carryOn = job.savedWork ? `\n\n${savedWorkNote(job.savedWork)}` : "";
+      // The private Google Doc snapshot Paul bound to this job, if any (src/doc-reader.ts): its text is
+      // handed to this job's worker alone, fenced as untrusted data with its provenance. Every other
+      // job gets nothing, and no path or token is ever mentioned.
+      const docBlock = this.docs?.snapshotBlock(id) ?? "";
+      const docNote = docBlock ? `\n\n${docBlock}` : "";
       const link = job.kind === "ea" ? bookingLink(this.store) : undefined;
       const permits =
         job.kind === "ea"
@@ -997,7 +1010,7 @@ export class JobRunner {
       }
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {
-        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
+        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
         cwd: bridged && snapshot ? snapshot : spec.cwd,

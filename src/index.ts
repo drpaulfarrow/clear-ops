@@ -50,6 +50,7 @@ import { defaultProbes, HealthProbes } from "./health.js";
 import { defaultCanary, type Canary } from "./auto-resume.js";
 import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
 import { DocumentIngest } from "./documents.js";
+import { DocReader } from "./doc-reader.js";
 import { Uploads } from "./uploads.js";
 import { DeviceBudget, DEVICE_PATH, DEVICE_TEXT_MAX_CHARS, DEVICE_TURNS_PER_DAY, DeviceRegistry, deviceRouter } from "./device.js";
 import { BridgeChat, BRIDGE_REPLY_TO } from "./instinct-chat.js";
@@ -235,13 +236,18 @@ export function buildApp(deps: AppDeps) {
   // Google connection above) or asks him in chat, and types it into the page itself (src/otp.ts). No
   // model, log, output or stored session ever holds a code, and Paul's own message goes once it is used.
   const otp = new OtpRelay({ messenger: deps.messenger, ...(deps.mailbox ? { mailbox: deps.mailbox } : { mailbox: new GmailCodeReader(googleApi) }) });
-  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, ...(deps.canary ? { canary: deps.canary } : {}) });
+  // The private Google Docs reader (src/doc-reader.ts): Paul's own "read doc <id or link>" reads one
+  // document he identified, on the same Google connection as the assistant, and binds the snapshot to
+  // one job. The reader itself carries the gates (app-level allowlist, the grant's own scopes, no
+  // redirects, bounded reads); nothing else here can read a document.
+  const docs = new DocReader({ auth: google, dataDir: config.dataDir, allow: config.googleDocs.allow, ...(deps.googleFetch ? { fetch: deps.googleFetch } : {}) });
+  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, docs, ...(deps.canary ? { canary: deps.canary } : {}) });
   const scheduler = new Scheduler(deps.store, jobs);
   // One private uploads store for the whole service: chat attachments and the documents the bridge takes in
   // (src/documents.ts) land in the same place, under the same name rules and the same size limit.
   const uploads = new Uploads();
   const documents = new DocumentIngest(uploads, path.join(config.dataDir, "bridge-documents.jsonl"));
-  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, uploads, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp);
+  const orchestrator = new Orchestrator(deps.store, tapped, jobs, scheduler, deps.runner, {}, uploads, google, deps.clock, deps.githubStatus ?? (() => githubStatusLine()), outbound, dns, signup, purchase, otp, docs);
   scheduler.boot();
   const bridgeBudget = new DeviceBudget(path.join(config.dataDir, "bridge-chat-budget.json"), () => config.bridgeChatBudgetUsd, "the bridge chat");
   orchestrator.bridgeBudget = bridgeBudget;

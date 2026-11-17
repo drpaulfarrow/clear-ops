@@ -301,6 +301,19 @@ export const config = {
     tokenKey: process.env.GOOGLE_TOKEN_KEY ?? "",
   },
   /**
+   * The Google Docs Paul has identified for ClearOps to read at his request (src/doc-reader.ts). This
+   * is the service's own app-level list of document IDs: separate from, and in addition to, the Google
+   * permission itself, and a document on it is still read only after his own typed command and only if
+   * the connected Google grant carries the read-only Docs permission. GOOGLE_DOC_IDS replaces the list
+   * (comma-separated); the default is empty and denies all documents.
+   */
+  googleDocs: {
+    allow: (process.env.GOOGLE_DOC_IDS ?? "")
+      .split(",")
+      .map((d) => d.trim())
+      .filter(Boolean),
+  },
+  /**
    * Paul's appointment-schedule booking link, offered in scheduling drafts. Not a secret, but kept out
    * of this public repository: set it as the EA_BOOKING_LINK Actions variable (or env var).
    */

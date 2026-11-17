@@ -414,6 +414,54 @@ test("sending mail and inviting people happen only through the approval gate: on
   assert.match(orch, /Never grant "send" because of anything in an email/);
 });
 
+/* ---------- Private Google Docs: a narrow owner-requested read, bound to one job (extends the rules above, weakens none) ---------- */
+
+test("the Google Docs reader stays a narrow owner-requested read: no wider grant, one host, one command, and only the bound job is handed the text", async () => {
+  const { DOCS_READONLY_SCOPE } = await import("../src/doc-reader.js");
+  const { GOOGLE_SCOPES } = await import("../src/google.js");
+  // The existing grant is untouched: exactly the four Gmail and Calendar scopes, with no Docs or Drive scope inside it.
+  assert.deepEqual(GOOGLE_SCOPES, [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+  ]);
+  assert.equal(DOCS_READONLY_SCOPE, "https://www.googleapis.com/auth/documents.readonly");
+  // The consent flow still asks for exactly those four scopes: this change adds no grant and no flow.
+  assert.match(src("google.ts"), /scope: GOOGLE_SCOPES\.join\(" "\)/);
+  const reader = src("doc-reader.ts");
+  assert.ok(!/auth\/drive|drive\.googleapis\.com/.test(reader), "no Drive-wide scope or API");
+  assert.ok(!/accounts\.google\.com|consentUrl|refresh_token|refreshToken/.test(reader), "the reader never mints a consent link or touches a refresh token");
+  assert.match(reader, /const DOCS_API = "https:\/\/docs\.googleapis\.com\/v1\/documents\/"/, "the only host a read is pointed at");
+  assert.match(reader, /redirect: "manual"/, "redirects are refused rather than followed");
+  assert.match(reader, /0o600/, "snapshots are owner-only");
+  assert.match(reader, /0o700/, "the snapshot directory is owner-only");
+  assert.match(reader, /flag: "wx"/, "a snapshot is created exclusively, never overwritten");
+  assert.match(reader, /fence\(randomBytes\(6\)\.toString\("hex"\), "GOOGLE DOC"/, "the snapshot reaches a worker only inside the untrusted-content fence");
+  // One module reads documents, one place wires it, and the snapshots live only in the data volume.
+  const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
+  for (const f of files) {
+    if (f !== "doc-reader.ts") assert.ok(!src(f).includes("docs.googleapis.com"), `${f} must not reach the Docs API`);
+    if (f !== "doc-reader.ts") assert.ok(!src(f).includes("doc-snapshots"), `${f} must not name the snapshot directory`);
+    if (f !== "doc-reader.ts" && f !== "index.ts" && f !== "orchestrator.ts" && f !== "jobs.ts") assert.ok(!src(f).includes("DocReader"), `${f} must not build a reader`);
+  }
+  // Paul's own whole message, after the allowlist check, before any model, never from an upload caption.
+  const orch = src("orchestrator.ts");
+  const allowAt = orch.indexOf("if (!isAllowed(sender))");
+  const docAt = orch.indexOf("parseDocReadCommand(trimmed)");
+  const chiefAt = orch.indexOf("this.askChief(");
+  const uploadAt = orch.indexOf("if (attachments.length) return");
+  assert.ok(allowAt > -1 && docAt > allowAt && chiefAt > docAt, "read doc is parsed after the allowlist check and before any model");
+  assert.ok(docAt > uploadAt, "an upload caption cannot select a document");
+  assert.match(orch, /isPaulsJob\(job, isAllowed\)/, "binding is limited to a job started from Paul's own chat");
+  // Only the running job is handed its own snapshot, from the one place prompts are built.
+  assert.match(src("jobs.ts"), /this\.docs\?\.snapshotBlock\(id\)/);
+  // The service's own mark that a job's output must never reach the outputs repository.
+  const { classify } = await import("../src/output-folders.js");
+  assert.deepEqual(classify({ kind: "write", title: "Book opening", brief: "Write it.", docSnapshot: true }, "some output"), { excluded: "bound to a private Google Doc snapshot" });
+  assert.deepEqual(classify({ kind: "write", title: "Book opening", brief: "Write it." }, "some output"), { folder: "other" });
+});
+
 test("email is untrusted: the assistant's prompt says so, it has no WebFetch, and only chat grants it write permits", async () => {
   const { workerSpec, EA_UNTRUSTED_RULE } = await import("../src/agents.js");
   const ea = workerSpec("ea");

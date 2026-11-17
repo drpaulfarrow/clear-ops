@@ -24,6 +24,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
+import { parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
@@ -123,6 +124,8 @@ export class Orchestrator {
     private readonly purchase?: PurchaseGate,
     /** The one-time code relay. Without it, "code <id> <the code>" does nothing. */
     private readonly otp?: OtpRelay,
+    /** The private Google Docs reader (src/doc-reader.ts). Without it, "read doc <id>" does nothing. */
+    private readonly docs?: DocReader,
   ) {
     // Fail closed at boot on a schema change without a version bump (src/ops-schema.ts): the guard
     // pins the advertised shape per namespace in the store, and index.ts awaits it before listening.
@@ -197,6 +200,13 @@ export class Orchestrator {
       this.store.setSetting("actAsMe", r.sites.length ? r.sites : undefined);
       return this.messenger.send(from, r.text);
     }
+    // Reading a private Google Doc for a job (src/doc-reader.ts): only his own whole message
+    // "read doc <id or link>", optionally "for job <id>", parsed here after the allowlist and before
+    // any model, like every other owner-only selection, so no voice note, bridge post, email, page,
+    // job output or upload can select a document. An upload caption cannot either: attachments are
+    // handled above, before this line.
+    const docCmd = parseDocReadCommand(trimmed);
+    if (docCmd && this.docs) return this.handleDocRead(sender, from, docCmd);
     const out = parseOutboundCommand(trimmed);
     if (out && this.outbound && (!out.id || this.outbound.has(out.id))) return this.handleOutbound(sender, from, out.verb, out.id);
     const approval = trimmed.match(/^(yes|approve|ok|no|reject)\s+([a-f0-9]{6})\b/i);
@@ -477,6 +487,37 @@ export class Orchestrator {
   private async googleDisconnect(): Promise<string> {
     if (!this.google) return "Google is not set up.";
     return (await this.google.disconnect()) ? "Google disconnected: access revoked and the stored token deleted. Scheduled briefs will fail until you connect again." : "Google was not connected.";
+  }
+
+  /**
+   * Paul's own "read doc <id or link>", optionally "for job <id>" (src/doc-reader.ts). The read, its
+   * gates and its snapshot are the reader's; what belongs here is binding the snapshot to a job he
+   * named and telling him what happened in a line or two. The document's text never appears in the
+   * reply, which stays short enough for a phone.
+   */
+  private async handleDocRead(sender: string, from: string, cmd: DocReadCommand): Promise<void> {
+    let jobId: string | undefined;
+    if (cmd.forJob) {
+      const job = this.store.getJob(cmd.forJob);
+      if (!job) return void (await this.messenger.send(from, `No job ${cmd.forJob} to bind the document to.`));
+      if (!isPaulsJob(job, isAllowed)) return void (await this.messenger.send(from, "Only a job started from your own chat can be given a document to read."));
+      jobId = job.id;
+    }
+    try {
+      const receipt = await this.docs!.read({ requester: sender, selector: cmd.selector, ...(jobId ? { forJob: jobId } : {}) });
+      // The flag is the service's own mark that this job's output is kept out of the outputs
+      // repository (src/output-folders.ts); the snapshot itself stays bound in the reader.
+      if (jobId) this.store.updateJob(jobId, { docSnapshot: true });
+      const revision = receipt.revisionKnown ? `revision ${receipt.revisionId}` : "revision not available from Google's reply";
+      const extras = `${receipt.paragraphs.toLocaleString("en-GB")} paragraphs${receipt.note ? `, ${receipt.note}` : ""}`;
+      const bound = jobId ? ` and bound it to job ${jobId}` : "";
+      return void (await this.messenger.send(
+        from,
+        `Read "${receipt.title}" from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot${bound}.${jobId ? "" : " No job receives it until you bind one: read doc <id or link> for job <id>."}`,
+      ));
+    } catch (err) {
+      return void (await this.messenger.send(from, err instanceof Error ? err.message : "The document could not be read."));
+    }
   }
 
   private standingNotes(): string {
@@ -1338,6 +1379,7 @@ Send a file (CSV, PDF, screenshot, zip) and I save it privately for me and the w
 /delete upload <name>: delete one (or "all")
 YES <id> or NO <id>: approve or reject an action
 send <id> or cancel <id>: approve or cancel an email or invitation the assistant prepared (you see its exact text first; it expires after 24 hours)
+read doc <id or link> for job <id>: read one private Google Doc you identified, through the connected Google account, and hand its text to that job alone (never read without you asking, and never sent anywhere else)
 /google: is Google connected; /google disconnect to revoke
 /followups: who is waiting on you, what you promised, who you are waiting on
 done <id>, snooze <id> 2d, draft nudge <id>: manage a follow-up

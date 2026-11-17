@@ -115,6 +115,18 @@ export class GoogleAuth {
   }
 
   /**
+   * The scopes the connected grant actually carries (stored with the token at consent time), so a new
+   * read path can refuse cleanly instead of guessing. This only reports; it never widens a grant.
+   */
+  grantedScopes(): string[] | undefined {
+    try {
+      return this.load()?.scopes;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * A one-time consent link for Paul, valid for CONSENT_TTL_MS. The state is single use and tied to
    * the chat that asked for it, which is where the result is reported. Uses PKCE as well as the secret.
    */
