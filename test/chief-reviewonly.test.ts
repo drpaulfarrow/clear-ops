@@ -174,5 +174,11 @@ test("the chief's ops server is registered under the schema-versioned namespace,
   assert.ok(chiefRuns.every((r) => r.allowedTools.includes(`mcp__${OPS_SERVER_NAME}__*`)), "allowedTools matches the versioned namespace");
   const schema = advertisedStartJob(turn);
   assert.ok(schema.properties.reviewOnly, "the advertised schema still carries reviewOnly");
-  assert.deepEqual(schema.required, ["kind", "title", "brief"], "reviewOnly stays optional on the wire");
+  // The merged current schema (version 4): both parameters that each arrived as a separate version 3
+  // are advertised together to a resumed chief session, from the one versioned namespace.
+  assert.ok(schema.properties.doneWhen, "the advertised schema carries doneWhen (the engineer's finish-line contract)");
+  assert.match(schema.properties.doneWhen.description, /Engineer only, and required there/);
+  assert.ok(schema.properties.source, "the advertised schema carries the private source reference");
+  assert.match(schema.properties.source.description, /private source reference/);
+  assert.deepEqual(schema.required, ["kind", "title", "brief"], "reviewOnly, doneWhen and source stay optional on the wire");
 });
