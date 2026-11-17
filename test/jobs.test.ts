@@ -11,7 +11,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-jobs-"))
 const { Store } = await import("../src/store.js");
 const { JobRunner, lockKey } = await import("../src/jobs.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
-import type { AgentRunner, RunResult } from "../src/agents.js";
+import type { AgentRunner, RunOptions, RunResult } from "../src/agents.js";
 
 const FOUNDER = "tg:99887766";
 
@@ -237,6 +237,67 @@ test("on restart, a queue whose holder gives up starts its next job", async () =
   assert.equal(store.getJob(a.id)!.status, "failed");
   await waitFor(() => g.started.includes("B"));
   assert.equal(jobs.holder("product"), b.id);
+});
+
+test("a pinned model is the model the worker's run sends; unset, the kind's own model runs", async () => {
+  const { config } = await import("../src/config.js");
+  const runs: RunOptions[] = [];
+  const runner: AgentRunner = async (o) => {
+    runs.push(o);
+    return { text: `${o.prompt.split("\n")[0]} done` };
+  };
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-pin-")));
+  const jobs = new JobRunner(store, new ConsoleMessenger(), runner);
+  jobs.start("write", "Pinned brief", FOUNDER, "product", undefined, { model: "moonshotai/kimi-k3.1-pro" });
+  jobs.start("write", "Plain brief", FOUNDER, "product");
+  await waitFor(() => runs.length === 2);
+  assert.equal(runs.find((r) => r.prompt.startsWith("Pinned brief"))!.model, "moonshotai/kimi-k3.1-pro", "the pin reaches the actual run");
+  assert.equal(runs.find((r) => r.prompt.startsWith("Plain brief"))!.model, config.models.worker, "unset leaves the kind's own model");
+  assert.equal(store.allJobs().find((j) => j.brief === "Pinned brief")!.model, "moonshotai/kimi-k3.1-pro", "the pin is persisted on the record");
+});
+
+test("a model outside the allowed three, an alias, or one on the assistant is refused, and so is review-only on a kind that opens no pull request", () => {
+  const { store, jobs } = setup();
+  const before = store.allJobs().length;
+  assert.throws(() => jobs.start("write", "Hostile brief", FOUNDER, "product", undefined, { model: "gpt-5.2" }), /is not a model a job can be pinned to/);
+  assert.throws(() => jobs.start("write", "Alias brief", FOUNDER, "product", undefined, { model: "opus" }), /is not a model a job can be pinned to/);
+  assert.throws(() => jobs.start("write", "Empty brief", FOUNDER, "product", undefined, { model: "  " }), /is not a model a job can be pinned to/);
+  assert.throws(() => jobs.start("ea", "Assistant brief", FOUNDER, "product", undefined, { model: "z-ai/glm-5.3" }), /executive assistant always runs on Claude/);
+  assert.throws(() => jobs.start("research", "Research brief", FOUNDER, "product", undefined, { reviewOnly: true }), /A research job cannot be review only/);
+  assert.equal(store.allJobs().length, before, "a refusal creates no job");
+  // The two kinds that open a pull request take them, and a false flag behaves as unset.
+  const e = jobs.start("engineer", "Fine brief", FOUNDER, "self", undefined, { model: "anthropic/claude-opus-5.5", reviewOnly: true });
+  assert.equal(e.model, "anthropic/claude-opus-5.5");
+  assert.equal(e.reviewOnly, true);
+  const c = jobs.start("create_agent", "Agent brief", FOUNDER, "self", undefined, { reviewOnly: false });
+  assert.equal(c.reviewOnly, undefined, "a false flag behaves as unset");
+});
+
+test("a job from the Instinct bridge never carries a model pin or the review-only flag, whatever the caller passed", () => {
+  const { jobs } = setup();
+  const j = jobs.start("research", "Bridge brief", FOUNDER, "product", undefined, { origin: "instinct", model: "z-ai/glm-5.3", reviewOnly: true });
+  assert.equal(j.origin, "instinct");
+  assert.equal(j.model, undefined, "the bridge cannot pin a model");
+  assert.equal(j.reviewOnly, undefined, "the bridge cannot ask for review only");
+  assert.equal(j.permits, undefined, "the bridge never gets a permit either");
+});
+
+test("a review-only engineer opens its pull request for Paul, and no maintainer, fix round or merge follows it", async () => {
+  const { store, messenger, jobs, started, finish } = setup();
+  const a = jobs.start("engineer", "A", FOUNDER, "product", undefined, { reviewOnly: true });
+  await waitFor(() => started.includes("A"));
+  const pr = "https://github.com/drpaulfarrow/clear-exchange/pull/94";
+  finish("A", `A done\n${pr}`);
+  // The Finished message is sent after the chaining block, so waiting for it settles both.
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith(`Finished: A · engineer · ${a.id}`)));
+  assert.equal(store.getJob(a.id)!.status, "done");
+  assert.equal(store.getJob(a.id)!.pr, pr, "the pull request is read from the report onto the record");
+  assert.equal(store.allJobs().filter((j) => j.kind === "maintain").length, 0, "no maintainer follows a review-only engineer");
+  const text = messenger.sent.find((m) => m.text.startsWith(`Finished: A · engineer · ${a.id}`))!.text;
+  assert.ok(
+    text.includes(`Opened ${pr} for review. This job is review only: you review and merge it yourself; nothing reviews or merges it automatically.`),
+    "the short message says plainly that Paul reviews and merges it himself",
+  );
 });
 
 test("the chief's start_job says a job was queued and behind which job; job_status shows it", async () => {

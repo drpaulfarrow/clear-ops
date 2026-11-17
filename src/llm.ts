@@ -105,6 +105,20 @@ export function resolveModel(model: string): string {
 }
 
 /**
+ * Models one job may be pinned to (the owner's start_job model). Explicit provider ids, never
+ * aliases: a pinned model reaches the worker's run as itself (resolveModel passes a non-alias
+ * through unchanged), so the job record says exactly which model ran. Paul's set (17 Nov 2026).
+ */
+export const PER_JOB_MODELS = ["z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro", "anthropic/claude-opus-5.5"] as const;
+
+/** Why a model a job was pinned to is refused, or undefined when it is one of PER_JOB_MODELS. */
+export function perJobModelError(model: string): string | undefined {
+  const id = model.trim();
+  if ((PER_JOB_MODELS as readonly string[]).includes(id)) return undefined;
+  return `"${model}" is not a model a job can be pinned to. Pick one of: ${PER_JOB_MODELS.join(", ")}.`;
+}
+
+/**
  * Environment for the SDK subprocess. With OpenRouter: its endpoint, the key as a bearer token, the
  * Anthropic key explicitly empty (OpenRouter's documented setup), every alias the CLI resolves
  * internally (subagents, the small fast model behind WebFetch summaries) mapped too, and no
