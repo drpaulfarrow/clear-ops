@@ -231,8 +231,10 @@ export class JobRunner {
    */
   private readonly otp?: OtpRelay;
   /**
-   * The private Google Docs reader (src/doc-reader.ts). A snapshot exists only when Paul bound it to
-   * one job with his own chat message, and snapshotBlock hands its text to that job alone.
+   * The private Google Docs reader (src/doc-reader.ts). A snapshot is bound to one job only when
+   * Paul starts that job with the private source handle a staged read handed him (never through a
+   * chat command, which is refused before any fetch), and snapshotBlock hands its text to that job
+   * alone.
    */
   private readonly docs?: DocReader;
   /**

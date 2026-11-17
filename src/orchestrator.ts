@@ -24,7 +24,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
-import { DOCS_READONLY_SCOPE, DOC_SOURCE_JOB_KINDS, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
+import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay } from "./spend.js";
 import type { FollowUp, JobPermit } from "./store.js";
@@ -200,11 +200,13 @@ export class Orchestrator {
       this.store.setSetting("actAsMe", r.sites.length ? r.sites : undefined);
       return this.messenger.send(from, r.text);
     }
-    // Reading a private Google Doc for a job (src/doc-reader.ts): only his own whole message
-    // "read doc <id or link>", optionally "for job <id>", parsed here after the allowlist and before
-    // any model, like every other owner-only selection, so no voice note, bridge post, email, page,
-    // job output or upload can select a document. An upload caption cannot either: attachments are
-    // handled above, before this line.
+    // Reading a private Google Doc (src/doc-reader.ts): only his own whole message
+    // "read doc <id or link>", parsed here after the allowlist and before any model, like every
+    // other owner-only selection, so no voice note, bridge post, email, page, job output or upload
+    // can select a document. An upload caption cannot either: attachments are handled above, before
+    // this line. The "for job <id>" suffix of that message is refused inside, before any fetch: no
+    // owner command binds a job, because a command that checked a queued target and then awaited
+    // Google's fetch could land the source on a job that had already started.
     const docCmd = parseDocReadCommand(trimmed);
     if (docCmd && this.docs) return this.handleDocRead(sender, from, docCmd);
     // The optional Docs consent: his own whole message asks for the one-time link that adds the
@@ -484,7 +486,7 @@ export class Orchestrator {
       const account = g.account();
       if (!account) return 'Google is set up but not connected. Say "connect Google" for a sign-in link.';
       const docs = (g.grantedScopes() ?? []).includes(DOCS_READONLY_SCOPE);
-      return `Google is connected as ${account} (drafts, holds, and send or invite only with your approval of each). Private Google Doc reading for a job you name: ${docs ? "enabled" : "not enabled (say \"docs consent\" for the one-time link that adds the optional read-only Docs permission)"}. /google disconnect to revoke.`;
+      return `Google is connected as ${account} (drafts, holds, and send or invite only with your approval of each). Private Google Doc reading: ${docs ? "enabled" : "not enabled (say \"docs consent\" for the one-time link that adds the optional read-only Docs permission)"}. /google disconnect to revoke.`;
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     }
@@ -513,45 +515,36 @@ export class Orchestrator {
   }
 
   /**
-   * Paul's own "read doc <id or link>", optionally "for job <id>" (src/doc-reader.ts). The read, its
-   * gates and its snapshot are the reader's; what belongs here is binding the snapshot to a job he
-   * named and telling him what happened in a line or two. The document's text, title, ID and URL
+   * Paul's own "read doc <id or link>" (src/doc-reader.ts). The read, its gates and its snapshot are
+   * the reader's; what belongs here is refusing the legacy "for job <id>" suffix before anything is
+   * fetched and telling him what happened in a line or two. The document's text, title, ID and URL
    * never appear in the reply, which stays short enough for a phone: a staged read tells him the
    * private opaque source handle he passes when starting the one writing job it is for.
    */
   private async handleDocRead(sender: string, from: string, cmd: DocReadCommand): Promise<void> {
-    let jobId: string | undefined;
-    if (cmd.forJob) {
-      const job = this.store.getJob(cmd.forJob);
-      if (!job) return void (await this.messenger.send(from, `No job ${cmd.forJob} to bind the document to.`));
-      if (!isPaulsJob(job, isAllowed)) return void (await this.messenger.send(from, "Only a job started from your own chat can be given a document to read."));
-      if (!DOC_SOURCE_JOB_KINDS.includes(job.kind as (typeof DOC_SOURCE_JOB_KINDS)[number]))
-        return void (await this.messenger.send(from, `A ${job.kind} job cannot be given a document to read: only writing jobs (${DOC_SOURCE_JOB_KINDS.join(", ")}) can work from one.`));
-      if (job.status !== "queued")
-        return void (await this.messenger.send(
-          from,
-          job.status === "running"
-            ? `Job ${job.id} has already started, so the document cannot be bound to it. Stage it instead ("read doc <id or link>") before starting the next writing job, and the worker receives it as its first step.`
-            : `Job ${job.id} is ${job.status}, so the document cannot be bound to it. Stage it instead ("read doc <id or link>") before starting the next writing job, and the worker receives it as its first step.`,
-        ));
-      jobId = job.id;
-    }
+    // The direct "for job <id>" binding is removed, and this refusal is the whole of what the suffix
+    // now does. The old route checked a queued job and then awaited Google's fetch, so the target
+    // could start while the fetch was pending and run on without the source, while the reply
+    // claimed a successful binding to a job that had already missed it. No owner command may race a
+    // job with an awaited fetch, so the suffix is refused here - before any fetch, snapshot,
+    // binding or job lookup, whatever state the named job is in - and the only way a source
+    // reaches a job is the explicit private handle Paul passes when starting it (src/jobs.ts
+    // checkSource and bindSource, prelaunch).
+    if (cmd.forJob)
+      return void (await this.messenger.send(
+        from,
+        'A document can no longer be bound with "for job <id>": a job waiting in the queue can start while the read is still fetching from Google, and its worker would run without the source. Read it with "read doc <id or link>" on its own, then start the writing job you want it for and pass the private source reference the read gives you. Nothing was read and nothing was changed.',
+      ));
     try {
-      const receipt = await this.docs!.read({ requester: sender, selector: cmd.selector, ...(jobId ? { forJob: jobId } : { stage: true }) });
-      // The flag is the service's own mark that this job's output is kept out of the outputs
-      // repository (src/output-folders.ts); the snapshot itself stays bound in the reader.
-      if (jobId) this.store.updateJob(jobId, { docSnapshot: true });
+      const receipt = await this.docs!.read({ requester: sender, selector: cmd.selector, stage: true });
       const revision = receipt.revisionKnown ? `revision ${receipt.revisionId}` : "revision not available from Google's reply";
       const extras = `${receipt.paragraphs.toLocaleString("en-GB")} paragraphs${receipt.note ? `, ${receipt.note}` : ""}`;
       // The reply says what was read, never which document: no title, ID or URL appears in it, only
-      // the size, the revision and, for a staged read, the private opaque handle Paul passes when
-      // starting the one writing job the source is for.
-      const tail = jobId
-        ? ` and bound it to job ${jobId}`
-        : `, staged as private source ${receipt.handle}: start the writing job you want it for (write, cv or advisor) and pass that source reference with it. It goes to that job alone, never to another, and it lapses after a day. To bind it to a job waiting in the queue instead, say read doc <id or link> for job <id>`;
+      // the size, the revision and the private opaque handle Paul passes when starting the one
+      // writing job the source is for.
       return void (await this.messenger.send(
         from,
-        `Read the document from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot${tail}.`,
+        `Read the document from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot, staged as private source ${receipt.handle}: start the writing job you want it for (write, cv or advisor) and pass that source reference with it. It goes to that job alone, never to another, and it lapses after a day.`,
       ));
     } catch (err) {
       return void (await this.messenger.send(from, err instanceof Error ? err.message : "The document could not be read."));
@@ -1422,7 +1415,6 @@ Send a file (CSV, PDF, screenshot, zip) and I save it privately for me and the w
 YES <id> or NO <id>: approve or reject an action
 send <id> or cancel <id>: approve or cancel an email or invitation the assistant prepared (you see its exact text first; it expires after 24 hours)
 read doc <id or link>: read one private Google Doc you identified, through the connected Google account, and stage it as a private source; start the writing job you want it for and pass the private source reference the read gives you (it goes to that one job alone, lapses after a day, and is never sent anywhere else)
-read doc <id or link> for job <id>: instead bind it to one job still waiting in the queue
 docs consent: the one-time link that adds the optional read-only Google Docs permission to your existing Google connection (mail and calendar access is unchanged)
 /google: is Google connected; /google disconnect to revoke
 /followups: who is waiting on you, what you promised, who you are waiting on

@@ -1,9 +1,11 @@
 /**
  * The private Google Docs reader (src/doc-reader.ts): Paul's own "read doc <id or link>" selects one
  * document he identified, the service reads it through the existing Google connection, and an
- * immutable snapshot reaches only the job he bound it to, fenced as untrusted data. Everything here
- * is synthetic: the auth and the fetch are fakes, no real Google account is touched, and no real
- * document is read. The orchestrator's half at the bottom is built the way test/otp.test.ts builds it.
+ * immutable snapshot reaches only the writing job started with its private handle, fenced as
+ * untrusted data. The "for job <id>" suffix of the command is refused before any fetch, save or
+ * binding: no owner command binds a job. Everything here is synthetic: the auth and the fetch are
+ * fakes, no real Google account is touched, and no real document is read. The orchestrator's half
+ * at the bottom is built the way test/otp.test.ts builds it.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -92,7 +94,7 @@ const logText = (dataDir: string) => {
 
 /* ---------- the command and the selector ---------- */
 
-test("the command is Paul's whole message: read doc <id or link>, with an optional job, and nothing else matches", () => {
+test("the command is Paul's whole message: read doc <id or link>, with an optional job suffix parsed only to be refused, and nothing else matches", () => {
   assert.deepEqual(parseDocReadCommand(`read doc ${DOC_ID}`), { selector: DOC_ID });
   assert.deepEqual(parseDocReadCommand(`read doc ${CANONICAL}`), { selector: CANONICAL });
   assert.deepEqual(parseDocReadCommand(`read doc ${CANONICAL}/edit for job a1b2c3`), { selector: `${CANONICAL}/edit`, forJob: "a1b2c3" });
@@ -450,69 +452,80 @@ function chat(docs: DocReader | undefined) {
   return { orch, sent, prompts, store, jobs };
 }
 
-test("read doc from Paul's own chat reads, binds to a queued writing job he started and replies without the text; nobody else is answered", async () => {
+test("the whole-message for-job suffix is refused before any fetch, snapshot or binding whatever the job's state; only a staged read hands Paul a source handle", async () => {
   const { f, seen } = fakeFetch(() => reply({ revisionId: "R1" }));
   const auth = fakeAuth();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docreader-"));
   const docs = new DocReader({ auth, dataDir, allow: [DOC_ID], fetch: f, now: fixedDate });
   const { orch, sent, prompts, store } = chat(docs);
-  const job = store.createJob("write", "Write the opening from the source.", PAUL, "product", PAUL);
+  const snapshots = () => filesIn(path.join(dataDir, "doc-snapshots")).filter((n) => n.endsWith(".txt")).length;
+  const records = path.join(dataDir, "doc-snapshots", "records.json");
 
-  await orch.handle(PAUL, `read doc ${DOC_ID} for job ${job.id}`);
+  // The regression this guards: the legacy route checked a queued job, then awaited Google's fetch,
+  // so the target could start while the fetch was pending and its worker would run on without the
+  // source while the reply claimed a successful binding. The suffix is now refused outright,
+  // before any fetch, save or binding - so here, a queued writing job of Paul's own is refused
+  // with zero fetches and no mark on the job.
+  const queued = store.createJob("write", "Write the opening from the source.", PAUL, "product", PAUL);
+  await orch.handle(PAUL, `read doc ${DOC_ID} for job ${queued.id}`);
   assert.equal(prompts.length, 0, "the command never reaches a model");
-  assert.equal(seen.length, 1);
-  const text = sent[0]!.text;
-  assert.match(text, /Read the document from Google Docs/);
-  assert.match(text, /revision R1/);
-  assert.match(text, new RegExp(`bound it to job ${job.id}`));
-  assert.ok(!text.includes("Chapter one opens quietly"), "the reply never contains the document's text");
-  assert.ok(!text.includes("Synthetic source document"), "the reply never contains the document's title");
-  assert.ok(!text.includes(DOC_ID), "the reply never contains the document's ID");
-  assert.equal(store.getJob(job.id)!.docSnapshot, true, "the job is marked so its output is never mirrored");
+  assert.equal(seen.length, 0, "nothing was fetched: the refusal precedes the fetch, so no read can race the queued job");
+  assert.equal(snapshots(), 0, "no snapshot was saved");
+  assert.ok(!fs.existsSync(records), "no record was written, so nothing was bound");
+  assert.notEqual(store.getJob(queued.id)!.docSnapshot, true, "the queued job is neither marked nor bound");
+  const refusal = sent[0]!.text;
+  assert.match(refusal, /can no longer be bound with "for job <id>"/, "the refusal names the removed suffix");
+  assert.match(refusal, /read doc <id or link>/, "and guides him to the staged read");
+  assert.match(refusal, /private source reference/, "and to passing the handle with the writing job he starts");
+  assert.match(refusal, /Nothing was read and nothing was changed/, "it claims no success");
+  assert.ok(!refusal.includes("Chapter one"), "no document text in the refusal");
+  assert.ok(!refusal.includes(DOC_ID) && !refusal.includes("docs.google.com"), "the refusal names no document");
   assert.equal(sent[0]!.to, PAUL, "the reply goes to Paul's own chat");
 
-  // With no job named the read is staged, and the reply hands Paul the private opaque handle that
-  // selects the one job the source is for: never a title, ID, URL or any text from it.
-  seen.length = 0;
+  // The same refusal, and again zero fetches, for every other job state and owner: a running job
+  // (the race the old route lost), a completed job, an engineering kind, a job not started from
+  // Paul's own chat and a job that does not exist. No job in any state is bound through chat.
+  const make: Array<() => { id: string } | undefined> = [
+    () => store.updateJob(store.createJob("write", "Running already.", PAUL, "product", PAUL).id, { status: "running" }),
+    () => store.updateJob(store.createJob("write", "Done already.", PAUL, "product", PAUL).id, { status: "done" }),
+    () => store.createJob("engineer", "A code change.", PAUL, "product", PAUL),
+    () => store.createJob("write", "A bridge commission.", "tg:777", "product", "tg:777", { origin: "instinct" }),
+    () => undefined,
+  ];
+  for (const m of make) {
+    sent.length = 0;
+    const j = m();
+    await orch.handle(PAUL, `read doc ${DOC_ID} for job ${j ? j.id : "deadbe"}`);
+    assert.equal(seen.length, 0, "zero fetches");
+    assert.match(sent[0]!.text, /can no longer be bound with "for job <id>"/);
+    assert.match(sent[0]!.text, /Nothing was read and nothing was changed/, "no success claim in any state");
+    if (j) assert.notEqual(store.getJob(j.id)!.docSnapshot, true, "never marked, never bound");
+  }
+  assert.equal(snapshots(), 0, "no refusal saved a snapshot");
+
+  // The normal explicit path stays good: a bare read is staged, and the reply hands Paul the
+  // private opaque handle that selects the one job the source is for: never a title, ID, URL or
+  // any text from it, and never the removed direct binding.
   sent.length = 0;
   await orch.handle(PAUL, `read doc ${CANONICAL}`);
+  assert.equal(seen.length, 1, "the staged read fetches once");
+  assert.match(sent[0]!.text, /Read the document from Google Docs/);
+  assert.match(sent[0]!.text, /revision R1/);
   assert.match(sent[0]!.text, /staged as private source [a-f0-9]{16}/);
   assert.ok(!sent[0]!.text.includes("Chapter one"), "the staged reply never contains the text");
   assert.ok(!sent[0]!.text.includes("Synthetic source document"), "the staged reply never contains the title");
   assert.ok(!sent[0]!.text.includes(DOC_ID) && !sent[0]!.text.includes("docs.google.com"), "the staged reply names no document");
-
-  // Only a queued writing job of Paul's can be bound: a running job is refused (its worker has
-  // started and could not receive the source on its first call), and so are done jobs, other
-  // kinds and jobs not started from his own chat.
-  const cases: Array<{ make: () => { id: string; kind: string }; want: RegExp }> = [
-    { make: () => store.createJob("engineer", "A code change.", PAUL, "product", PAUL), want: /cannot be given a document to read: only writing jobs/ },
-    { make: () => store.updateJob(store.createJob("write", "Running already.", PAUL, "product", PAUL).id, { status: "running" }), want: /has already started, so the document cannot be bound/ },
-    { make: () => store.updateJob(store.createJob("write", "Done already.", PAUL, "product", PAUL).id, { status: "done" }), want: /is done, so the document cannot be bound/ },
-  ];
-  for (const c of cases) {
-    const j = c.make();
-    sent.length = 0;
-    await orch.handle(PAUL, `read doc ${DOC_ID} for job ${j.id}`);
-    assert.match(sent[0]!.text, c.want);
-    assert.notEqual(store.getJob(j.id)!.docSnapshot, true, "the job is never marked");
-  }
-  sent.length = 0;
-  await orch.handle(PAUL, `read doc ${DOC_ID} for job deadbe`);
-  assert.match(sent[0]!.text, /No job deadbe to bind/);
-  const bridge = store.createJob("write", "A bridge commission.", "tg:777", "product", "tg:777", { origin: "instinct" });
-  sent.length = 0;
-  await orch.handle(PAUL, `read doc ${DOC_ID} for job ${bridge.id}`);
-  assert.match(sent[0]!.text, /Only a job started from your own chat/);
-  assert.equal(store.getJob(bridge.id)!.docSnapshot, undefined, "a bridge job is never bound");
+  assert.ok(!/for job/.test(sent[0]!.text), "the staged reply no longer offers the removed direct binding");
+  assert.equal(snapshots(), 1, "one staged snapshot");
 
   // An unlisted sender gets no reply at all: no read, no snapshot, nothing.
-  const before = filesIn(path.join(dataDir, "doc-snapshots")).filter((n) => n.endsWith(".txt")).length;
+  const before = snapshots();
   sent.length = 0;
   seen.length = 0;
-  await orch.handle("tg:11111111", `read doc ${DOC_ID} for job ${job.id}`);
+  await orch.handle("tg:11111111", `read doc ${DOC_ID}`);
   assert.equal(sent.length, 0, "an unlisted sender is not answered");
   assert.equal(seen.length, 0, "and nothing was fetched");
-  assert.equal(filesIn(path.join(dataDir, "doc-snapshots")).filter((n) => n.endsWith(".txt")).length, before, "and nothing was saved");
+  assert.equal(snapshots(), before, "and nothing was saved");
 
   // Ordinary chat about documents still reaches the chief.
   sent.length = 0;

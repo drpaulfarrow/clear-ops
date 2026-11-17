@@ -27,15 +27,20 @@
  * overwrite), under DATA_DIR/doc-snapshots, outside every git checkout and every output
  * mirror, with the source ID and URL, the retrieval time and the revision Google returned
  * (when Google's reply carries no revision, that is recorded; one is never invented). The
- * snapshot is bound to the one job Paul selected - either named directly ("for job <id>") or
- * through the private opaque handle a staged read hands him, which he passes when starting the
- * one writing job the source is for (never an ambient next-job guess: same owner, kind and 24h
- * is not selection of the intended task). The bound snapshot is injected into that job's prompt
- * alone as fenced untrusted data (src/ea.ts), after its SHA256 is verified against the
- * fingerprint recorded at read time, and the job's output is kept out of the public outputs
- * repository (src/output-folders.ts). No other job, worker or log sees the text, and the
- * OAuth tokens never leave the service. The document's title, ID, URL and text never reach a
- * chat reply or a log; they live only in the private provenance store under DATA_DIR.
+ * snapshot is bound to the one job Paul selects - only through the private opaque handle a
+ * staged read hands him, which he passes when starting the one writing job the source is for
+ * (never an ambient next-job guess: same owner, kind and 24h is not selection of the intended
+ * task). The legacy direct binding ("read doc <id> for job <id>") is gone: it checked a queued
+ * job and then awaited Google's fetch, so the target could start while the fetch was pending
+ * and run on without the source while the reply claimed a successful binding. The orchestrator
+ * refuses that suffix outright, before any fetch, snapshot or binding, so no owner command can
+ * race a job with an awaited fetch and no queued, running or completed job is ever bound from
+ * chat. The bound snapshot is injected into that job's prompt alone as fenced untrusted data
+ * (src/ea.ts), after its SHA256 is verified against the fingerprint recorded at read time, and
+ * the job's output is kept out of the public outputs repository (src/output-folders.ts). No
+ * other job, worker or log sees the text, and the OAuth tokens never leave the service. The
+ * document's title, ID, URL and text never reach a chat reply or a log; they live only in the
+ * private provenance store under DATA_DIR.
  */
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
@@ -74,7 +79,11 @@ export class DocReaderError extends Error {}
 
 /* ---------- Paul's own command and the document selector ---------- */
 
-/** Paul's whole chat message: "read doc <id or link>", optionally "for job <id>". */
+/**
+ * Paul's whole chat message: "read doc <id or link>", with an optional "for job <id>" suffix. The
+ * suffix is recognised only so the orchestrator can refuse it with guidance before anything is
+ * fetched: it never selects a document, never starts a fetch and never binds a job.
+ */
 export interface DocReadCommand {
   selector: string;
   forJob?: string;
@@ -82,7 +91,9 @@ export interface DocReadCommand {
 
 /**
  * Matches only the whole message, so ordinary chat still reaches the chief. The selector is one
- * word without spaces, so "read the document about pricing" never parses as this command.
+ * word without spaces, so "read the document about pricing" never parses as this command. The
+ * "for job <id>" suffix still parses (whole message, six hex digits) only so it can be refused
+ * with the guidance to stage the read and pass the private handle with the job's start.
  */
 export function parseDocReadCommand(text: string): DocReadCommand | undefined {
   const m = /^read (?:the |a )?(?:google )?doc(?:ument)? (\S{4,300})(?: for job ([a-f0-9]{6}))?$/i
@@ -237,10 +248,14 @@ export class DocReader {
   /**
    * Paul's own request: validate, gate, read, snapshot. Every refusal says why in one line and
    * saves nothing. The selector Paul typed, the document's title, its ID and its URL never reach a
-   * message or a log (the private provenance index under DATA_DIR keeps them). `forJob` binds the
-   * snapshot to one queued job he named; `stage` stages it for exactly one writing job he will
-   * start himself, handing him a private opaque handle that he passes with the start, so nothing
-   * is ever delivered to a job he did not name (src/doc-reader.ts checkSource/bindSource).
+   * message or a log (the private provenance index under DATA_DIR keeps them). `stage` stages the
+   * read for exactly one writing job he will start himself, handing him a private opaque handle
+   * that he passes with the start, so nothing is ever delivered to a job he did not name
+   * (src/doc-reader.ts checkSource/bindSource). The `forJob` option is an internal binding helper
+   * for this module's own tests - it marks which job a snapshot record belongs to, the shape
+   * bindSource produces - and is never reachable from an owner command: no owner command binds a
+   * job, because a command that checked a queued target and then awaited this fetch could land
+   * the source on a job that had already started.
    */
   async read(opts: { requester: string; selector: string; forJob?: string; stage?: boolean }): Promise<DocReadReceipt> {
     const parsed = parseDocSelector(opts.selector);

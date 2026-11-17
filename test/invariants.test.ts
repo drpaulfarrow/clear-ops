@@ -481,9 +481,21 @@ test("the Google Docs reader stays a narrow owner-requested read: no wider grant
   const uploadAt = orch.indexOf("if (attachments.length) return");
   assert.ok(allowAt > -1 && docAt > allowAt && chiefAt > docAt, "read doc is parsed after the allowlist check and before any model");
   assert.ok(docAt > uploadAt, "an upload caption cannot select a document");
-  assert.match(orch, /isPaulsJob\(job, isAllowed\)/, "binding is limited to a job started from Paul's own chat");
-  assert.match(orch, /job\.status !== "queued"/, "a running or finished job can never be bound: the source is bound prelaunch or not at all");
-  assert.match(orch, /DOC_SOURCE_JOB_KINDS\.includes\(job\.kind/, "only a writing job can be bound to a source");
+  // The legacy direct binding is gone entirely: the whole-message "for job <id>" suffix is refused
+  // before any fetch, snapshot, binding or job lookup, whatever state the named job is in. The old
+  // route checked a queued target and then awaited Google's fetch, so the target could start while
+  // the fetch was pending and run on without the source while the reply claimed a successful
+  // binding. No owner command binds a job; the only binding is the prelaunch handle path below.
+  const refuseAt = orch.indexOf("if (cmd.forJob)");
+  const fetchAt = orch.indexOf("this.docs!.read(");
+  assert.ok(refuseAt > -1 && fetchAt > refuseAt, "the for-job suffix is refused before the read, so no owner command can race a queued job with an awaited fetch");
+  assert.ok(!/\bforJob: /.test(orch), "no owner command passes a job to the reader's read: nothing in chat binds a snapshot to a job");
+  assert.ok(!/To bind it to a job waiting in the queue/.test(orch), "no owner-facing text still offers the removed direct binding");
+  assert.match(orch, /Nothing was read and nothing was changed/, "the refusal claims no success: nothing was fetched, saved or bound");
+  assert.ok(!orch.includes("docSnapshot"), "the orchestrator no longer marks any job with a snapshot: only the prelaunch start path does");
+  assert.match(orch, /checkSource and bindSource, prelaunch/, "the refusal points at the one binding path there is");
+  assert.match(reader, /DOC_SOURCE_JOB_KINDS\.includes\(job\.kind/, "the prelaunch handle check limits a source to writing kinds (write, cv, advisor)");
+  assert.match(reader, /r\.requester !== job\.requestedBy/, "the prelaunch handle check binds only the owner's own staged source");
   assert.match(orch, /docs consent/, "the optional Docs consent is Paul's own whole-message command");
   // The source is bound before dispatch and delivered on the worker's first call, and a job marked
   // for a source fails closed when the source is absent: it never runs source-free.

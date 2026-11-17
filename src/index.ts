@@ -237,9 +237,10 @@ export function buildApp(deps: AppDeps) {
   // model, log, output or stored session ever holds a code, and Paul's own message goes once it is used.
   const otp = new OtpRelay({ messenger: deps.messenger, ...(deps.mailbox ? { mailbox: deps.mailbox } : { mailbox: new GmailCodeReader(googleApi) }) });
   // The private Google Docs reader (src/doc-reader.ts): Paul's own "read doc <id or link>" reads one
-  // document he identified, on the same Google connection as the assistant, and binds the snapshot to
-  // one job. The reader itself carries the gates (app-level allowlist, the grant's own scopes, no
-  // redirects, bounded reads); nothing else here can read a document.
+  // document he identified, on the same Google connection as the assistant, and stages it as a
+  // private source for the one writing job he starts with its handle. The reader itself carries the
+  // gates (app-level allowlist, the grant's own scopes, no redirects, bounded reads); nothing else
+  // here can read a document.
   const docs = new DocReader({ auth: google, dataDir: config.dataDir, allow: config.googleDocs.allow, ...(deps.googleFetch ? { fetch: deps.googleFetch } : {}) });
   const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, docs, ...(deps.canary ? { canary: deps.canary } : {}) });
   const scheduler = new Scheduler(deps.store, jobs);
