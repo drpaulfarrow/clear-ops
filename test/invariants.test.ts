@@ -462,6 +462,9 @@ test("the Google Docs reader stays a narrow owner-requested read: no wider grant
   assert.match(reader, /0o700/, "the snapshot directory is owner-only");
   assert.match(reader, /flag: "wx"/, "a snapshot is created exclusively, never overwritten");
   assert.match(reader, /fence\(randomBytes\(6\)\.toString\("hex"\), "GOOGLE DOC"/, "the snapshot reaches a worker only inside the untrusted-content fence");
+  assert.match(reader, /checkSource\(handle: string/, "an explicit owner-selected handle is the only way a staged source reaches a job");
+  assert.match(reader, /\/\^\[a-f0-9\]\{16\}\$\//, "the handle is opaque: it carries no document identifier");
+  assert.match(reader, /digest\("hex"\) !== r\.sha256/, "a stored snapshot is verified against the fingerprint recorded at read time before a worker sees it");
   assert.deepEqual(DOC_SOURCE_JOB_KINDS, ["write", "cv", "advisor"], "only writing kinds may receive a source");
   // One module reads documents, one place wires it, and the snapshots live only in the data volume.
   const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
@@ -485,7 +488,9 @@ test("the Google Docs reader stays a narrow owner-requested read: no wider grant
   // The source is bound before dispatch and delivered on the worker's first call, and a job marked
   // for a source fails closed when the source is absent: it never runs source-free.
   const jobs = src("jobs.ts");
-  assert.match(jobs, /this\.docs\.bindStaged\(/, "staged snapshots are bound between creating the job and dispatching it");
+  assert.ok(!jobs.includes("bindStaged"), "there is no ambient next-job auto-consumption of a staged source: only the explicit owner-selected handle path");
+  assert.match(jobs, /checkSource\(launch\.source/, "an explicit source handle is validated before the job is created, so a refusal starts nothing");
+  assert.match(jobs, /docs\.bindSource\(launch\.source, job\.id\)/, "the one job Paul selected with the handle is bound between creating the job and dispatching it");
   assert.match(jobs, /this\.docs\.requireBound\(id\)/, "a marked job is handed its source through the fail-closed reader");
   // The service's own mark that a job's output must never reach the outputs repository.
   const { classify } = await import("../src/output-folders.js");

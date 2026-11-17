@@ -515,8 +515,9 @@ export class Orchestrator {
   /**
    * Paul's own "read doc <id or link>", optionally "for job <id>" (src/doc-reader.ts). The read, its
    * gates and its snapshot are the reader's; what belongs here is binding the snapshot to a job he
-   * named and telling him what happened in a line or two. The document's text never appears in the
-   * reply, which stays short enough for a phone.
+   * named and telling him what happened in a line or two. The document's text, title, ID and URL
+   * never appear in the reply, which stays short enough for a phone: a staged read tells him the
+   * private opaque source handle he passes when starting the one writing job it is for.
    */
   private async handleDocRead(sender: string, from: string, cmd: DocReadCommand): Promise<void> {
     let jobId: string | undefined;
@@ -542,12 +543,15 @@ export class Orchestrator {
       if (jobId) this.store.updateJob(jobId, { docSnapshot: true });
       const revision = receipt.revisionKnown ? `revision ${receipt.revisionId}` : "revision not available from Google's reply";
       const extras = `${receipt.paragraphs.toLocaleString("en-GB")} paragraphs${receipt.note ? `, ${receipt.note}` : ""}`;
+      // The reply says what was read, never which document: no title, ID or URL appears in it, only
+      // the size, the revision and, for a staged read, the private opaque handle Paul passes when
+      // starting the one writing job the source is for.
       const tail = jobId
         ? ` and bound it to job ${jobId}`
-        : ", staged for the next writing job (write, cv or advisor) you start from this chat: that worker receives it as its first step. To bind it to a job waiting in the queue instead, say read doc <id or link> for job <id>";
+        : `, staged as private source ${receipt.handle}: start the writing job you want it for (write, cv or advisor) and pass that source reference with it. It goes to that job alone, never to another, and it lapses after a day. To bind it to a job waiting in the queue instead, say read doc <id or link> for job <id>`;
       return void (await this.messenger.send(
         from,
-        `Read "${receipt.title}" from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot${tail}.`,
+        `Read the document from Google Docs (${receipt.chars.toLocaleString("en-GB")} characters, ${extras}, ${revision}). Saved a private snapshot${tail}.`,
       ));
     } catch (err) {
       return void (await this.messenger.send(from, err instanceof Error ? err.message : "The document could not be read."));
@@ -1085,8 +1089,12 @@ export class Orchestrator {
               .boolean()
               .optional()
               .describe('Engineer and create_agent only, and only when Paul himself asked for the pull request to be left for him: true means no automatic maintainer review, fix rounds or merge follows the job; Paul reviews and merges it himself. Omit for the normal behaviour (a maintainer reviews and merges automatically).'),
+            source: z
+              .string()
+              .optional()
+              .describe('Only when Paul asks for this job to work from a private source he staged with his own "read doc" command: the private source reference exactly as the read gave it to him, which the job passes on with. Never a document ID, a link or any document text in the brief or title, only that reference. Writing jobs only (write, cv, advisor); the source is handed to that one job alone, before its worker starts.'),
           },
-          async ({ kind, title: rawTitle, brief, repo: repoName, target: legacyTarget, loop, continueLoop, depth, permits, model, reviewOnly }) => {
+          async ({ kind, title: rawTitle, brief, repo: repoName, target: legacyTarget, loop, continueLoop, depth, permits, model, reviewOnly, source }) => {
             const looping = kind === "design" && (loop || continueLoop);
             const chosen = repoName ?? legacyTarget;
             const managed = repoRegistry.find(chosen ?? "product");
@@ -1122,7 +1130,7 @@ export class Orchestrator {
             // a kind that opens no pull request, is refused there and nothing is started.
             let job: Job;
             try {
-              job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(model ? { model } : {}), ...(reviewOnly ? { reviewOnly: true } : {}), ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}), ...(trigger ? { triggerMessage: trigger } : {}) });
+              job = jobs.start(kind, brief, sender, target as JobTarget, replyTo, { title, ...(model ? { model } : {}), ...(reviewOnly ? { reviewOnly: true } : {}), ...(permits?.length && (kind === "ea" || kind === "engineer" || kind === "dns" || BROWSE_KINDS.includes(kind)) ? { permits: permits.filter((p) => (kind === "ea" ? p !== "create_repo" && p !== "dns" && p !== "signup" && p !== "purchase" : kind === "dns" ? p === "dns" : kind === "engineer" ? p === "create_repo" : p === "signup" || p === "purchase")) as JobPermit[] } : {}), ...(kind === "research" && depth ? { depth } : {}), ...(trigger ? { triggerMessage: trigger } : {}) }, source ? { source } : {});
             } catch (err) {
               return { content: [{ type: "text", text: `${err instanceof Error ? err.message : String(err)} Nothing was started; call start_job again without it, or with a valid value.` }], isError: true };
             }
@@ -1413,7 +1421,8 @@ Send a file (CSV, PDF, screenshot, zip) and I save it privately for me and the w
 /delete upload <name>: delete one (or "all")
 YES <id> or NO <id>: approve or reject an action
 send <id> or cancel <id>: approve or cancel an email or invitation the assistant prepared (you see its exact text first; it expires after 24 hours)
-read doc <id or link> for job <id>: read one private Google Doc you identified, through the connected Google account, and hand its text to that job alone (never read without you asking, and never sent anywhere else)
+read doc <id or link>: read one private Google Doc you identified, through the connected Google account, and stage it as a private source; start the writing job you want it for and pass the private source reference the read gives you (it goes to that one job alone, lapses after a day, and is never sent anywhere else)
+read doc <id or link> for job <id>: instead bind it to one job still waiting in the queue
 docs consent: the one-time link that adds the optional read-only Google Docs permission to your existing Google connection (mail and calendar access is unchanged)
 /google: is Google connected; /google disconnect to revoke
 /followups: who is waiting on you, what you promised, who you are waiting on

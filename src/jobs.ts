@@ -305,7 +305,7 @@ export class JobRunner {
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly"> = {}, launch: { source?: string } = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
@@ -345,14 +345,28 @@ export class JobRunner {
       if (!PR_KINDS.includes(kind)) throw new Error(`A ${kind} job cannot be review only: only ${PR_KINDS.join(" and ")} open a pull request for Paul to review.`);
       if (extra.reviewOnly !== true) delete extra.reviewOnly;
     }
+    // Explicit owner-selected prelaunch binding of a private source (src/doc-reader.ts): the one
+    // staged snapshot behind the private handle passed with the start is bound to this job between
+    // creating it and dispatching it, so the worker receives exactly that explicitly selected
+    // source in its first prompt. There is no ambient next-job binding: without a handle nothing
+    // is ever bound. Every refusal of the handle (not one of ours, lapsed, another owner's, a
+    // kind that cannot work from a source, no reader wired) happens in checkSource, before the
+    // job is created, so a refusal starts nothing. A job marked for a source never runs
+    // source-free: a bind that could not happen fails the job closed.
+    if (launch.source !== undefined) {
+      const docs = this.docs;
+      if (!docs) throw new DocReaderError("A private source was requested, but the document reader is not available, so nothing was started.");
+      docs.checkSource(launch.source, { kind, requestedBy });
+    }
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
-    // Prelaunch binding of a staged private source (src/doc-reader.ts): the snapshots Paul staged
-    // with his own "read doc <id>" are bound to this job before it is dispatched, so the worker
-    // receives them in its first prompt, never after it has started. Only writing kinds of the
-    // same owner are eligible, and a scheduled run is never given a staged source.
-    if (this.docs && !isScheduledRun(brief)) {
-      const bound = this.docs.bindStaged({ id: job.id, kind: job.kind, requestedBy: job.requestedBy });
-      if (bound) this.store.updateJob(job.id, { docSnapshot: true });
+    if (launch.source !== undefined) {
+      const docs = this.docs!;
+      const bound = docs.bindSource(launch.source, job.id);
+      if (!bound) {
+        this.store.updateJob(job.id, { status: "failed", finishedAt: new Date().toISOString(), error: "The private source could not be bound to this job, so it was not started.", failure: "error" });
+        throw new DocReaderError("The private source could not be bound to this job, so it was not started.");
+      }
+      this.store.updateJob(job.id, { docSnapshot: true });
     }
     return this.dispatch(job);
   }
@@ -966,12 +980,15 @@ export class JobRunner {
         : "";
       const carryOn = job.savedWork ? `\n\n${savedWorkNote(job.savedWork)}` : "";
       // The private source bound to this job, if any (src/doc-reader.ts): its text is handed to
-      // this job's worker alone, fenced as untrusted data with its provenance. A job marked as
-      // carrying a bound source fails closed here if the source is absent: it never runs
-      // source-free by accident, and no path or token is ever mentioned.
+      // this job's worker alone, fenced as untrusted data with its provenance, after the snapshot
+      // is verified against the fingerprint recorded when it was read. A job marked as carrying a
+      // bound source fails closed here if the source is absent, corrupt, modified, or the reader
+      // itself is missing: it never runs source-free by accident, and no path, token or source
+      // detail is ever mentioned in the failure.
+      const marked = this.store.getJob(id)?.docSnapshot ?? job.docSnapshot;
+      if (marked && !this.docs) throw new DocReaderError(`The private source bound to job ${id} cannot be checked because the document reader is not available, so the job refuses to run without it.`);
       let docNote = "";
       if (this.docs) {
-        const marked = this.store.getJob(id)?.docSnapshot ?? job.docSnapshot;
         const block = marked ? this.docs.requireBound(id) : this.docs.snapshotBlock(id);
         if (marked && !block) throw new DocReaderError(`The private source bound to job ${id} produced no text, so the job refuses to run without it.`);
         docNote = block ? `\n\n${block}` : "";
