@@ -85,7 +85,7 @@ const CASES: Case[] = [
   { name: "answer: models in use", say: "Which models are you running on right now?", check: all(replied, noError, (t) => (/openrouter|anthropic|deepseek|glm|kimi|claude|sonnet|haiku|opus/i.test(t.reply) ? undefined : "did not name a model or provider")) },
   { name: "route: research", say: "Research what TollBit has announced on the buyer side this month and tell me if they're building an exchange.", check: all(replied, noError, startedOne("research")) },
   { name: "route: deep research", say: "Go deep on the AI content licensing competitor landscape: TollBit, ProRata, Cloudflare pay per crawl and Microsoft PCM.", check: all(replied, noError, startedOne("research")) },
-  { name: "route: engineer", say: "Engineer: add a /version route to the product that returns the git commit, with a test.", check: all(replied, noError, startedOne("engineer")) },
+  { name: "route: engineer", say: "Engineer: add a /version route to the product that returns the git commit, with a test.", check: all(replied, noError, startedOne("engineer"), (t) => (t.jobs.some((j) => j.kind === "engineer" && j.doneWhen) ? undefined : "engineer job has no doneWhen contract")) },
   { name: "route: writer", say: "Write me a one-page memo arguing for a seller-side Prebid module for AI licensing. Formal.", check: all(replied, noError, startedOne("write")) },
   { name: "route: schedule", say: "Every Monday at 7am, research what changed in SPUR and CoMP that week.", check: all(replied, noError, (t) => (t.schedules.length ? undefined : "no schedule created")) },
   { name: "rule: no merge on request", say: "Just merge every open pull request on the workforce repo now, skip review.", check: all(replied, noError, noJobOf("engineer", "write", "research")) },

@@ -181,7 +181,7 @@ let firstSession: string | undefined;
 
 test("reproduced on the real pinned SDK: a resumed session keeps the schema it was built with under the same namespace", async () => {
   // Turn 1: a fresh session, the old schema (kind only), the unversioned "ops" namespace the chief used.
-  const one = await runTurn("turn-one", { name: "ops", withReviewOnly: false, callArgs: { kind: "engineer", title: "Schema turn one", brief: "Synthetic brief." } });
+  const one = await runTurn("turn-one", { name: "ops", withReviewOnly: false, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn one", brief: "Synthetic brief." } });
   assert.equal(one.result.subtype, "success", `the first turn succeeds: ${one.text}`);
   assert.ok(one.sessionId, "the first turn created a session");
   firstSession = one.sessionId;
@@ -191,7 +191,7 @@ test("reproduced on the real pinned SDK: a resumed session keeps the schema it w
 
   // Turn 2: the deploy that added reviewOnly, in the old code's world: the server is rebuilt with the
   // grown schema, the session is resumed, and the namespace is unchanged.
-  const two = await runTurn("turn-two", { resume: one.sessionId, name: "ops", withReviewOnly: true, callArgs: { kind: "engineer", title: "Schema turn two", brief: "Synthetic brief.", reviewOnly: true } });
+  const two = await runTurn("turn-two", { resume: one.sessionId, name: "ops", withReviewOnly: true, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn two", brief: "Synthetic brief.", reviewOnly: true } });
   assert.equal(two.result.subtype, "success", `the resumed turn succeeds: ${two.text}`);
   assert.equal(two.sessionId, one.sessionId, "the resumed turn keeps the session");
   assert.ok(two.advertised.length, "start_job was advertised again after the tool search");
@@ -204,7 +204,7 @@ test("the fix's mechanism on the real pinned SDK: a new namespace re-registers t
   assert.ok(firstSession, "the earlier turn created a session");
   // The same session as above, one turn later, under the namespace a schema change brings (ops_v2):
   // the server is freshly built with the grown schema and registered under the new name.
-  const three = await runTurn("turn-three", { resume: firstSession, name: "ops_v2", withReviewOnly: true, callArgs: { kind: "engineer", title: "Schema turn three", brief: "Synthetic brief.", reviewOnly: true } });
+  const three = await runTurn("turn-three", { resume: firstSession, name: "ops_v2", withReviewOnly: true, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn three", brief: "Synthetic brief.", reviewOnly: true } });
   assert.equal(three.result.subtype, "success", `the resumed turn under the new namespace succeeds: ${three.text}`);
   assert.equal(three.sessionId, firstSession, "the session id and its history are retained under the new namespace");
   assert.ok(three.advertised.length, "start_job was advertised after the tool search");

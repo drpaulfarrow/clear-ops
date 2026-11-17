@@ -70,12 +70,12 @@ test("tool calls become plain status lines", () => {
   assert.equal(describeToolUse("mcp__ops__job_status", {}), "Checking job status…");
   assert.equal(describeToolUse("mcp__ops__job_status", { id: "39abb7" }), "Checking job 39abb7…");
   assert.equal(describeToolUse("mcp__ops__get_output", { id: "39abb7" }), "Reading job 39abb7 output…");
-  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer" }), "Starting an engineer job…");
+  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer", doneWhen: "npm test passes" }), "Starting an engineer job…");
   assert.equal(describeToolUse("mcp__ops__start_job", { kind: "research" }), "Starting a research job…");
   assert.equal(describeToolUse("mcp__ops__start_job", { kind: "design" }), "Starting a design job…");
   assert.equal(describeToolUse("mcp__ops__start_job", { kind: "design", loop: true }), "Starting the design loop…");
   assert.equal(describeToolUse("mcp__ops__start_job", { kind: "design", continueLoop: "a1b2c3" }), "Carrying on the design loop…");
-  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer", target: "self" }), "Starting an engineer job on the workforce…");
+  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer", doneWhen: "npm test passes", target: "self" }), "Starting an engineer job on the workforce…");
   assert.equal(describeToolUse("mcp__ops__start_job", { kind: "create_agent" }), "Starting an agent-creator job…");
   assert.equal(describeToolUse("WebSearch", { query: "SPUR news" }), "Searching the web: SPUR news…");
   assert.equal(describeToolUse("WebFetch", { url: "https://www.iabtechlab.com/standards" }), "Reading iabtechlab.com…");

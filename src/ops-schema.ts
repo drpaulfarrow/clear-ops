@@ -25,8 +25,8 @@ import type { Store } from "./store.js";
  * previous version serving) instead of as a silent incident.
  */
 
-/** Schema version of the chief's ops tools. 1 was the unversioned "ops" namespace (before 17 Nov 2026). */
-export const OPS_SCHEMA_VERSION = 2;
+/** Schema version of the chief's ops tools. 1 was the unversioned "ops" namespace (before 17 Nov 2026); 3 added start_job's doneWhen. */
+export const OPS_SCHEMA_VERSION = 3;
 
 /** The chief's ops MCP namespace: stable for an unchanged schema, new on every schema change. */
 export const OPS_SERVER_NAME = OPS_SCHEMA_VERSION <= 1 ? "ops" : `ops_v${OPS_SCHEMA_VERSION}`;

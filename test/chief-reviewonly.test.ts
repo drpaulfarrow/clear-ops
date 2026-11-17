@@ -125,7 +125,7 @@ test("the schema advertised to a chief session carries reviewOnly, and the promp
 test("reviewOnly dispatched over the wire reaches the stored job, the reply says it, and no maintainer follows", async () => {
   const before = store.allJobs().length;
   scripts.push(async (client, turn) => {
-    const r: any = await client.callTool(startJob({ kind: "engineer", title: "Wire held change", brief: "Synthetic brief: leave the pull request for Paul.", repo: "self", reviewOnly: true }));
+    const r: any = await client.callTool(startJob({ kind: "engineer", doneWhen: "npm test passes", title: "Wire held change", brief: "Synthetic brief: leave the pull request for Paul.", repo: "self", reviewOnly: true }));
     turn.calls.push({ isError: r.isError, text: r.content?.[0]?.text });
   });
   const turn = await chiefTurn("wire: leave the pull request for me");

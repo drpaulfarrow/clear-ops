@@ -17,7 +17,7 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner, RunResult } from "./agents.js";
 import { describeWorkerTool, JobProgress, type JobProgressOptions } from "./status.js";
 import { nextCheckAt, type Canary, type CanaryProvider } from "./auto-resume.js";
-import { BRIDGE_READ_DENY, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
+import { BRIDGE_READ_DENY, CONTRACT_HEADING, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
@@ -196,6 +196,64 @@ interface RunCap {
   isGuard: boolean;
 }
 
+/** The longest contract kept on a job. */
+export const DONE_WHEN_MAX = 1200;
+
+/** The brief with its contract as the last section; a brief that already ends with this contract is left alone. */
+export function withContract(brief: string, doneWhen: string): string {
+  const section = `${CONTRACT_HEADING}\n${doneWhen.trim()}`;
+  return brief.includes(section) ? brief : `${brief.trimEnd()}\n\n${section}`;
+}
+
+/**
+ * A fix round's brief quotes the task it is fixing. From the second round on that task is itself a fix
+ * brief, so the quote would nest (and grow) every round: take the innermost original task instead.
+ */
+export function originalTask(brief: string): string {
+  const marker = "\n\nOriginal task:\n";
+  const at = brief.indexOf(marker);
+  if (at < 0) return brief;
+  const rest = brief.slice(at + marker.length);
+  const end = rest.indexOf("\n\nMaintainer's review (job ");
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/** The words of a review that carry its substance: lower case, no numbers, hashes, links or short words. */
+function reviewWords(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/https?:\/\/\S+/g, " ")
+      .replace(/\b[0-9a-f]{7,40}\b/g, " ")
+      .split(/[^a-z_./-]+/)
+      .filter((w) => w.length >= 5),
+  );
+}
+
+/** How alike two reviews must be to count as raising the same blockers (share of words in common). */
+export const SAME_BLOCKERS = 0.7;
+
+/**
+ * Whether two reviews of the same pull request raise the same blocking issues: most of their words are
+ * shared. Deliberately blunt and deterministic. A false alarm costs one message to Paul, who can say
+ * "one more fix round"; a miss costs one more round, bounded by MAX_FIX_ROUNDS as before.
+ */
+export function sameBlockers(a: string, b: string): boolean {
+  const x = reviewWords(a);
+  const y = reviewWords(b);
+  if (x.size < 12 || y.size < 12) return false;
+  let both = 0;
+  for (const w of x) if (y.has(w)) both++;
+  return both / (x.size + y.size - both) >= SAME_BLOCKERS;
+}
+
+/** What the fix-round engineer is told about earlier rounds: the last two reviews, clipped. */
+export function deadEnds(earlier: Array<{ id: string; text: string }>): string {
+  if (!earlier.length) return "";
+  const shown = earlier.slice(-2).map((r) => `Earlier review (job ${r.id}):\n${r.text.length > 1500 ? `${r.text.slice(0, 1500)}\n[cut]` : r.text}`);
+  return `\n\nAlready tried: this pull request has been through ${earlier.length} earlier review${earlier.length === 1 ? "" : "s"}. Anything below that the latest review raises again was not fixed by the last round, so the approach taken then is a dead end: read what was done (git log on the branch) and take a different one, and say in your report what you did differently.\n\n${shown.join("\n\n")}`;
+}
+
 export class JobRunner {
   private running = new Set<string>();
   /** The workers this process is running, with their heartbeats. */
@@ -297,7 +355,7 @@ export class JobRunner {
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly" | "doneWhen"> = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
@@ -312,6 +370,7 @@ export class JobRunner {
       // so a bridge job never carries either, whatever a caller passed here.
       delete extra.model;
       delete extra.reviewOnly;
+      delete extra.doneWhen;
     } else delete extra.origin;
     if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds" || p === "send") : extra.permits;
     else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
@@ -336,6 +395,13 @@ export class JobRunner {
     if (extra.reviewOnly !== undefined) {
       if (!PR_KINDS.includes(kind)) throw new Error(`A ${kind} job cannot be review only: only ${PR_KINDS.join(" and ")} open a pull request for Paul to review.`);
       if (extra.reviewOnly !== true) delete extra.reviewOnly;
+    }
+    // The contract: only an engineer job has one, and it rides at the end of the brief, so the review
+    // and every fix round (which quote the brief) carry it with no further plumbing.
+    if (kind !== "engineer" || !extra.doneWhen?.trim()) delete extra.doneWhen;
+    else {
+      extra.doneWhen = extra.doneWhen.trim().slice(0, DONE_WHEN_MAX);
+      brief = withContract(brief, extra.doneWhen);
     }
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
     return this.dispatch(job);
@@ -1497,6 +1563,18 @@ export class JobRunner {
       };
     }
     const round = (reviewed.kind === "engineer" ? reviewed.fixRound ?? 0 : 0) + 1;
+    // Dead ends: the earlier reviews of this same pull request. If this review raises what the last one
+    // raised, the fix round between them changed nothing the reviewer could see, and another round on
+    // the same instructions is a retry, not a repair: stop and put it to Paul with what is stuck.
+    const earlier = this.earlierReviews(review, url);
+    const last = earlier[earlier.length - 1];
+    if (round > 1 && round <= MAX_FIX_ROUNDS && last && sameBlockers(last.text, text)) {
+      this.pauseLoop(reviewed.designLoop);
+      return {
+        chained: "",
+        escalation: `${url} is stuck: the last two reviews raised the same blocking issues, so fix round ${round - 1} did not move it and I have stopped rather than try the same thing again. Both reviews are saved (show job ${last.id} and show job ${review.id}). Give me a steer on the approach, reply "one more fix round on ${url}" to try again anyway, or close the pull request.`,
+      };
+    }
     if (round > MAX_FIX_ROUNDS) {
       this.pauseLoop(reviewed.designLoop);
       return {
@@ -1506,13 +1584,23 @@ export class JobRunner {
     }
     const fix = this.start(
       "engineer",
-      `Address the maintainer's review on the existing pull request ${url} (automatic fix round ${round} of ${MAX_FIX_ROUNDS}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${reviewed.brief}\n\nMaintainer's review (job ${review.id}):\n${text}`,
+      `Address the maintainer's review on the existing pull request ${url} (automatic fix round ${round} of ${MAX_FIX_ROUNDS}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${originalTask(reviewed.brief)}\n\nMaintainer's review (job ${review.id}):\n${text}${deadEnds(earlier)}`,
       reviewed.requestedBy,
       target,
       reviewed.replyTo,
       { title: fixTitle(jobTitle(reviewed), round), pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
     );
     return { chained: `Changes requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
+  }
+
+  /** The finished maintainer reviews of this pull request before this one, oldest first, with their saved reports. */
+  private earlierReviews(review: Job, url: string): Array<{ id: string; text: string }> {
+    return this.store
+      .allJobs()
+      .filter((j) => j.kind === "maintain" && j.id !== review.id && j.status === "done" && j.pr && samePr(j.pr, url) && (j.finishedAt ?? "") <= (review.finishedAt ?? new Date().toISOString()))
+      .sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""))
+      .map((j) => ({ id: j.id, text: this.store.readOutput(j.id) ?? "" }))
+      .filter((r) => r.text.trim());
   }
 
   /**

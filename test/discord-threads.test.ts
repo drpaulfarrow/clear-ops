@@ -252,8 +252,8 @@ test("a batch from one chat message: every job gets its own thread, a failure is
     [
       ["start_job", { kind: "research", brief: "What did TollBit launch?", title: "TollBit research" }],
       ["start_job", { kind: "write", brief: "Draft the pitch deck.", title: "Pitch deck" }],
-      ["start_job", { kind: "engineer", brief: "Add a docs site.", title: "Docs site" }],
-      ["start_job", { kind: "engineer", brief: "Deploy to Fly.", title: "Fly deploy" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", brief: "Add a docs site.", title: "Docs site" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", brief: "Deploy to Fly.", title: "Fly deploy" }],
     ],
     worker,
   );
