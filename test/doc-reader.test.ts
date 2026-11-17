@@ -33,7 +33,7 @@ const { Store } = await import("../src/store.js");
 const { Orchestrator } = await import("../src/orchestrator.js");
 const { JobRunner } = await import("../src/jobs.js");
 const { Scheduler } = await import("../src/scheduler.js");
-const { readTrace } = await import("../src/trace.js");
+const { readTrace, traceText } = await import("../src/trace.js");
 
 /** Synthetic document identifier for reader tests. */
 const DOC_ID = "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -675,6 +675,80 @@ test("a bound job's trace keeps names and outcomes only, and an unbound job of t
   assert.ok(freeJson.includes(`sed -n 1p ${snapshotPath}`), "the command is kept");
   assert.ok(freeJson.includes("ordinary tail output"), "the Bash tail is kept");
   assert.ok(freeJson.includes("Reading the source's first line"), "the worker's remark is kept");
+});
+
+test("a bound job's stop and failure lines stay generic outside the live run too; an unbound job of the same kind keeps its detail", async () => {
+  // The regression this guards: `recordStop` and `recordFailure` write their end line through a
+  // fresh JobTrace, not the run's own, so a job stopped or failed after a restart, or outside the
+  // live run (an orphan's cancel), used to drop the source binding and keep the stop or failure
+  // detail, which may quote the bound source. The binding is now recovered from the current store
+  // record (`docSnapshot`), so those terminal lines are shaped exactly like the run's own events.
+  const { f } = fakeFetch(() => reply({ revisionId: "R1" }));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docreader-"));
+  const docs = new DocReader({ auth: fakeAuth(), dataDir, allow: [DOC_ID], fetch: f, now: fixedDate });
+  const handle = await stage(docs);
+  const handle2 = await stage(docs);
+  const records = JSON.parse(fs.readFileSync(path.join(docs.dir, "records.json"), "utf8")) as Array<{ handle?: string; file: string }>;
+  const snapshotPath = path.join(docs.dir, records.find((r) => r.handle === handle)!.file);
+
+  const sent: Array<{ to: string; text: string }> = [];
+  const m = { send: async (to: string, text: string) => void sent.push({ to, text }) } as never;
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-docreader-store-")));
+  // A worker that quotes the bound source in its own failure (and in the SDK's end event), or hangs.
+  const runner = (async (o: { prompt: string; onTrace?: (e: never) => void }) => {
+    if (o.prompt.includes("never finishes")) await new Promise(() => {});
+    o.onTrace?.({ type: "end", outcome: `API error: could not read ${snapshotPath}`, turns: 1, isError: true } as never);
+    return { text: "", error: { kind: "api", detail: `The provider refused while reading ${snapshotPath}.` } };
+  }) as never;
+  const jobs = new JobRunner(store, m, runner, undefined, { docs, liveness: { graceMs: 30 } });
+
+  // The bound job fails while its worker quotes the source: the SDK's end event and the service's
+  // failure line both stay generic, in the saved JSONL and in what /trace replies.
+  const bound = jobs.start("advisor", "Pressure-test the pitch from the source.", PAUL, "product", PAUL, {}, { source: handle });
+  await waitFor(() => store.getJob(bound.id)!.status === "failed");
+  const boundEnds = readTrace(bound.id).filter((l) => l.ev === "end");
+  assert.deepEqual(boundEnds.map((l) => l.text), ["failed", "failed (API error)"], "the SDK's end event and the service's failure line are generic");
+  const boundRendered = traceText("Pitch · advisor", "failed", readTrace(bound.id));
+  assert.ok(!boundRendered.includes(snapshotPath) && !boundRendered.includes("Chapter one"), "/trace replies with none of the source");
+  assert.match(boundRendered, /ended: failed \(API error\)$/m);
+
+  // A bound job stopped while its worker hangs (cancel through the live stop path): generic too.
+  const hung = jobs.start("write", "A job that never finishes.", PAUL, "product", PAUL, {}, { source: handle2 });
+  await waitFor(() => store.getJob(hung.id)!.status === "running");
+  await jobs.cancel(hung.id);
+  const hungEnds = readTrace(hung.id).filter((l) => l.ev === "end");
+  assert.deepEqual(hungEnds.map((l) => l.text), ["stopped by the service (cancelled)"], "a live stop of a bound job is generic");
+  assert.ok(!JSON.stringify(hungEnds).includes("Cancelled at Paul's request"), "and holds none of the stop detail");
+
+  // A bound job marked running with no live worker in this process, as after a restart: the stop
+  // written outside any live run recovers the binding from the store record, not the closure.
+  const orphan = store.createJob("write", "Write the opening, then the worker vanished.", PAUL, "product", PAUL);
+  store.updateJob(orphan.id, { status: "running", docSnapshot: true });
+  await jobs.cancel(orphan.id);
+  const orphanEnds = readTrace(orphan.id).filter((l) => l.ev === "end");
+  assert.deepEqual(orphanEnds.map((l) => l.text), ["stopped by the service (cancelled)"], "a stop written outside the live run is generic");
+  assert.ok(!JSON.stringify(orphanEnds).includes("Cancelled at Paul's request"), "and holds none of the stop detail");
+
+  // The same kinds unbound keep the terminal detail, exactly as before: the SDK's outcome, the
+  // failure detail and the stop detail all quoting the same synthetic source, all still there.
+  const free = jobs.start("advisor", "An ordinary pitch job.", PAUL, "product", PAUL);
+  await waitFor(() => store.getJob(free.id)!.status === "failed");
+  const freeEnds = readTrace(free.id).filter((l) => l.ev === "end");
+  assert.deepEqual(
+    freeEnds.map((l) => l.text),
+    [`API error: could not read ${snapshotPath}`, `failed (API error): The provider refused while reading ${snapshotPath}.`],
+    "an unbound job keeps its terminal detail",
+  );
+  const freeOrphan = store.createJob("write", "An ordinary job marked running, then stopped.", PAUL, "product", PAUL);
+  store.updateJob(freeOrphan.id, { status: "running" });
+  await jobs.cancel(freeOrphan.id);
+  const freeOrphanEnds = readTrace(freeOrphan.id).filter((l) => l.ev === "end");
+  assert.deepEqual(
+    freeOrphanEnds.map((l) => l.text),
+    ["stopped by the service (cancelled): Cancelled at Paul's request."],
+    "an unbound job's stop keeps its detail, byte for byte as before",
+  );
+  assert.match(traceText("Opening · write", "failed", readTrace(free.id)), /ended: failed \(API error\): The provider refused/);
 });
 
 test("a job marked for a bound source fails closed when the source is absent, modified or its reader is missing: no source-free success", async () => {

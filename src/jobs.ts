@@ -1102,7 +1102,7 @@ export class JobRunner {
       // document's own words, so a clipped command, tail or remark kept here could carry the source's
       // path and quotes past the one job the source is bound to. An unbound job keeps the detailed trace.
       const trace = new JobTrace(id, job.kind, tracesDir(), docNote !== "");
-      trace.note("start", `${job.kind} on ${job.target ?? "product"}, model ${route.model}${job.resumed ? `, resumed (${job.resumed})` : ""}${job.fixRound ? `, fix round ${job.fixRound}` : ""}`);
+      trace.note(`${job.kind} on ${job.target ?? "product"}, model ${route.model}${job.resumed ? `, resumed (${job.resumed})` : ""}${job.fixRound ? `, fix round ${job.fixRound}` : ""}`);
       progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
       const shown = progress;
       // Retrieval as a harness decision (src/retrieval.ts): before a search-carrying worker composes its
@@ -1345,6 +1345,17 @@ export class JobRunner {
     return true;
   }
 
+  /**
+   * A job's trace for a line the service writes outside the run itself (a stop or a failure, from
+   * `recordStop` or `recordFailure`). Whether the job carries a bound private source is read from
+   * the current store record (`docSnapshot`), never from the closure copy the caller was handed,
+   * so a line written after a restart, or outside the live run (an orphan's cancel, a resumed
+   * job's failure), is shaped exactly like the run's own events (src/trace.ts).
+   */
+  private jobTrace(job: Job): JobTrace {
+    return new JobTrace(job.id, job.kind, tracesDir(), (this.store.getJob(job.id) ?? job).docSnapshot === true);
+  }
+
   /** Records a stopped job: its work kept, failed with the reason, its loop paused, Paul told in one sentence. */
   private async recordStop(job: Job, live: LiveRun): Promise<void> {
     const reason = live.stop;
@@ -1358,7 +1369,7 @@ export class JobRunner {
       });
     }
     const failure = { kind: reason.kind, detail: reason.detail };
-    new JobTrace(job.id, job.kind).note("end", `stopped by the service (${failureLabel(reason.kind)}): ${reason.detail}`, true);
+    this.jobTrace(job).noteEnd(true, failureLabel(reason.kind), reason.detail);
     const kept = saved ? `\n\n${savedWorkNote(saved)}` : "";
     const outputPath = this.store.writeOutput(job.id, `This job was stopped and did not finish, because ${failureReason(failure)}.\n\n${reason.detail}${kept}\n`);
     this.store.updateJob(job.id, {
@@ -1574,7 +1585,7 @@ export class JobRunner {
   private async recordFailure(job: Job, failure: RunFailure): Promise<void> {
     const finishedAt = new Date().toISOString();
     const reason = failureReason(failure);
-    new JobTrace(job.id, job.kind).note("end", `failed (${failureLabel(failure.kind)}): ${failure.detail}`, true);
+    this.jobTrace(job).noteEnd(false, failureLabel(failure.kind), failure.detail);
     const outputPath = this.store.writeOutput(job.id, `This job failed and did no work, because ${reason}.\n\nError: ${failure.detail}\n`);
     this.store.updateJob(job.id, { status: "failed", finishedAt, error: failure.detail, failure: failure.kind, outputPath, summary: `Failed (${failureLabel(failure.kind)}): ${shortText(failure.detail, 200)}` });
     // A failed round leaves its loop waiting for Paul rather than stalled for good.

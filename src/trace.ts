@@ -15,7 +15,10 @@ import type { JobKind } from "./store.js";
  * anything from a kind that works over Paul's mail, calendar, CV or DNS (PRIVATE_KINDS: tool names and
  * outcomes only), the same from every job that carries a bound private source (a staged Google Doc,
  * `src/doc-reader.ts`), whatever its kind - the source's own text reached that job's worker, so no
- * command, tail or remark that could quote it is kept to outlive the one job the source is bound to -,
+ * command, tail or remark that could quote it is kept to outlive the one job the source is bound to,
+ * nor any terminal detail: how the run ended is an outcome like any other, so for those jobs the SDK's
+ * own end event and the service's stop and failure lines keep a generic outcome with its kind only,
+ * never the SDK's result or errors or the stop or failure detail -,
  * the input or output of any service tool (`mcp__...`: names and outcomes only, because
  * those carry mail, pages, logins and search results), a one-time code, a password or a card (those never
  * reach a model, so they cannot reach here), and every token `redact` knows.
@@ -124,7 +127,12 @@ export function shapeTrace(
     const text = clip(redact(e.text), TRACE_SAY_MAX);
     return text ? { t, ev: "say", text, ...sub } : undefined;
   }
-  return { t, ev: "end", text: clip(redact(e.outcome), TRACE_OUTPUT_MAX), ...(e.isError ? { error: true } : {}), ...(e.turns !== undefined ? { turns: e.turns } : {}) };
+  // The end of the run is an outcome, so it is kept for every job - for a private or bound one in the
+  // generic only: the SDK's own result or errors (an API error's text, why a run stopped mid-flight)
+  // may quote the source that job's worker was handed, or private data, and no trace line may carry
+  // those past the run they belong to.
+  const outcome = priv ? (e.isError ? "failed" : "finished") : clip(redact(e.outcome), TRACE_OUTPUT_MAX);
+  return { t, ev: "end", text: outcome, ...(e.isError ? { error: true } : {}), ...(e.turns !== undefined ? { turns: e.turns } : {}) };
 }
 
 /** Appends a job's trace. Every failure here is swallowed: a trace must never break or slow a job. */
@@ -152,9 +160,31 @@ export class JobTrace {
     }
   }
 
-  /** A line the service itself writes: the run starting (with what it is), or a note such as a retry. */
-  note(ev: "start" | "end", text: string, error = false): void {
-    this.write({ t: new Date().toISOString(), ev, text: clip(redact(text), TRACE_OUTPUT_MAX), ...(error ? { error: true } : {}) });
+  /** Names and outcomes only: a private kind (Paul's mail, calendar, CV and zones), or any job carrying a bound private source. */
+  private get priv(): boolean {
+    return PRIVATE_KINDS.includes(this.kind) || this.sourceBound;
+  }
+
+  /**
+   * A line the service itself writes: the run starting, with what it is. Only names (kind,
+   * repository, model, resume and fix round) ever come through here, so it is kept alike for every
+   * job; a start line never carries source or private content.
+   */
+  note(text: string): void {
+    this.write({ t: new Date().toISOString(), ev: "start", text: clip(redact(text), TRACE_OUTPUT_MAX) });
+  }
+
+  /**
+   * How the service itself ended the run: stopped, or failed. Every job keeps the outcome and its
+   * kind; the detail (a stop reason, a thrown or API error) is kept only for a job that is neither
+   * private nor bound to a source, because it may quote the source that worker was handed, or
+   * private data, and no trace line may carry those past the run they belong to.
+   */
+  noteEnd(stopped: boolean, label: string, detail: string): void {
+    const head = stopped ? "stopped by the service" : "failed";
+    const kind = label ? ` (${label})` : "";
+    const text = this.priv ? `${head}${kind}` : `${head}${kind}: ${detail}`;
+    this.write({ t: new Date().toISOString(), ev: "end", text: clip(redact(text), TRACE_OUTPUT_MAX), error: true });
   }
 
   event(e: RawTraceEvent): void {
