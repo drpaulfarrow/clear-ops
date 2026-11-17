@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { guardOpsSchema } from "../src/ops-schema.js";
+import { guardOpsSchema, OPS_SCHEMA_VERSION, OPS_SERVER_NAME } from "../src/ops-schema.js";
 import { Store } from "../src/store.js";
 
 /**
@@ -112,8 +112,8 @@ const cliEnv = () => ({
 /** Every call the synthetic start_job tool actually received, through the real CLI's dispatch. */
 const dispatched: Array<{ server: string; args: Record<string, unknown> }> = [];
 
-/** The synthetic ops server: `kind` only at the old schema, `reviewOnly` added at the grown one. */
-const opsServer = (name: string, withReviewOnly: boolean) =>
+/** The synthetic ops server: `kind` only at the old schema, `reviewOnly` added at the grown one, and `doneWhen` with `source` at the merged current one. */
+const opsServer = (name: string, withReviewOnly: boolean, withCurrent = false) =>
   createSdkMcpServer({
     name,
     version: "1.0.0",
@@ -121,7 +121,9 @@ const opsServer = (name: string, withReviewOnly: boolean) =>
       tool(
         "start_job",
         "Start a job.",
-        withReviewOnly
+        withCurrent
+          ? { kind: z.enum(["engineer", "research"]), title: z.string(), brief: z.string(), reviewOnly: z.boolean().optional().describe("Leave the pull request for Paul."), doneWhen: z.string().optional().describe("The finish line the engineer works to."), source: z.string().optional().describe("The private source reference this one job works from.") }
+          : withReviewOnly
           ? { kind: z.enum(["engineer", "research"]), title: z.string(), brief: z.string(), reviewOnly: z.boolean().optional().describe("Leave the pull request for Paul.") }
           : { kind: z.enum(["engineer", "research"]), title: z.string(), brief: z.string() },
         async (args) => {
@@ -133,7 +135,7 @@ const opsServer = (name: string, withReviewOnly: boolean) =>
   });
 
 /** One real SDK turn: the scripted model searches for the tool, calls it, then wraps up. */
-const runTurn = async (label: string, opts: { resume?: string; name: string; withReviewOnly: boolean; callArgs: Record<string, unknown> }) => {
+const runTurn = async (label: string, opts: { resume?: string; name: string; withReviewOnly: boolean; withCurrent?: boolean; callArgs: Record<string, unknown> }) => {
   const fullName = `mcp__${opts.name}__start_job`;
   scripts.length = 0;
   scripts.push(
@@ -155,7 +157,7 @@ const runTurn = async (label: string, opts: { resume?: string; name: string; wit
       cwd: workDir,
       permissionMode: "dontAsk",
       allowedTools: [`mcp__${opts.name}__*`],
-      mcpServers: { [opts.name]: opsServer(opts.name, opts.withReviewOnly) },
+      mcpServers: { [opts.name]: opsServer(opts.name, opts.withReviewOnly, opts.withCurrent) },
       maxTurns: 8,
       env: cliEnv(),
     },
@@ -181,7 +183,7 @@ let firstSession: string | undefined;
 
 test("reproduced on the real pinned SDK: a resumed session keeps the schema it was built with under the same namespace", async () => {
   // Turn 1: a fresh session, the old schema (kind only), the unversioned "ops" namespace the chief used.
-  const one = await runTurn("turn-one", { name: "ops", withReviewOnly: false, callArgs: { kind: "engineer", title: "Schema turn one", brief: "Synthetic brief." } });
+  const one = await runTurn("turn-one", { name: "ops", withReviewOnly: false, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn one", brief: "Synthetic brief." } });
   assert.equal(one.result.subtype, "success", `the first turn succeeds: ${one.text}`);
   assert.ok(one.sessionId, "the first turn created a session");
   firstSession = one.sessionId;
@@ -191,7 +193,7 @@ test("reproduced on the real pinned SDK: a resumed session keeps the schema it w
 
   // Turn 2: the deploy that added reviewOnly, in the old code's world: the server is rebuilt with the
   // grown schema, the session is resumed, and the namespace is unchanged.
-  const two = await runTurn("turn-two", { resume: one.sessionId, name: "ops", withReviewOnly: true, callArgs: { kind: "engineer", title: "Schema turn two", brief: "Synthetic brief.", reviewOnly: true } });
+  const two = await runTurn("turn-two", { resume: one.sessionId, name: "ops", withReviewOnly: true, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn two", brief: "Synthetic brief.", reviewOnly: true } });
   assert.equal(two.result.subtype, "success", `the resumed turn succeeds: ${two.text}`);
   assert.equal(two.sessionId, one.sessionId, "the resumed turn keeps the session");
   assert.ok(two.advertised.length, "start_job was advertised again after the tool search");
@@ -204,7 +206,7 @@ test("the fix's mechanism on the real pinned SDK: a new namespace re-registers t
   assert.ok(firstSession, "the earlier turn created a session");
   // The same session as above, one turn later, under the namespace a schema change brings (ops_v2):
   // the server is freshly built with the grown schema and registered under the new name.
-  const three = await runTurn("turn-three", { resume: firstSession, name: "ops_v2", withReviewOnly: true, callArgs: { kind: "engineer", title: "Schema turn three", brief: "Synthetic brief.", reviewOnly: true } });
+  const three = await runTurn("turn-three", { resume: firstSession, name: "ops_v2", withReviewOnly: true, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn three", brief: "Synthetic brief.", reviewOnly: true } });
   assert.equal(three.result.subtype, "success", `the resumed turn under the new namespace succeeds: ${three.text}`);
   assert.equal(three.sessionId, firstSession, "the session id and its history are retained under the new namespace");
   assert.ok(three.advertised.length, "start_job was advertised after the tool search");
@@ -222,6 +224,30 @@ test("the fix's mechanism on the real pinned SDK: a new namespace re-registers t
   assert.equal(call.server, "ops_v2", "the call went to the server under the new namespace");
   assert.equal(call.args.reviewOnly, true, "reviewOnly reached the tool through the real CLI's dispatch");
   assert.ok(three.toolResults.some((t) => t.includes("Schema turn three (reviewOnly=true)")), "the tool result confirming the flag returned to the model");
+});
+
+test("the merged current schema: a resumed session under the versioned namespace sees doneWhen and source together", async () => {
+  assert.ok(firstSession, "the earlier turn created a session");
+  // Two schema changes each shipped as version 3 on their own branch (main's 3 added start_job's
+  // private source reference; the contract branch's 3 added doneWhen). The integration reconciles
+  // them as one schema, version 4, so the versioned ops namespace stays the single source of truth.
+  assert.equal(OPS_SCHEMA_VERSION, 4, "the merged wire shape bumps the schema version past both version 3s");
+  assert.equal(OPS_SERVER_NAME, "ops_v4", "the one current namespace carries both parameters");
+  // The same session again, resumed under the current namespace with the merged schema: the model
+  // must be advertised doneWhen and source together, and the real CLI must dispatch both.
+  const four = await runTurn("turn-four", { resume: firstSession, name: OPS_SERVER_NAME, withReviewOnly: true, withCurrent: true, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn four", brief: "Synthetic brief.", reviewOnly: true, source: "synthetic-source-reference" } });
+  assert.equal(four.result.subtype, "success", `the resumed turn under the current namespace succeeds: ${four.text}`);
+  assert.equal(four.sessionId, firstSession, "the session id and its history are retained under the current namespace");
+  assert.ok(four.advertised.length, "start_job was advertised after the tool search");
+  for (const schema of four.advertised) {
+    assert.deepEqual(Object.keys(schema?.properties ?? {}), ["kind", "title", "brief", "reviewOnly", "doneWhen", "source"], "the resumed session is advertised the merged current schema, doneWhen and source together");
+    assert.deepEqual(schema?.required, ["kind", "title", "brief"], "both stay optional");
+  }
+  assert.match(four.systemNotes, new RegExp(`mcp__${OPS_SERVER_NAME}__start_job`), "the CLI's system note offers the current namespace's tool");
+  const call = dispatched.at(-1)!;
+  assert.equal(call.server, OPS_SERVER_NAME, "the call went to the server under the current namespace");
+  assert.equal(call.args.doneWhen, "npm test passes", "doneWhen reached the tool through the real CLI's dispatch");
+  assert.equal(call.args.source, "synthetic-source-reference", "the private source reference reached the tool through the real CLI's dispatch");
 });
 
 test("the guard pins the advertised shape per namespace and fails closed on a schema change without a version bump", async () => {

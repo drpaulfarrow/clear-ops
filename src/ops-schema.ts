@@ -25,8 +25,8 @@ import type { Store } from "./store.js";
  * previous version serving) instead of as a silent incident.
  */
 
-/** Schema version of the chief's ops tools. 1 was the unversioned "ops" namespace (before 17 Nov 2026); 2 added the model pin and reviewOnly; 3 added start_job's private source reference (the handle a staged "read doc" hands Paul). */
-export const OPS_SCHEMA_VERSION = 3;
+/** Schema version of the chief's ops tools. 1 was the unversioned "ops" namespace (before 17 Nov 2026); 2 added the model pin and reviewOnly; 3 added start_job's private source reference (the handle a staged "read doc" hands Paul); 4 added start_job's doneWhen (the engineer's finish-line contract). Two changes each called themselves 3 while on separate branches (the private source reference and doneWhen), so the merged wire shape, which carries both, is 4. */
+export const OPS_SCHEMA_VERSION = 4;
 
 /** The chief's ops MCP namespace: stable for an unchanged schema, new on every schema change. */
 export const OPS_SERVER_NAME = OPS_SCHEMA_VERSION <= 1 ? "ops" : `ops_v${OPS_SCHEMA_VERSION}`;

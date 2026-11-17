@@ -62,7 +62,7 @@ const fakeRunner: AgentRunner = async (o) => {
     if (o.prompt.startsWith("review only:")) {
       const server = (ops as any).instance;
       const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
-      const r = await handler({ kind: "engineer", title: "Held change", brief: o.prompt.slice(12).trim(), target: "self", reviewOnly: true }, {});
+      const r = await handler({ kind: "engineer", doneWhen: "npm test passes", title: "Held change", brief: o.prompt.slice(12).trim(), target: "self", reviewOnly: true }, {});
       return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
     }
     if (o.prompt.startsWith("bad model:")) {

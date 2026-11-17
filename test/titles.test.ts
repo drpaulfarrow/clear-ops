@@ -273,8 +273,8 @@ test("the chief is told to pick a short, specific title for every job and schedu
 });
 
 test("the status line while the chief starts a job names it by its title", () => {
-  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer", title: "Fly deploy" }), "Starting an engineer job: Fly deploy…");
-  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer", target: "self", title: "Job titles" }), "Starting an engineer job on the workforce: Job titles…");
+  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Fly deploy" }), "Starting an engineer job: Fly deploy…");
+  assert.equal(describeToolUse("mcp__ops__start_job", { kind: "engineer", doneWhen: "npm test passes", target: "self", title: "Job titles" }), "Starting an engineer job on the workforce: Job titles…");
   assert.equal(describeToolUse("mcp__ops__start_job", { kind: "design", loop: true, title: "Customer-ready site" }), "Starting the design loop: Customer-ready site…");
   assert.equal(describeToolUse("mcp__ops__start_job", { kind: "research", title: "far too many words for a title here" }), "Starting a research job…", "an invalid title is left out");
 });

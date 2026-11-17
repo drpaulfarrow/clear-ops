@@ -315,7 +315,7 @@ test("the chief's start_job says a job was queued and behind which job; job_stat
     systemPrompt = o.systemPrompt;
     const tools = ops.instance?._registeredTools;
     const call = (name: string, args: unknown) => (tools[name].callback ?? tools[name].handler)(args, {});
-    const r1 = await call("start_job", { kind: "engineer", title: "Workforce first", brief: "First", target: "self" });
+    const r1 = await call("start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Workforce first", brief: "First", target: "self" });
     const r2 = await call("start_job", { kind: "create_agent", title: "Outreach agent", brief: "Second", target: "product" });
     const list = await call("job_status", {});
     replies.push(r1.content[0].text, r2.content[0].text, list.content[0].text);
@@ -324,7 +324,7 @@ test("the chief's start_job says a job was queued and behind which job; job_stat
   const jobs = new JobRunner(store, messenger, runner);
   const orch = new Orchestrator(store, messenger, jobs, new Scheduler(store, jobs), runner);
   await orch.handle(FOUNDER, "two self changes please");
-  const first = store.allJobs().find((j) => j.brief === "First")!;
+  const first = store.allJobs().find((j) => j.brief.startsWith("First"))!;
   assert.equal(replies[0], `Started: Workforce first · engineer, workforce · ${first.id}.`);
   assert.match(replies[1], new RegExp(`^Queued: Outreach agent · create_agent · \\w+, queued behind Workforce first \\(${first.id}\\), the workforce repository.*starts automatically`));
   assert.match(replies[2], new RegExp(`^Outreach agent · create_agent · \\w+ · queued behind Workforce first \\(${first.id}\\), #1 on self$`, "m"));

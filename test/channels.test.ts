@@ -93,7 +93,7 @@ test("a job started from a Discord channel gets its own thread, and the maintain
     const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (ops) {
       const handler = ops.instance?._registeredTools?.start_job?.callback ?? ops.instance?._registeredTools?.start_job?.handler;
-      const r = await handler({ kind: "engineer", title: "Offers endpoint", brief: "Build the /offers endpoint", target: "product" }, {});
+      const r = await handler({ kind: "engineer", doneWhen: "npm test passes", title: "Offers endpoint", brief: "Build the /offers endpoint", target: "product" }, {});
       return { text: `Delegated. ${r.content[0].text}`, sessionId: "s-thread" };
     }
     return { text: "done", costUsd: 0.01 };
