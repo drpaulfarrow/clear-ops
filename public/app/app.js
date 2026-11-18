@@ -678,6 +678,15 @@ function chatItems() {
     }
   }
   if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
+  // Whatever is waiting for his decision sits at the foot of the conversation, with the same buttons as
+  // on the board, wherever it was first put to him.
+  const waiting = state.board?.waiting ?? [];
+  if (waiting.length) {
+    out.push(h("div", { class: "chat-day wait" }, waiting.length === 1 ? "Waiting on you" : `${waiting.length} things waiting on you`));
+    for (const item of waiting) out.push(h("div", { class: "chat-card" }, waitingCard(item, now)));
+  }
+  // A decision that went through is said by the service in the conversation itself; one that did not is said here.
+  if (state.notice?.bad) out.push(h("div", { class: "chat-card" }, noticeBar()));
   const live = chat.messages.find((m) => m.live);
   // His message is in and nothing has come back yet: say so, whether or not the service has signalled it.
   const unanswered = chat.messages.filter((m) => !m.live).at(-1)?.from === "paul";
