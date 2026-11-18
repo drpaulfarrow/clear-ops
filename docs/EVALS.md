@@ -88,7 +88,10 @@ may be. No model judges another model's answer, so the same answer always scores
 Results land in `<DATA_DIR>/eval/<time>-<label>.json`, owner-only, outside every checkout. Each run
 records the label, the set version, the pass rate, per-task pass or fail with the names of the checks
 that failed, tokens, cache hit rate, wall time and the internal `estimateUsd` for the run. No answer
-text is written down anywhere.
+text is written down anywhere. A run that fails a task, or skips one because its budget ran out, exits
+non-zero: the exit code says what the score says, so a failing run cannot pass a pipeline (the
+recorded fixture's own trap answer, which invents a per-share price, fails the `not-found`
+share-price task on purpose, so a recorded run scores 29 of 30 and exits 1).
 
 ## 4. What a good result looks like
 
