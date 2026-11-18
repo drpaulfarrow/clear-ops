@@ -47,7 +47,9 @@ import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
-import { appBoard, appHistory, appJob, type AppSource } from "./app-data.js";
+import { appBoard, appChat, appHistory, appJob, type AppSource } from "./app-data.js";
+import { routeWeb, webChat as serviceWebChat, webRefusal, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
+import { parseCodeCommand } from "./otp.js";
 import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
 import { defaultCanary, type Canary } from "./auto-resume.js";
@@ -89,6 +91,8 @@ export interface AppDeps {
   /** The board's heartbeat log. Built from the data directory by default; a test injects one. */
   /** The web app's GitHub sign-in (src/app-auth.ts). Tests inject one with a fake GitHub. */
   appAuth?: AppAuth;
+  /** The web app's chat transcript (src/web-chat.ts). Tests inject one of their own. */
+  webChat?: WebChat;
   uptime?: UptimeLog;
   /** The board's dependency checks. Built from config by default; a test injects fakes. */
   probes?: HealthProbes;
@@ -156,7 +160,11 @@ function purchasePage(a: PurchaseAction, token: string, screenshot?: string): st
 /** The Discord gateway, once main() has started it, for the bridge's read-only guild look. */
 const discordRef: { current?: DiscordListener } = {};
 
-export function buildApp(deps: AppDeps) {
+export function buildApp(given: AppDeps) {
+  // The web app's chat is a channel of its own: anything addressed to it lands in its transcript, and
+  // every other address goes to the messenger exactly as it was given (src/web-chat.ts).
+  const chat = given.webChat ?? serviceWebChat;
+  const deps: AppDeps = { ...given, messenger: routeWeb(given.messenger, chat) };
   // Paul's login vault and the card vault: the service's own singletons, unless a test injects ones with
   // a pinned clock, which is how the one-time links' expiry is exercised through the pages themselves.
   const loginVault = deps.vault ?? vault;
@@ -764,6 +772,32 @@ export function buildApp(deps: AppDeps) {
   app.get(`${APP_PATH}/api/history`, (req, res) => {
     appHeaders(res);
     res.json(appHistory(appSource(), typeof req.query.before === "string" ? req.query.before : undefined));
+  });
+  app.get(`${APP_PATH}/api/chat`, (_req, res) => {
+    appHeaders(res);
+    res.json(appChat(appSource(), chat));
+  });
+  /**
+   * The one route under /app that does anything: Paul's message to the chief. It is behind the gate
+   * above like everything else, and three more things hold. It must be this site's own script asking
+   * (a JSON body, and where the browser says where the request came from, from here), so another site
+   * cannot post as him even with his cookie. An approval word is refused before it is kept, and a
+   * one-time code is never written down at all. And the message goes to the orchestrator as the app's
+   * own sender, which no allowlist holds, so every approval gate refuses it for itself as well.
+   */
+  app.post(`${APP_PATH}/api/chat`, (req, res) => {
+    appHeaders(res);
+    const origin = req.headers.origin;
+    const site = req.headers["sec-fetch-site"];
+    if (!req.is("application/json") || (origin !== undefined && origin !== new URL(config.publicUrl).origin) || (site !== undefined && site !== "same-origin")) return void res.status(403).json({ error: "refused" });
+    const text = typeof (req.body as { text?: unknown } | undefined)?.text === "string" ? (req.body as { text: string }).text.trim() : "";
+    if (!text) return void res.status(400).json({ error: "empty" });
+    if (text.length > WEB_TEXT_MAX) return void res.status(413).json({ error: "too long" });
+    const refused = webRefusal(text);
+    chat.inbound(parseCodeCommand(text) ? WEB_CODE_PLACEHOLDER : text);
+    if (refused) void chat.send(WEB_CONVERSATION, refused);
+    else void orchestrator.handle(WEB_SENDER, text, { replyTo: WEB_CONVERSATION, web: true });
+    res.status(202).json({ ok: true });
   });
   app.get(`${APP_PATH}/api/jobs/:id`, (req, res) => {
     appHeaders(res);

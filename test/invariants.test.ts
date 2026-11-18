@@ -1154,14 +1154,33 @@ test("a document through the Instinct bridge is a private upload, validated befo
   assert.ok(bridgeAt > -1 && jsonAt > -1 && bridgeAt < jsonAt, "the bearer token is checked before any document body is parsed");
 });
 
-test("the web app is behind GitHub sign-in for one account, reads only, and its client secret never reaches a worker", () => {
+test("the web app is behind GitHub sign-in for one account, changes nothing but the conversation, and its client secret never reaches a worker", () => {
   const index = src("index.ts");
   const routes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
   // One gate over everything under /app, with a short open list that holds no data.
   assert.match(routes, /const APP_OPEN = \[APP_SIGN_IN_PATH, `\$\{APP_PATH\}\/auth`, APP_ASSETS_PATH\];/);
   assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
-  // Nothing under /app changes anything: the only route that is not a GET ends the session.
-  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH"]);
+  // Two routes under /app are not a GET: the one that ends the session, and Paul's own message to the
+  // chief (slice 2). Nothing under /app approves, starts, stops or edits anything directly.
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`"]);
+  // That message is taken from this site's own script only, is refused before it is kept when it is an
+  // approval word, is never kept when it is a one-time code, and reaches the orchestrator as the app's
+  // own sender with the flag no channel listener sets.
+  const post = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/chat`"));
+  assert.match(post, /if \(!req\.is\("application\/json"\) \|\| \(origin !== undefined && origin !== new URL\(config\.publicUrl\)\.origin\) \|\| \(site !== undefined && site !== "same-origin"\)\) return void res\.status\(403\)/);
+  assert.match(post, /const refused = webRefusal\(text\);\s*chat\.inbound\(parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text\);\s*if \(refused\) void chat\.send\(WEB_CONVERSATION, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: WEB_CONVERSATION, web: true \}\);/);
+  assert.equal((index.match(/web: true/g) ?? []).length, 1, "the app's route is the only caller that says a message is from the app");
+  for (const listener of ["discord.ts", "telegram.ts", "whatsapp.ts", "voice-bridge.ts", "instinct-chat.ts", "instinct-bridge.ts", "device.ts"]) assert.doesNotMatch(src(listener), /\bweb: true\b|WEB_SENDER/, `${listener} cannot speak as the app`);
+  // In the orchestrator the app's sender passes only as exactly itself, in exactly its own conversation,
+  // with no files, and every approval word is refused before any command is parsed.
+  const orch = src("orchestrator.ts");
+  assert.match(orch, /const web = viaWeb && sender === WEB_SENDER && from === WEB_CONVERSATION && attachments\.length === 0;\s*if \(!web\) \{\s*if \(!isAllowed\(sender\)\) \{/);
+  const refusedAt = orch.indexOf("const refused = webRefusal(trimmed);");
+  assert.ok(refusedAt > 0);
+  for (const parser of ["parseDnsCommand(trimmed)", "parseSignupCommand(trimmed)", "parsePurchaseCommand(trimmed)", "parseCodeCommand(trimmed)", "parseActAsMeCommand(trimmed)", "parseDocReadCommand(trimmed)", "parseOutboundCommand(trimmed)", "this.handleApproval("]) assert.ok(orch.indexOf(parser) > refusedAt, `${parser} is reached only after the app's refusal`);
+  const web = src("web-chat.ts");
+  for (const parser of ["parseCodeCommand(t)", "parseDnsCommand(t)", "parseSignupCommand(t)", "parsePurchaseCommand(t)", "parseOutboundCommand(t)", "parseActAsMeCommand(t)", "parseDocReadCommand(t)"]) assert.ok(web.includes(parser), `the app refuses ${parser}`);
+  assert.doesNotMatch(src("config.ts").slice(src("config.ts").indexOf("export function isAllowed")).split("}")[0]!, /web/i, "the app's sender is on no allowlist");
   const auth = src("app-auth.ts");
   // GitHub is asked for no scope, the answer is tied to the browser, and only the login and id are kept.
   assert.doesNotMatch(auth, /\bscope[:=]/);

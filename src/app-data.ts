@@ -30,6 +30,7 @@ import { spendDisplay } from "./spend.js";
 import { jobTitle } from "./titles.js";
 import { readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
 import { realCost } from "./worker-stats.js";
+import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
 import type { Job, Store } from "./store.js";
 import type { UptimeReport } from "./uptime.js";
@@ -252,6 +253,49 @@ export function appHistory(source: AppSource, before: string | undefined, limit 
   const page = older.slice(0, Math.max(1, Math.min(limit, APP_HISTORY_PAGE)));
   const last = page[page.length - 1];
   return { jobs: page.map((j) => toAppJob(source, j)), ...(older.length > page.length && last ? { next: last.finishedAt ?? last.createdAt } : {}) };
+}
+
+export interface AppChatMessage {
+  id: string;
+  at: string;
+  from: "paul" | "clearops";
+  /** Paul's own words, shown as text. */
+  text?: string;
+  /** What the service said, rendered and escaped by src/reports.ts. */
+  html?: string;
+  /** The chief's status line while it works. Plain text. */
+  live?: true;
+}
+
+export interface AppChat {
+  generatedAt: string;
+  messages: AppChatMessage[];
+  /** The chief is working on a reply. */
+  typing: boolean;
+  /** The jobs started from this conversation, newest last, so the app can show each as a live card. */
+  jobs: AppJob[];
+}
+
+/** How many of the conversation's jobs ride along with the chat. */
+export const APP_CHAT_JOBS = 40;
+
+/** The app's conversation with the chief, and the jobs it started. */
+export function appChat(source: AppSource, chat: Pick<WebChat, "view">): AppChat {
+  const now = source.now ?? Date.now();
+  const view = chat.view();
+  const jobs = source.store
+    .allJobs()
+    .filter((j) => (j.replyTo ?? j.requestedBy) === WEB_CONVERSATION)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .slice(-APP_CHAT_JOBS);
+  return {
+    generatedAt: new Date(now).toISOString(),
+    messages: view.messages.map((m) =>
+      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}) } : { id: m.id, at: m.at, from: m.from, html: renderMarkdown(m.text) },
+    ),
+    typing: view.typing,
+    jobs: jobs.map((j) => toAppJob(source, j)),
+  };
 }
 
 const JOB_ID = /^[A-Za-z0-9_-]{1,64}$/;

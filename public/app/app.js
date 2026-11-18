@@ -1,8 +1,10 @@
-// ClearOps web app, slice 1 (docs/APP.md): the board in three views, the whole history, and one job
-// with its trace and what it cost. Read-only: every request here is a GET, and the one form is sign-out.
+// ClearOps web app (docs/APP.md). Slice 1: the board in three views, the whole history, and one job with
+// its trace and what it cost. Slice 2: chat with the chief, with the jobs it starts shown as live cards.
+// Everything it asks for is a GET except two things: the message Paul sends, and the sign-out form.
 // No framework and no build step. The page is drawn with DOM nodes, never by assembling HTML, so
-// nothing a job says can become markup. The one exception is a saved report, which the service has
-// already rendered and escaped (src/reports.ts) and which the page's policy keeps script-free.
+// nothing a job says can become markup. The one exception is text the service has already rendered
+// and escaped (src/reports.ts): a saved report, and what the service says in chat. `rendered` is the
+// only place that sets HTML, and the page's policy keeps it script-free.
 
 const API = "/app/api";
 const SIGN_IN = "/app/sign-in";
@@ -10,6 +12,10 @@ const BOARD_EVERY_MS = 5000;
 const JOB_LIVE_EVERY_MS = 4000;
 const JOB_IDLE_EVERY_MS = 30000;
 const DONE_SHOWN = 12;
+const DONE_SHOWN_BESIDE = 5;
+const CHAT_BUSY_EVERY_MS = 1500;
+const CHAT_QUIET_EVERY_MS = 5000;
+const TEXT_MAX = 4000;
 
 const root = document.getElementById("app");
 
@@ -38,6 +44,7 @@ const ICONS = {
   back: ["M19 12H5M11 6l-6 6 6 6"],
   out: ["M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l4-4-4-4M14 12H4"],
   link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
+  send: ["M5 12h14M13 6l6 6-6 6"],
 };
 function icon(name, size = 16, label) {
   const svg = document.createElementNS(SVG_NS, "svg");
@@ -79,6 +86,7 @@ const modelName = (id) => (id ? id.split("/").pop() : undefined);
 
 /** The agents' names. Placeholders until Paul names them; a kind without one goes by its role. */
 const NAMES = { engineer: "Fitz", maintain: "Vera", research: "Scout", design: "Pip" };
+const CHIEF = "Marlo";
 const KNOWN_KINDS = new Set(["engineer", "maintain", "research", "design", "write", "analyse", "create_agent", "ea", "ideate", "cv", "dns", "advisor", "prebid"]);
 const who = (job) => (NAMES[job.kind] ? `${NAMES[job.kind]} · ${job.kindName}` : job.kindName.charAt(0).toUpperCase() + job.kindName.slice(1));
 const avatar = (kind, size = "") => h("span", { class: `av ${KNOWN_KINDS.has(kind) ? `av-${kind}` : "av-chief"} ${size}`, "aria-hidden": "true" }, h("i"), h("i"));
@@ -93,10 +101,26 @@ function store(key, value) {
   return undefined;
 }
 
+/** Text the service has already rendered and escaped (src/reports.ts). The only place HTML is set. */
+function rendered(html, cls) {
+  const el = h("div", { class: cls });
+  el.innerHTML = html;
+  for (const a of el.querySelectorAll("a[href]")) {
+    a.setAttribute("rel", "noopener noreferrer");
+    a.setAttribute("target", "_blank");
+  }
+  return el;
+}
+
 /* ---------- State ---------- */
 
 const VIEWS = [["status", "Status"], ["timeline", "Timeline"], ["space", "By space"]];
 const state = {
+  layout: ["split", "chat", "board"].includes(store("clearops.layout")) ? store("clearops.layout") : "split",
+  chat: undefined,
+  chatRaw: "",
+  chatProblem: undefined,
+  sending: false,
   view: VIEWS.some(([v]) => v === store("clearops.view")) ? store("clearops.view") : "status",
   detail: store("clearops.trace") === "full" ? "full" : "plain",
   board: undefined,
@@ -211,16 +235,25 @@ function header(board) {
   }
   const healthy = board?.health.level === "ok";
   const health = board
-    ? h("span", { class: `pill ${healthy ? "" : "warn"}`, title: `${board.health.headline} ${board.health.live}` }, healthy ? icon("check", 14) : icon("cross", 14), healthy ? "Healthy" : "Needs a look")
+    ? h("span", { class: `pill ${healthy ? "" : "warn"}`, title: `${board.health.headline} ${board.health.live}` }, healthy ? icon("check", 14, healthy ? "Healthy" : "Needs a look") : icon("cross", 14, "Needs a look"), h("span", { class: "wide-only", "aria-hidden": "true" }, healthy ? "Healthy" : "Needs a look"))
     : null;
   return h(
     "header",
     { class: "top" },
     h("a", { class: "brand", href: "#/" }, h("span", { class: "mark", "aria-hidden": "true" }, h("i"), h("i")), "ClearOps"),
+    route().name === "board"
+      ? h(
+          "div",
+          { class: "seg", role: "group", "aria-label": "What to show" },
+          h("button", { type: "button", "aria-pressed": String(layout() === "chat"), onclick: () => setLayout("chat") }, "Chat"),
+          narrow.matches ? null : h("button", { type: "button", "aria-pressed": String(layout() === "split"), onclick: () => setLayout("split") }, "Both"),
+          h("button", { type: "button", "aria-pressed": String(layout() === "board"), onclick: () => setLayout("board") }, "Board"),
+        )
+      : null,
     h("div", { class: "grow" }),
     spend,
     health,
-    h("form", { method: "post", action: "/app/sign-out" }, h("button", { class: "btn quiet", type: "submit" }, icon("out", 16), "Sign out")),
+    h("form", { method: "post", action: "/app/sign-out" }, h("button", { class: "btn quiet", type: "submit", "aria-label": "Sign out" }, icon("out", 16), h("span", { class: "wide-only", "aria-hidden": "true" }, "Sign out"))),
   );
 }
 
@@ -449,11 +482,7 @@ function jobPage() {
 
   let output = null;
   if (detail.outputHtml !== undefined) {
-    const body = h("div", { class: "report" });
-    // Rendered and escaped by the service (src/reports.ts); the page's policy allows no script.
-    body.innerHTML = detail.outputHtml;
-    for (const a of body.querySelectorAll("a[href]")) { a.setAttribute("rel", "noopener noreferrer"); a.setAttribute("target", "_blank"); }
-    output = h("section", { class: "pane", "aria-label": "Saved output" }, h("h2", {}, "Saved output"), body);
+    output = h("section", { class: "pane", "aria-label": "Saved output" }, h("h2", {}, "Saved output"), rendered(detail.outputHtml, "report"));
   }
 
   return h(
@@ -473,14 +502,183 @@ function jobPage() {
   );
 }
 
+/* ---------- Chat ---------- */
+
+/** The board beside the chat: the same jobs, stacked, with the newest few finished. */
+function besideBoard() {
+  const board = state.board;
+  if (!board) return [h("p", { class: "muted" }, state.problem ?? "Loading the board.")];
+  const now = Date.parse(board.generatedAt);
+  const by = (status) => board.jobs.filter((j) => j.status === status);
+  const done = by("done");
+  const failed = by("failed");
+  return [
+    h("div", { class: "page-head" }, h("h2", { class: "pane-title" }, "Board"), h("button", { class: "btn", type: "button", onclick: () => setLayout("board") }, "Open the board")),
+    board.paused ? h("div", { class: "banner" }, h("b", {}, "The queues are held. "), "Send /resume once the credit or key is fixed.") : null,
+    board.spend.capReached ? h("div", { class: "banner" }, h("b", {}, "Today's cap is reached. "), "New jobs wait until tomorrow, or until you send /resume.") : null,
+    column("wait", "Waiting on me", board.waiting.map((w) => waitingCard(w, now)), "Nothing needs your approval."),
+    column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),
+    column("", "Queued", by("queued").map((j) => jobCard(j, now)), "The queue is empty."),
+    column("ok", "Done", done.slice(0, DONE_SHOWN_BESIDE).map((j) => jobCard(j, now)), "Nothing has finished in the last two days.", { hidden: Math.max(0, done.length - DONE_SHOWN_BESIDE), node: null }),
+    failed.length ? column("bad", "Failed", failed.map((j) => jobCard(j, now)), "") : null,
+  ];
+}
+
+function chatItems() {
+  const chat = state.chat;
+  if (!chat) return [h("p", { class: "muted" }, state.chatProblem ?? "Loading the conversation.")];
+  const now = Date.parse(chat.generatedAt);
+  const stream = [
+    ...chat.messages.filter((m) => !m.live).map((m) => ({ at: m.at, message: m })),
+    ...chat.jobs.map((j) => ({ at: j.createdAt, job: j })),
+  ].sort((a, b) => a.at.localeCompare(b.at));
+  const out = [];
+  let lastDay;
+  let lastFrom;
+  for (const item of stream) {
+    const day = dayKey(item.at);
+    if (day !== lastDay) {
+      const today = dayKey(new Date(now).toISOString());
+      out.push(h("div", { class: "chat-day" }, day === today ? "Today" : dayFmt.format(new Date(item.at))));
+      lastDay = day;
+      lastFrom = undefined;
+    }
+    if (item.job) {
+      out.push(h("div", { class: "chat-card" }, jobCard(item.job, now)));
+      lastFrom = "job";
+    } else if (item.message.from === "paul") {
+      out.push(h("div", { class: "mine" }, h("div", { class: "bubble" }, item.message.text)));
+      lastFrom = "paul";
+    } else {
+      const first = lastFrom !== "clearops";
+      out.push(
+        h(
+          "div",
+          { class: `theirs${first ? "" : " cont"}` },
+          first ? avatar("chief") : h("span", { class: "av-gap", "aria-hidden": "true" }),
+          h("div", { class: "theirs-body" }, first ? h("div", { class: "theirs-who" }, h("b", {}, CHIEF), h("span", { class: "muted num" }, clock(item.message.at))) : null, rendered(item.message.html ?? "", "report said")),
+        ),
+      );
+      lastFrom = "clearops";
+    }
+  }
+  if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
+  const live = chat.messages.find((m) => m.live);
+  // His message is in and nothing has come back yet: say so, whether or not the service has signalled it.
+  const unanswered = chat.messages.filter((m) => !m.live).at(-1)?.from === "paul";
+  if (live || chat.typing || unanswered) out.push(h("div", { class: "working", role: "status" }, h("span", { class: "dot live" }), h("span", {}, live ? live.text : `${CHIEF} is working on it`)));
+  if (state.chatProblem) out.push(h("div", { class: "banner" }, h("b", {}, "Not sent or not up to date. "), state.chatProblem));
+  return out;
+}
+
+const input = h("textarea", { id: "ask", rows: "1", maxlength: String(TEXT_MAX), placeholder: `Ask ${CHIEF}, or type / for a command`, autocomplete: "off" });
+const sendButton = h("button", { class: "send", type: "submit", "aria-label": "Send" }, icon("send", 18));
+const logEl = h("div", { class: "chat-log", role: "log", "aria-label": `Conversation with ${CHIEF}`, tabindex: "0" });
+const boardEl = h("aside", { class: "beside", "aria-label": "Jobs board" });
+const fullBoardEl = h("div", { class: "full-board" });
+const chips = ["What's waiting on me?", "/jobs", "/spend"].map((text) => h("button", { class: "chip", type: "button", onclick: () => void send(text) }, text));
+const chatEl = h(
+  "section",
+  { class: "chat", "aria-label": "Chat" },
+  logEl,
+  h(
+    "div",
+    { class: "composer-wrap" },
+    h("div", { class: "chips" }, chips),
+    h(
+      "form",
+      { class: "composer", onsubmit: (e) => { e.preventDefault(); void send(input.value); } },
+      h("label", { class: "sr", for: "ask" }, `Message ${CHIEF}`),
+      input,
+      sendButton,
+    ),
+  ),
+);
+const homeEl = h("div", { class: "home" }, chatEl, boardEl, fullBoardEl);
+const headerEl = h("div", {});
+const bodyEl = h("div", { class: "body" });
+const shellEl = h("div", { class: "shell" }, headerEl, bodyEl);
+
+function grow() {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(160, input.scrollHeight)}px`;
+}
+input.addEventListener("input", grow);
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    void send(input.value);
+  }
+});
+
+async function send(raw) {
+  const text = raw.trim();
+  if (!text || state.sending) return;
+  state.sending = true;
+  sendButton.disabled = true;
+  try {
+    const res = await fetch(`${API}/chat`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, credentials: "same-origin", body: JSON.stringify({ text }) });
+    if (res.status === 401) return location.assign(SIGN_IN);
+    if (!res.ok) throw new Error(res.status === 413 ? "That message is too long." : "The message was not accepted.");
+    if (raw === input.value) {
+      input.value = "";
+      grow();
+    }
+    state.chatProblem = undefined;
+    stickNext = true;
+  } catch (err) {
+    state.chatProblem = err.message === "Failed to fetch" ? "The service could not be reached." : err.message;
+    drawChat();
+  } finally {
+    state.sending = false;
+    sendButton.disabled = false;
+  }
+  void chatTick();
+}
+
+let stickNext = true;
+function drawChat() {
+  const stick = stickNext || logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120;
+  logEl.replaceChildren(...chatItems());
+  if (stick) logEl.scrollTop = logEl.scrollHeight;
+  stickNext = false;
+}
+
 /* ---------- Drawing and polling ---------- */
+
+const narrow = window.matchMedia("(max-width: 900px)");
+/** On a phone there is no room for both, so "both" shows the chat. */
+const layout = () => (narrow.matches && state.layout === "split" ? "chat" : state.layout);
+narrow.addEventListener("change", () => draw());
 
 function draw() {
   const r = route();
   document.title = r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : "ClearOps";
-  root.replaceChildren(h("div", { class: "shell" }, header(state.board), r.name === "job" ? jobPage() : boardPage()));
+  if (!shellEl.isConnected) root.replaceChildren(shellEl);
+  headerEl.replaceChildren(header(state.board));
+  if (r.name === "job") {
+    shellEl.className = "shell";
+    bodyEl.replaceChildren(jobPage());
+    return;
+  }
+  const mode = layout();
+  shellEl.className = `shell${mode === "board" ? "" : " fixed"}`;
+  homeEl.className = `home show-${mode}`;
+  if (homeEl.parentNode !== bodyEl) {
+    bodyEl.replaceChildren(homeEl);
+    stickNext = true;
+  }
+  if (mode !== "board") drawChat();
+  if (mode === "split") boardEl.replaceChildren(...besideBoard().filter(Boolean));
+  if (mode === "board") fullBoardEl.replaceChildren(boardPage());
 }
 
+function setLayout(next) {
+  state.layout = next;
+  store("clearops.layout", next);
+  stickNext = true;
+  draw();
+}
 function setView(view) {
   state.view = view;
   store("clearops.view", view);
@@ -559,6 +757,40 @@ async function refreshJob(id) {
   return false;
 }
 
+async function refreshChat() {
+  try {
+    const text = await getJson("/chat");
+    const changed = text !== state.chatRaw;
+    if (changed) {
+      state.chatRaw = text;
+      state.chat = JSON.parse(text);
+    }
+    return changed;
+  } catch (err) {
+    if (err.message === "signed out") return false;
+    if (!state.chat) state.chatProblem = "The conversation could not be loaded just now.";
+    return !state.chat;
+  }
+}
+
+/** The chat is asked more often while something is plainly happening in it. */
+function chatBusy() {
+  const chat = state.chat;
+  if (!chat) return false;
+  const last = chat.messages[chat.messages.length - 1];
+  return chat.typing || chat.messages.some((m) => m.live) || (last && last.from === "paul") || chat.jobs.some((j) => j.status === "running" || j.status === "queued");
+}
+
+let chatTimer;
+async function chatTick() {
+  clearTimeout(chatTimer);
+  if (!document.hidden) {
+    const changed = await refreshChat();
+    if (changed && route().name === "board" && layout() !== "board") drawChat();
+  }
+  chatTimer = setTimeout(chatTick, chatBusy() ? CHAT_BUSY_EVERY_MS : CHAT_QUIET_EVERY_MS);
+}
+
 let timer;
 async function tick() {
   clearTimeout(timer);
@@ -582,8 +814,11 @@ window.addEventListener("hashchange", () => {
   void tick();
 });
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) void tick();
+  if (document.hidden) return;
+  void tick();
+  void chatTick();
 });
 
 draw();
 void tick();
+void chatTick();

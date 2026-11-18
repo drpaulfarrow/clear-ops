@@ -21,11 +21,12 @@ process.env.PUBLIC_URL = "https://workforce.example";
 const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
 const { AppAuth, APP_PATH, APP_SIGN_IN_PATH, APP_AUTH_START_PATH, APP_AUTH_CALLBACK_PATH, APP_SIGN_OUT_PATH, APP_SESSION_COOKIE, APP_STATE_COOKIE, APP_SESSION_DAYS, APP_SIGN_INS_PER_MINUTE } = await import("../src/app-auth.js");
-const { appBoard, appHistory, appJob, APP_HISTORY_PAGE } = await import("../src/app-data.js");
+const { appBoard, appChat, appHistory, appJob, APP_HISTORY_PAGE } = await import("../src/app-data.js");
+const { WebChat, routeWeb, webRefusal, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_TEXT_MAX } = await import("../src/web-chat.js");
+const { isAllowed } = await import("../src/config.js");
 const { appAsset, APP_CSP } = await import("../src/app-pages.js");
 const { workerGithubEnv } = await import("../src/github-auth.js");
 const { tracesDir } = await import("../src/trace.js");
-const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner } from "../src/agents.js";
 import type { Scheduler } from "../src/scheduler.js";
 
@@ -33,8 +34,13 @@ const PAUL = "tg:99887766";
 const CLIENT_SECRET = "client-secret-that-must-never-leave";
 const GITHUB_TOKEN = "gho_tokenThatMustNeverBeKept123456";
 
-const runner: AgentRunner = async () => {
-  throw new Error("the web app must not run any worker");
+/** What the fake chief says. Unset, any run is a bug: nothing but a chat message may reach a model. */
+let chiefSays: string | undefined;
+const chiefAsked: string[] = [];
+const runner: AgentRunner = async (o) => {
+  if (chiefSays === undefined) throw new Error("the web app must not run any worker");
+  chiefAsked.push(o.prompt);
+  return { text: chiefSays, sessionId: "chief-session" };
 };
 
 /** Who the fake GitHub says is signing in, and every request it was sent. */
@@ -52,6 +58,10 @@ let now = Date.UTC(2026, 10, 18, 18, 0, 0);
 let store: InstanceType<typeof Store>;
 let auth: InstanceType<typeof AppAuth>;
 let scheduler: Scheduler;
+let chat: InstanceType<typeof WebChat>;
+let orchestrator: ReturnType<typeof buildApp>["orchestrator"];
+/** Everything sent to a channel that is not the app's own chat. */
+const elsewhere: Array<{ to: string; text: string }> = [];
 let server: import("node:http").Server;
 let base: string;
 const bodies: string[] = [];
@@ -79,17 +89,19 @@ async function signInAs(user: typeof githubUser): Promise<Response> {
 }
 const session = async () => pair(cookieNamed(await signInAs({ login: "drpaulfarrow", id: 4242 }), APP_SESSION_COOKIE));
 
-function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>) {
-  const built = buildApp({ messenger: new ConsoleMessenger(), runner, store: s, appAuth: a });
-  return new Promise<{ server: import("node:http").Server; base: string; scheduler: Scheduler }>((resolve) => {
-    const srv = built.app.listen(0, () => resolve({ server: srv, base: `http://127.0.0.1:${(srv.address() as import("node:net").AddressInfo).port}`, scheduler: built.scheduler }));
+function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
+  const messenger = { send: async (to: string, text: string) => void elsewhere.push({ to, text }) };
+  const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c });
+  return new Promise<{ server: import("node:http").Server; base: string; scheduler: Scheduler; orchestrator: typeof built.orchestrator }>((resolve) => {
+    const srv = built.app.listen(0, () => resolve({ server: srv, base: `http://127.0.0.1:${(srv.address() as import("node:net").AddressInfo).port}`, scheduler: built.scheduler, orchestrator: built.orchestrator }));
   });
 }
 
 before(async () => {
   store = new Store(process.env.DATA_DIR!);
   auth = new AppAuth({ clientId: "client-id", clientSecret: CLIENT_SECRET, login: "drpaulfarrow", publicUrl: "https://workforce.example", fetch: fakeGithub, now: () => now });
-  ({ server, base, scheduler } = await listen(auth, store));
+  chat = new WebChat({ dir: process.env.DATA_DIR!, now: () => now });
+  ({ server, base, scheduler, orchestrator } = await listen(auth, store, chat));
 });
 
 after(() => {
@@ -263,9 +275,10 @@ test("the files the app is made of are a fixed list and need no session", async 
   assert.equal(appAsset("toString"), undefined);
   const js = appAsset("app.js")!.body.toString("utf8");
   assert.doesNotMatch(js, /\beval\(|new Function\(|document\.write/);
-  assert.equal((js.match(/innerHTML/g) ?? []).length, 1, "one place sets HTML: the report the service already rendered and escaped");
+  assert.equal((js.match(/innerHTML/g) ?? []).length, 1, "one place sets HTML: text the service already rendered and escaped");
   assert.equal((js.match(/method: "post"/g) ?? []).length, 1, "the one form is sign-out");
-  assert.doesNotMatch(js, /method:\s*"(POST|PUT|PATCH|DELETE)"/, "every request the script makes is a GET");
+  assert.deepEqual(js.match(/fetch\(`\$\{API\}[^`]*`, \{ method: "[A-Z]+"/g), ['fetch(`${API}/chat`, { method: "POST"'], "the one request that is not a GET is Paul's own message");
+  assert.doesNotMatch(js, /method:\s*"(PUT|PATCH|DELETE)"/);
 });
 
 /* ---------- The data ---------- */
@@ -372,14 +385,152 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal(typeof board.health.headline, "string");
 });
 
-test("the app only reads: one POST under /app, and the data module never writes", () => {
+test("two things under /app are not a GET, sign-out and Paul's message, and the data module never writes", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const appRoutes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
-  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH"]);
+  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`"]);
   assert.match(appRoutes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some/, "one gate over everything under /app");
   const data = fs.readFileSync(new URL("../src/app-data.ts", import.meta.url), "utf8");
   assert.doesNotMatch(data, /\.(updateJob|createJob|importJob|setSetting|setCapDays|setQueueHold|writeOutput|put[A-Z]\w*|update[A-Z]\w*|create[A-Z]\w*|disableSchedule|addNote)\(/);
   assert.doesNotMatch(data, /job\.costUsd/, "the SDK's estimate is never read for display");
+});
+
+/* ---------- Chat ---------- */
+
+const postChat = (body: unknown, cookie?: string, headers: Record<string, string> = {}) =>
+  fetch(`${base}${APP_PATH}/api/chat`, { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}), ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) });
+const chatView = async (cookie: string) => JSON.parse(await text(await get(`${APP_PATH}/api/chat`, cookie))) as { messages: Array<{ from: string; text?: string; html?: string; live?: boolean }>; typing: boolean; jobs: Array<{ id: string }> };
+/** Waits for the orchestrator's queue for the app's conversation to drain. */
+const settled = async () => {
+  for (let i = 0; i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+    if (chat.view().messages.at(-1)?.from === "clearops") return;
+  }
+};
+
+test("a message is taken only from this site's own signed-in script", async () => {
+  const cookie = await session();
+  const before = chat.view().messages.length;
+  assert.equal((await postChat({ text: "hello" })).status, 401, "no session");
+  assert.equal((await postChat({ text: "hello" }, cookie, { origin: "https://elsewhere.example" })).status, 403, "another site's page");
+  assert.equal((await postChat({ text: "hello" }, cookie, { "sec-fetch-site": "cross-site" })).status, 403);
+  assert.equal((await fetch(`${base}${APP_PATH}/api/chat`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: "text=hello" })).status, 403, "a form cannot post it");
+  assert.equal((await postChat({ text: "   " }, cookie)).status, 400);
+  assert.equal((await postChat({ nope: true }, cookie)).status, 400);
+  assert.equal((await postChat({ text: "x".repeat(WEB_TEXT_MAX + 1) }, cookie)).status, 413);
+  assert.equal(chat.view().messages.length, before, "nothing refused was kept");
+  assert.equal(chiefAsked.length, 0);
+});
+
+test("Paul's message reaches the chief, and the reply comes back escaped", async () => {
+  const cookie = await session();
+  chiefSays = "Two jobs are running. <img src=x onerror=alert(1)> Nothing needs you.";
+  try {
+    const res = await postChat({ text: "What is running? <b>now</b>" }, cookie, { origin: "https://workforce.example", "sec-fetch-site": "same-origin" });
+    assert.equal(res.status, 202);
+    await settled();
+    assert.equal(chiefAsked.length, 1);
+    assert.match(chiefAsked[0]!, /What is running\?/);
+    const view = await chatView(cookie);
+    const [mine, reply] = view.messages.slice(-2);
+    assert.deepEqual([mine!.from, mine!.text, mine!.html], ["paul", "What is running? <b>now</b>", undefined], "his own words travel as text, never as markup");
+    assert.equal(reply!.from, "clearops");
+    assert.match(reply!.html!, /Two jobs are running/);
+    assert.doesNotMatch(reply!.html!, /<img/, "what the service says is escaped before the app sees it");
+    assert.equal(elsewhere.length, 0, "nothing for the app's conversation went to another channel");
+    assert.equal(store.getSession(WEB_CONVERSATION), "chief-session", "the app has its own conversation with the chief");
+  } finally {
+    chiefSays = undefined;
+  }
+});
+
+test("no approval word works from the app, and a one-time code is never written down", async () => {
+  const cookie = await session();
+  const words = ["buy abc123", "buy cancel abc123", "send abc123", "send it", "cancel abc123", "dns apply abc123", "signup apply abc123", "act as me on github.com", "yes abc123", "approve abc123", "/password", "/pair ABCD-1234", "/unpair", "docs consent"];
+  for (const word of words) {
+    assert.equal(webRefusal(word), WEB_APPROVAL_REFUSAL, word);
+    assert.equal((await postChat({ text: word }, cookie)).status, 202, word);
+    assert.match(chat.view().messages.at(-1)!.text, /Approvals are not switched on in the app yet/, word);
+  }
+  assert.equal(store.settings().actAsMe, undefined, "nothing was unlocked");
+  assert.equal(webRefusal("What is the code review status?"), undefined, "ordinary words still reach the chief");
+  assert.equal(webRefusal("/resume"), undefined);
+
+  for (const code of ["code 482913", "482913", "the code is 77 1234".replace(" 1234", "1234")]) {
+    assert.equal(webRefusal(code), WEB_CODE_REFUSAL, code);
+    assert.equal((await postChat({ text: code }, cookie)).status, 202);
+    const [mine, reply] = chat.view().messages.slice(-2);
+    assert.equal(mine!.text, WEB_CODE_PLACEHOLDER);
+    assert.equal(reply!.text, WEB_CODE_REFUSAL);
+  }
+  const saved = fs.readFileSync(path.join(process.env.DATA_DIR!, "app", "chat.json"), "utf8");
+  assert.ok(!saved.includes("482913") && !saved.includes("771234"), "no code is in the transcript");
+  assert.ok(!JSON.stringify(await chatView(cookie)).includes("482913"));
+  assert.equal(chiefAsked.length, 1, "none of it reached a model");
+});
+
+test("the app's sender is nobody anywhere else, and is refused approval words by the orchestrator too", async () => {
+  assert.equal(isAllowed(WEB_SENDER), false, "it is on no allowlist, so every approval gate refuses it for itself");
+  const before = chat.view().messages.length;
+  // Without the route's own flag, or in any other conversation, or with a file, it is an unlisted sender.
+  await orchestrator.handle(WEB_SENDER, "hello", { replyTo: WEB_CONVERSATION });
+  await orchestrator.handle(WEB_SENDER, "hello", { replyTo: "web:other", web: true });
+  await orchestrator.handle(WEB_SENDER, "hello", { web: true });
+  await orchestrator.handle("web:someone", "hello", { replyTo: WEB_CONVERSATION, web: true });
+  await orchestrator.handle(WEB_SENDER, "hello", { replyTo: WEB_CONVERSATION, web: true, attachments: [{ name: "a.txt" } as never] });
+  assert.equal(chat.view().messages.length, before, "ignored: no reply, no model");
+  assert.equal(elsewhere.length, 0);
+  // With the flag, an approval word is still refused before any command is parsed.
+  await orchestrator.handle(WEB_SENDER, "act as me on github.com", { replyTo: WEB_CONVERSATION, web: true });
+  assert.equal(chat.view().messages.at(-1)!.text, WEB_APPROVAL_REFUSAL);
+  assert.equal(store.settings().actAsMe, undefined);
+  assert.equal(chiefAsked.length, 1);
+});
+
+test("the transcript is owner-only, capped, and never keeps the status line", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-chat-"));
+  const c = new WebChat({ dir });
+  c.inbound("first");
+  const handle = await c.sendEditable(WEB_CONVERSATION, "Searching the web");
+  assert.equal(await c.typing(WEB_CONVERSATION), true);
+  assert.deepEqual(c.view().messages.map((m) => [m.from, m.text, m.live ?? false]), [["paul", "first", false], ["clearops", "Searching the web", true]]);
+  await c.edit(WEB_CONVERSATION, handle!, "Reading a page");
+  assert.equal(c.view().messages[1]!.text, "Reading a page");
+  await c.send(WEB_CONVERSATION, "A reply with a token ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+  await c.remove(WEB_CONVERSATION, handle!);
+  assert.equal(c.view().typing, false, "a reply ends the typing signal");
+  const file = path.join(dir, "app", "chat.json");
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  const saved = fs.readFileSync(file, "utf8");
+  assert.ok(!saved.includes("Searching the web") && !saved.includes("Reading a page"), "the status line is of the moment");
+  assert.ok(!saved.includes("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), "a token is redacted before it is kept");
+  for (let i = 0; i < WEB_KEEP + 20; i++) await c.send(WEB_CONVERSATION, `m${i}`);
+  const again = new WebChat({ dir });
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).messages.length, WEB_KEEP);
+  assert.equal(again.view().messages.at(-1)!.text, `m${WEB_KEEP + 19}`, "it survives a restart");
+});
+
+test("only web addresses are delivered to the app; every other channel is untouched", async () => {
+  const sent: string[] = [];
+  const plain = { send: async (to: string, t: string) => void sent.push(`${to}|${t}`) };
+  const c = new WebChat();
+  const routed = routeWeb(plain, c);
+  await routed.send("tg:1", "to telegram");
+  await routed.send(WEB_CONVERSATION, "to the app");
+  assert.deepEqual(sent, ["tg:1|to telegram"]);
+  assert.deepEqual(c.view().messages.map((m) => m.text), ["to the app"]);
+  assert.equal((routed as { sendEditable?: unknown }).sendEditable, undefined, "a method the channel lacks stays absent");
+});
+
+test("the chat carries the jobs started from it, so each can be shown as a card", () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-chatjobs-")));
+  const mine = s.createJob("research", "Look into it.", WEB_SENDER, "product", WEB_CONVERSATION, { title: "From the app" } as never);
+  s.createJob("research", "Look into it.", PAUL, "product", PAUL, { title: "From Telegram" } as never);
+  const c = new WebChat();
+  c.inbound("Look into it");
+  const view = appChat({ store: s, queue: quietQueue, now }, c);
+  assert.deepEqual(view.jobs.map((j) => j.id), [mine.id]);
+  assert.deepEqual(view.messages.map((m) => [m.from, m.text]), [["paul", "Look into it"]]);
 });
 
 test("the OAuth client never reaches a worker, a page or a cookie", async () => {
