@@ -23,7 +23,9 @@ import type { JobKind } from "./store.js";
  * those carry mail, pages, logins and search results), a one-time code, a password or a card (those never
  * reach a model, so they cannot reach here), and every token `redact` knows.
  *
- * It is read by `/trace <id>` (no model call) and nothing else: no page, no model, no bridge.
+ * It is read by `/trace <id>` (no model call) and, since 18 Nov 2026 on Paul's instruction, by the
+ * signed-in web app's job page (src/app-data.ts, as stored, behind src/app-auth.ts). Nothing else
+ * reads it: no other page, no model, no bridge.
  */
 
 /** What the runner reports for a trace (src/agents.ts `RunOptions.onTrace`), before shaping. */
