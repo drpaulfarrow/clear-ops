@@ -58,6 +58,17 @@ Only the GitHub account `drpaulfarrow` gets in. To allow a different account ins
 - GitHub is asked who someone is at most ten times a minute.
 - The client secret is a service secret: stripped from every worker's environment (`WORKER_STRIPPED` in `src/github-auth.ts`).
 
+## Finished is not the same as done (`outcomeOf` in `src/app-data.ts`)
+
+Paul's point on 18 Nov 2026: a run that ended is not a wish that was met, and the board showed them alike. A job's status in the store only says its worker's run ended without an error. The app now also says what came of it, from evidence the service itself holds and nothing else:
+
+- **Confirmed** (the only tick): a purchase the service placed, an email it sent, a DNS change it applied, an account it created, or a review whose own verdict line says the pull request was merged.
+- **Needs you**: something it prepared is waiting for your approval, or its review left the pull request for you.
+- **Not done**: it was allowed to buy, send, change or sign up and the gate's record shows it did not (with why: expired, declined, never put to you), its review asked for changes, or the run failed.
+- **Finished**: the run ended and the service holds nothing either way. Research, writing and analysis land here, because a worker saying it went well is not evidence.
+
+A card also carries the first of what the worker told Paul, except for the kinds that work over his mail, calendar, CV and zones. The board's status view is piled the same way: Confirmed done, Finished not confirmed, Did not get there. Nothing here asks a model anything.
+
 ## The gate (`src/index.ts`)
 
 One middleware over everything under `/app`, matched the way Express matches routes. The open list is the sign-in page, `/app/auth` and `/app/assets` (a fixed table of five files that hold no data). Everything else needs a session: a page is sent to the sign-in, a JSON route answers 401. A route added under `/app` later is behind the gate without anyone putting it there. Two routes are not a GET: the one that ends the session, and Paul's message to the chief.

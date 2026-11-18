@@ -156,8 +156,16 @@ function statusTag(job) {
   if (job.status === "running") return h("span", { class: "tag run" }, h("span", { class: `dot ${job.alive === false ? "" : "live"}` }), job.alive === false ? "No live worker" : "Running");
   if (job.status === "queued") return job.held ? h("span", { class: "tag" }, icon("pause", 12), "Held") : h("span", { class: "tag" }, "Queued");
   if (job.status === "failed") return h("span", { class: "tag bad" }, icon("cross", 12), "Failed");
-  return h("span", { class: "tag ok" }, icon("check", 12), "Done");
+  // A run that ended is not a wish that was met. The tick is kept for what the service can confirm.
+  const state = job.outcome?.state;
+  if (state === "met") return h("span", { class: "tag ok" }, icon("check", 12), "Confirmed");
+  if (state === "waiting") return h("span", { class: "tag wait" }, "Needs you");
+  if (state === "not_met") return h("span", { class: "tag bad" }, icon("cross", 12), "Not done");
+  return h("span", { class: "tag" }, "Finished");
 }
+
+/** Which pile a finished job belongs in: what it achieved, not merely that it ended. */
+const pile = (job) => (job.status === "failed" ? "not_met" : job.status === "done" ? job.outcome?.state ?? "unconfirmed" : job.status);
 
 function jobSub(job) {
   return [who(job), modelName(job.model), job.repositoryName].filter(Boolean).join(" · ");
@@ -174,7 +182,9 @@ function jobLine(job, now) {
     return h("div", { class: "card-line" }, h("span", {}, "About to start"));
   }
   if (job.status === "failed") return h("div", { class: "card-line bad" }, h("span", {}, `${job.failure ?? "Failed"} · ${ago(job.finishedAt, now) ?? ""}`));
-  return h("div", { class: "card-line" }, h("span", {}, `Finished ${ago(job.finishedAt, now) ?? ""}${job.pr ? " · has a pull request" : ""}`));
+  const state = job.outcome?.state;
+  const tone = state === "met" ? " good" : state === "not_met" ? " bad" : state === "waiting" ? " wait" : "";
+  return h("div", { class: `card-line${tone}` }, h("span", {}, `${job.outcome?.text ?? "The run finished."} ${ago(job.finishedAt, now) ?? ""}`));
 }
 
 function jobCard(job, now) {
@@ -189,6 +199,7 @@ function jobCard(job, now) {
       job.costUsd !== undefined ? h("div", { class: "card-cost num" }, money(job.costUsd)) : null,
     ),
     jobLine(job, now),
+    job.said ? h("div", { class: "card-said" }, job.said) : null,
   );
 }
 
@@ -260,20 +271,23 @@ function header(board) {
 /* ---------- Board views ---------- */
 
 function statusView(board, now) {
-  const by = (status) => board.jobs.filter((j) => j.status === status);
-  const done = by("done");
-  const hidden = Math.max(0, done.length - DONE_SHOWN);
+  const by = (which) => board.jobs.filter((j) => pile(j) === which);
+  const capped = (jobs) => {
+    const hidden = Math.max(0, jobs.length - DONE_SHOWN);
+    return { cards: jobs.slice(0, DONE_SHOWN).map((j) => jobCard(j, now)), extra: { hidden, node: hidden ? h("div", { class: "more" }, `${hidden} more in Timeline.`) : null } };
+  };
+  const met = capped(by("met"));
+  const open = capped(by("unconfirmed"));
+  const not = capped(by("not_met"));
   return h(
     "div",
     { class: "cols" },
-    column("wait", "Waiting on me", board.waiting.map((w) => waitingCard(w, now)), "Nothing needs your approval."),
+    column("wait", "Waiting on me", [...board.waiting.map((w) => waitingCard(w, now)), ...by("waiting").map((j) => jobCard(j, now))], "Nothing needs you."),
     column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),
     column("", "Queued", by("queued").map((j) => jobCard(j, now)), "The queue is empty."),
-    column("ok", "Done in the last two days", done.slice(0, DONE_SHOWN).map((j) => jobCard(j, now)), "Nothing has finished in the last two days.", {
-      hidden,
-      node: hidden ? h("div", { class: "more" }, `${hidden} more in Timeline.`) : null,
-    }),
-    column("bad", "Failed in the last two days", by("failed").map((j) => jobCard(j, now)), "Nothing has fallen over."),
+    column("ok", "Confirmed done", met.cards, "Nothing in the last two days is confirmed as done.", met.extra),
+    column("", "Finished, not confirmed", open.cards, "Nothing is waiting to be judged.", open.extra),
+    column("bad", "Did not get there", not.cards, "Nothing has fallen short.", not.extra),
   );
 }
 
@@ -284,7 +298,7 @@ function jobRow(job, now) {
     { class: "row", href: `#/job/${job.id}` },
     h("span", { class: "row-time num" }, clock(at)),
     avatar(job.kind, "sm"),
-    h("div", { class: "row-main" }, h("div", { class: "card-title" }, job.title), h("div", { class: "card-sub" }, jobSub(job))),
+    h("div", { class: "row-main" }, h("div", { class: "card-title" }, job.title), h("div", { class: "card-sub" }, jobSub(job)), job.outcome && job.outcome.state !== "unconfirmed" ? h("div", { class: "card-sub" }, job.outcome.text) : null),
     h("div", { class: "row-right" }, job.costUsd !== undefined ? h("span", { class: "card-cost num" }, money(job.costUsd)) : null, statusTag(job)),
   );
 }
@@ -449,6 +463,7 @@ function jobPage() {
     "section",
     { class: "pane side", "aria-label": "About this job" },
     h("h2", {}, "About"),
+    job.outcome ? h("div", { class: "block" }, h("h3", {}, "Did it do what you asked?"), h("p", { class: "prose" }, job.outcome.text), job.said ? h("p", { class: "prose muted" }, `It told you: ${job.said}`) : null) : null,
     h("div", { class: "block" }, h("p", { class: "prose" }, detail.description ?? "This job's brief is empty or unreadable."), detail.more ? h("p", { class: "prose muted" }, detail.more) : null),
     detail.doneWhen ? h("div", { class: "block" }, h("h3", {}, "Done when"), h("p", { class: "prose" }, detail.doneWhen)) : null,
     detail.produced ? h("div", { class: "block" }, h("h3", {}, "Produced"), h("p", { class: "prose" }, detail.produced)) : null,
@@ -509,18 +524,21 @@ function besideBoard() {
   const board = state.board;
   if (!board) return [h("p", { class: "muted" }, state.problem ?? "Loading the board.")];
   const now = Date.parse(board.generatedAt);
-  const by = (status) => board.jobs.filter((j) => j.status === status);
-  const done = by("done");
-  const failed = by("failed");
+  const by = (which) => board.jobs.filter((j) => pile(j) === which);
+  const few = (jobs) => ({ cards: jobs.slice(0, DONE_SHOWN_BESIDE).map((j) => jobCard(j, now)), extra: { hidden: Math.max(0, jobs.length - DONE_SHOWN_BESIDE), node: null } });
+  const met = few(by("met"));
+  const open = few(by("unconfirmed"));
+  const not = few(by("not_met"));
   return [
     h("div", { class: "page-head" }, h("h2", { class: "pane-title" }, "Board"), h("button", { class: "btn", type: "button", onclick: () => setLayout("board") }, "Open the board")),
     board.paused ? h("div", { class: "banner" }, h("b", {}, "The queues are held. "), "Send /resume once the credit or key is fixed.") : null,
     board.spend.capReached ? h("div", { class: "banner" }, h("b", {}, "Today's cap is reached. "), "New jobs wait until tomorrow, or until you send /resume.") : null,
-    column("wait", "Waiting on me", board.waiting.map((w) => waitingCard(w, now)), "Nothing needs your approval."),
+    column("wait", "Waiting on me", [...board.waiting.map((w) => waitingCard(w, now)), ...by("waiting").map((j) => jobCard(j, now))], "Nothing needs you."),
     column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),
     column("", "Queued", by("queued").map((j) => jobCard(j, now)), "The queue is empty."),
-    column("ok", "Done", done.slice(0, DONE_SHOWN_BESIDE).map((j) => jobCard(j, now)), "Nothing has finished in the last two days.", { hidden: Math.max(0, done.length - DONE_SHOWN_BESIDE), node: null }),
-    failed.length ? column("bad", "Failed", failed.map((j) => jobCard(j, now)), "") : null,
+    column("ok", "Confirmed done", met.cards, "Nothing is confirmed as done.", met.extra),
+    open.cards.length ? column("", "Finished, not confirmed", open.cards, "", open.extra) : null,
+    not.cards.length ? column("bad", "Did not get there", not.cards, "", not.extra) : null,
   ];
 }
 
