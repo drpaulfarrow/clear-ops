@@ -6,6 +6,13 @@
  * (the engineer reports against them, the maintainer checks each by ID during review), and never a
  * gate: nothing is refused over them, no runner fails a job over them, and the existing review loop
  * is unchanged. Fixtures are synthetic throughout: no real document, pull request, site or message.
+ *
+ * What the chief-path tests below do and do not prove, stated plainly: each injects a SCRIPTED
+ * model answer that does the shaping for its case, and asserts that the scripted answer persists
+ * through the orchestrator, the ops wire and the stored job (the request verbatim, the sections,
+ * the contract with its IDs). They are wiring and persistence checks of the shaping path, nothing
+ * more: they do not prove a real model shapes real requests. Only `npm run eval`, which sends
+ * ordinary requests to the real chief, can check that.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -36,8 +43,9 @@ const {
 const { OPS_SERVER_NAME } = await import("../src/ops-schema.js");
 const { buildApp } = await import("../src/index.js");
 // The real MCP client and a linked pair of in-memory transports, the same wiring the Agent SDK
-// gives the chief's ops server on every turn: this is the shaping on the actual chief path, not a
-// prompt-string assertion (the loopback pattern of test/chief-reviewonly.test.ts).
+// gives the chief's ops server on every turn: this is the chief's real path with a scripted model
+// answer, not a prompt-string assertion (the loopback pattern of test/chief-reviewonly.test.ts).
+// The scripted answer is what these tests inject; what they assert is that it persists.
 const { Client } = await import("@modelcontextprotocol/sdk/client");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 import type { AgentRunner } from "../src/agents.js";
@@ -111,6 +119,7 @@ test("the engineer and the maintainer are both told how to read a shaped brief a
   assert.match(engineer, /Never present an assumption or an unknown as settled/);
   assert.match(engineer, /"ACCEPT A1: met" or "ACCEPT A2: not met: <one short reason>"/, "the engineer reports against its acceptance IDs");
   assert.match(engineer, /These lines are review evidence/);
+  assert.match(engineer, /that hold is the boundary/, "the engineer is told that a destructive brief's hold for Paul's approval is the boundary it works to");
   assert.doesNotMatch(engineer, /the service reads these lines/, "no runner-side enforcement is promised to the engineer");
   assert.doesNotMatch(engineer, /fails the job naming that acceptance/, "an acceptance reported not met is for the maintainer, not the runner");
   const maintainer = workerSpec("maintain", "product").prompt;
@@ -209,6 +218,12 @@ test("an engineer that reports every acceptance met is done and reviewed as befo
  * words verbatim and the sections the prompt names, and call start_job. The five synthetic cases
  * cover the request shapes Paul actually sends: a feature, a fix, a refactor, an ambiguous request
  * and a high-risk shorthand one.
+ *
+ * The limit of these tests, stated plainly: the model answer is scripted by the test, so what is
+ * asserted is that the scripted answer persists through the chief's real wiring (orchestrator, ops
+ * wire, job runner, store) and that nothing on that path mangles or refuses it. These are wiring
+ * and persistence checks of the shaping path. They do not prove a real model shapes real requests;
+ * only npm run eval, which sends ordinary requests to the real chief, can check that.
  */
 interface ShapedCase {
   tag: string;
@@ -223,6 +238,8 @@ interface ShapedCase {
   unknowns: string[];
   evidence: string[];
   risks: string[];
+  /** The responsibility, data and permission boundaries; the high-risk case holds the action for Paul. */
+  boundaries?: string;
   doneWhen: string;
 }
 
@@ -256,9 +273,9 @@ const SHAPED_CASES: ShapedCase[] = [
     intent: ["The offers page's code should be tidied, with its behaviour unchanged."],
     assumptions: ["That 'tidy' means extracting the page's tangled components, not a rewrite: inferred, to verify."],
     unknowns: ["Which parts of the page Paul finds 'a mess', if any beyond the obvious."],
-    evidence: ["Every existing test passes unmodified, proving the behaviour is unchanged."],
-    risks: ["A tidy-up could accidentally change behaviour: the existing tests are the tripwire, and recovery is a revert."],
-    doneWhen: "A1: unchanged behaviour: every existing test passes unmodified\nA2: the offers page code is tidied with no new features and no behaviour change\nA3: npm test and npm run build pass",
+    evidence: ["Every existing test passes unmodified: evidence, within its scope, that behaviour is unchanged, never proof of it."],
+    risks: ["A tidy-up could change behaviour the existing tests do not cover: the baseline demands unchanged behaviour, the passing tests are evidence within their scope and never proof of it, and recovery is a revert."],
+    doneWhen: "A1: unchanged behaviour is the acceptance baseline: what worked before works exactly the same, and every existing test passes unmodified\nA2: the offers page code is tidied with no new features and no behaviour change\nA3: npm test and npm run build pass",
   },
   {
     tag: "ambiguous",
@@ -277,12 +294,13 @@ const SHAPED_CASES: ShapedCase[] = [
     tag: "high-risk shorthand",
     title: "Remove test logins",
     request: "Just delete the old test logins off the site, we don't need them any more.",
-    intent: ["The old test-only login accounts should be removed from the site."],
+    intent: ["The old test-only login accounts should be removed from the site.", "The deletion itself is held for Paul's own approval before anything runs: his request asks for the work, and nothing destructive happens without his say-so on the prepared change."],
     assumptions: ["That 'old test logins' means the seeded test accounts, not the site's login system itself: inferred, to verify."],
     unknowns: ["Whether anything still relies on the seeded accounts, such as an end-to-end suite."],
-    evidence: ["A new test proves the seeded accounts are gone and the real login still works."],
-    risks: ["Deleting accounts is destructive: remove them behind a reversible migration and recover by running it backwards; if anything unknown still relies on them, stop and report instead of deleting."],
-    doneWhen: "A1: a new test proves the old test logins are gone from the site\nA2: the site's own login is unaffected: its existing tests pass\nA3: npm test and npm run build pass",
+    evidence: ["A new test proves the prepared removal covers the old test logins only and the real login still works, without applying it.", "The accounts' data is exported or backed up first and the backup is verified, before any deletion."],
+    risks: ["Authority: only Paul can authorise the deletion itself; his request is not approval of any concrete deletion plan, and no approval is invented or implied anywhere in this brief.", "Specialist involvement: destructive data work needs the maintainer's review and a data-aware specialist involved before it runs.", "Data safety: the accounts and anything that depends on them must be exported or backed up first and the backup verified, or the deletion does not happen.", "Recovery hold: deletion is permanent, so the engineer prepares and proves the change and deletes nothing; the action is held for Paul's own approval before anything runs."],
+    boundaries: "Boundaries: only Paul can authorise the deletion itself; the engineer prepares and proves the change, exports or backs up the account data first, and deletes nothing before Paul's own approval.",
+    doneWhen: "A1: the accounts' data is exported or backed up first and the backup verified, before any deletion\nA2: a new test proves the prepared removal covers the old test logins only, with the real login unaffected, without applying it\nA3: the deletion itself is held for Paul's own approval: nothing destructive runs before he approves it",
   },
 ];
 
@@ -312,7 +330,7 @@ const shapedCaseBrief = (c: ShapedCase) =>
     "",
     `Problem: ${c.tag}. Who benefits: Paul. Intended outcome: as confirmed above.`,
     "Scope: the product. Non-scope: anything the request did not name.",
-    "Boundaries: the engineer owns the product code and its tests, needs no new permissions or data, and nothing here spends money.",
+    c.boundaries ?? "Boundaries: the engineer owns the product code and its tests, needs no new permissions or data, and nothing here spends money.",
   ].join("\n");
 
 /** What every shaped brief must hold, checked against the stored job the chief's turn created. */
@@ -382,13 +400,15 @@ test("the chief's prompt tells it how to shape, and only blocking questions reac
   assert.match(chiefPrompt, /make unchanged behaviour the explicit acceptance baseline/, "a refactor's baseline is in the chief's instructions");
   assert.match(chiefPrompt, /Never invent intent or approval/);
   assert.match(chiefPrompt, /only the questions that genuinely block the work \(never every unknown\)/);
+  assert.match(chiefPrompt, /held for Paul's own approval before anything runs/, "a destructive request's recovery is a hold for Paul, never an invented safety property");
+  assert.match(chiefPrompt, /only Paul can authorise the action itself/, "the authority boundary of a destructive request is in the chief's instructions");
   assert.doesNotMatch(chiefPrompt, /a shaped brief whose doneWhen has no acceptance IDs is refused/, "no code refusal is promised for a shaped brief without IDs");
   assert.doesNotMatch(chiefPrompt, /a shaped brief without them is refused/);
   assert.match(chiefPrompt, /so the engineer reports against a specific acceptance and the maintainer checks each one by ID during review/);
 });
 
 for (const c of SHAPED_CASES.filter((x) => x.tag !== "ambiguous")) {
-  test(`a ${c.tag} request reaches the chief path shaped: verbatim, separated, evidence, risks${c.tag === "refactor" ? ", and the unchanged-behaviour baseline" : ""}`, async () => {
+  test(`a scripted ${c.tag} answer persists through the chief path shaped (wiring and persistence, never proof of real model shaping)`, async () => {
     const before = new Set(chiefStore.allJobs().map((j) => j.id));
     await orchestrator.handle(FOUNDER, `shape: ${c.request}`);
     const job = chiefStore.allJobs().find((j) => j.title === c.title)!;
@@ -396,7 +416,18 @@ for (const c of SHAPED_CASES.filter((x) => x.tag !== "ambiguous")) {
     assert.equal(job.kind, "engineer");
     checkShaped(job.brief, job.doneWhen, c);
     if (c.tag === "refactor") {
-      assert.match(acceptances(job.doneWhen)![0].line ?? "", /unchanged behaviour: every existing test passes unmodified/, "the refactor's first acceptance is its unchanged-behaviour baseline");
+      assert.match(acceptances(job.doneWhen)![0].line ?? "", /unchanged behaviour is the acceptance baseline/, "the refactor's first acceptance demands its unchanged-behaviour baseline");
+    }
+    if (c.tag === "high-risk shorthand") {
+      // The destructive request's recovery is a hold, never an invented safety property: the brief
+      // itself must say who authorises the deletion, that a specialist is involved, that the data
+      // is exported or backed up first, and that nothing destructive runs before Paul approves it.
+      const risks = job.brief.slice(job.brief.indexOf(RISKS_HEADING), job.brief.indexOf("Problem:"));
+      assert.match(risks, /only Paul can authorise the deletion itself/, "the authority boundary is stated, with no approval invented or implied");
+      assert.match(risks, /specialist/, "specialist involvement is stated");
+      assert.match(risks, /exported or backed up first/, "data safety comes before any deletion");
+      assert.match(risks, /held for Paul's own approval before anything runs/, "the action is held for Paul's own approval, not made safe by invention");
+      assert.match(job.doneWhen ?? "", /held for Paul's own approval/, "the hold is the contract's own acceptance, not a fabricated reversible migration");
     }
     const finished = await waitForJob(c.title);
     assert.equal(finished?.status, "done", `${c.tag}: the job ran to completion on the stubbed worker`);
@@ -408,7 +439,7 @@ for (const c of SHAPED_CASES.filter((x) => x.tag !== "ambiguous")) {
   });
 }
 
-test("an ambiguous request surfaces one blocking question to Paul and starts nothing until he answers", async () => {
+test("the scripted ambiguous case: one blocking question reaches Paul, nothing starts, and the shaped brief persists once he answers (wiring and persistence)", async () => {
   const c = SHAPED_CASES.find((x) => x.tag === "ambiguous")!;
   const before = chiefStore.allJobs().length;
   const repliesBefore = chiefMessenger.sent.length;
