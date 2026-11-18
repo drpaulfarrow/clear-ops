@@ -407,6 +407,11 @@ export class JobRunner {
       if (!PR_KINDS.includes(kind)) throw new Error(`A ${kind} job cannot be review only: only ${PR_KINDS.join(" and ")} open a pull request for Paul to review.`);
       if (extra.reviewOnly !== true) delete extra.reviewOnly;
     }
+    // A shaped brief (src/brief.ts) is shaped in the prompt, never gated here: whether its contract
+    // carries acceptance IDs ("A1:", "A2:") is the chief's shaping guidance to follow, not a rule
+    // the runner enforces. The IDs are review evidence: the engineer reports against them and the
+    // maintainer checks each by ID during review, in the review loop exactly as it is. This funnel
+    // never refuses a brief over them and never inspects a report for them.
     // The contract: only an engineer job has one, and it rides at the end of the brief, so the review
     // and every fix round (which quote the brief) carry it with no further plumbing.
     if (kind !== "engineer" || !extra.doneWhen?.trim()) delete extra.doneWhen;
@@ -1193,6 +1198,9 @@ export class JobRunner {
       // GH_TOKEN adds nothing (src/bootstrap.ts jobCredentialNote).
       if (BUILDS(job.kind)) result.text = addToReport(result.text, jobCredentialNote(job.target));
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
+      // The report's per-acceptance lines ("ACCEPT A1: met", src/agents.ts) are review evidence the
+      // maintainer reads: the runner never inspects the report for them, never marks a job failed
+      // over one and never short-circuits the review flow (src/brief.ts).
       const { report, message } = splitReport(result.text);
       const outputPath = this.store.writeOutput(id, report);
       this.store.updateJob(id, {
