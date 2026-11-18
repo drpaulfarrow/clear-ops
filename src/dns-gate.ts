@@ -15,6 +15,7 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { config, isAllowed } from "./config.js";
+import { APP_APPROVER, spendAppApproval } from "./app-approver.js";
 import { blockers, digest, DnsError, listSnapshots, logApplied, mintDnsGrant, normalise, readSnapshot, relativeName, requestDigest, requestFor, requireDomain, saveSnapshot, touched, type DnsChange, type DnsRecord, type GoDaddyClient, allowedDomains } from "./dns.js";
 import { fmt } from "./london.js";
 import type { DnsAction, Store } from "./store.js";
@@ -99,7 +100,11 @@ export class DnsGate {
   }
 
   cancel(id: string, by: string): string {
-    if (!isAllowed(by)) return "";
+    if (!isAllowed(by)) {
+      // Not a chat account: then only the signed-in app's own single-use grant (src/app-approver.ts).
+      if (!spendAppApproval(by)) return "";
+      by = APP_APPROVER;
+    }
     if (!this.store.getDns(id)) return `No DNS change ${id}.`;
     this.expireOld();
     const cur = this.store.getDns(id)!;
@@ -113,7 +118,11 @@ export class DnsGate {
    * checked, and this checks again). Returns the confirmation, or why nothing changed.
    */
   async approve(id: string, approver: string): Promise<string> {
-    if (!isAllowed(approver)) throw new DnsError("Refused: only Paul's own chat account can approve.");
+    if (!isAllowed(approver)) {
+      // Not a chat account: then only the signed-in app's own single-use grant (src/app-approver.ts).
+      if (!spendAppApproval(approver)) throw new DnsError("Refused: only Paul's own chat account can approve.");
+      approver = APP_APPROVER;
+    }
     if (!this.store.getDns(id)) return `No DNS change ${id}.`;
     this.expireOld();
     const cur = this.store.getDns(id)!;

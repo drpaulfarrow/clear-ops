@@ -21,7 +21,7 @@ The app opens on a conversation with the chief, with the board beside it. A swit
 - **Jobs started here report here**, and each appears in the conversation as a card that updates and opens the job page. They do not also post to Discord yet.
 - **While the chief works** the conversation shows what it is doing, as Discord does.
 - **Slash commands work as typed**: `/jobs`, `/spend`, `/resume`, `/trace <id>` and the rest. There is no menu of them yet.
-- **Approvals do not work here.** `send`, `buy`, `dns apply`, `signup apply`, a one-time code, `act as me`, `read doc`, `yes <id>`, `/password` and device pairing are refused with one plain line, and still work in Discord. Something prepared from the app (an email, a purchase) is approved in Discord by its id. The app approving things is a later slice and will be its own change.
+- **Typed approval words do not work here.** `send`, `buy`, `dns apply`, `signup apply`, a one-time code, `act as me`, `read doc`, `yes <id>`, `/password` and device pairing are refused with one plain line, and still work in Discord. Since slice 3 the app approves with buttons instead (below).
 - **Not yet**: attaching files, voice notes, pictures in replies (the caption is kept), a separate conversation per project.
 
 ### How the chat is kept safe (`src/web-chat.ts`, `src/orchestrator.ts`)
@@ -33,9 +33,31 @@ The app opens on a conversation with the chief, with the board beside it. A swit
 - The transcript is one owner-only file, `DATA_DIR/app/chat.json`, capped at 500 messages, with tokens redacted. It holds what the chief told Paul, which can include what a job found. The status line is never saved.
 - What the service says is rendered and escaped by `src/reports.ts` before the app sees it; Paul's own words travel as text.
 
+## What slice 3 adds: approving and acting from the app
+
+Paul's call on 18 Nov 2026, asked twice: approve from the app, one tap, for everything.
+
+- **Waiting on me** shows each waiting email, calendar change, purchase, DNS change and sign-up in the gate's own words, the same text it sends in chat, with two buttons. One tap decides it. What happened is said in the app's conversation and in the chat where the item was first put to him.
+- **A job's page** has buttons to stop it, move it to the front of its queue, try a failed one again, and run it again on one of the three models a job may be pinned to. A job run again keeps its brief, title and pull request, reports in the app, and carries over nothing it was permitted before. Reviews, fix rounds, design-loop jobs, bridge jobs and the assistant cannot be run again from here.
+- **The cap and hold banners** have a button that sends `/resume`.
+- **Typed approval words are still refused** in the app's chat. A button is tied to the exact item shown; a typed word is tied to nothing.
+
+### How a tap is held to the same standard as the typed word (`src/app-approver.ts`, `src/index.ts`)
+
+1. The request is behind the GitHub gate and must be this site's own script (a form or another site is refused).
+2. It must name one item that is waiting now, of the right kind.
+3. It must carry the fingerprint of the exact text the service showed for that item. If the item changed, or the card is stale, nothing is decided.
+4. Only then is a grant minted: a random string, good for one use within a minute. This route is the only place that mints one.
+5. The grant goes to that item's own gate, which first asks its old question (is this an allowlisted chat account?) and takes a grant only when the answer is no. The gate then runs every check it runs for a typed approval: expiry, daily caps, and that what was shown is still what is true. It records the decision as made by "the web app".
+
+A purchase is offered only while its job still holds the basket, as before. Nothing a model, page, email, job or chat message says can produce a grant.
+
+### What this changes in the rules
+Three invariant tests said nothing but the orchestrator and a gate itself may approve mail, DNS or a sign-up. They now say the same about everything outside the app's approval route, and that route has its own invariant. `CLAUDE.md` gains one sentence saying so.
+
 ## Still to come
 
-What it does not do yet: approving anything, cancelling or re-running a job, merging a pull request, changing caps or models, project spaces of Paul's own, voice, push notifications, search. Each is a later slice. Something waiting on Paul is shown with the words to send in chat, and nothing else about it.
+What it does not do yet: reviewing and merging a pull request from the app, cancelling or re-running a job, merging a pull request, changing caps or models, project spaces of Paul's own, voice, push notifications, search. Each is a later slice. Something waiting on Paul is shown with the words to send in chat, and nothing else about it.
 
 ## Switching it on (Paul, once, about five minutes)
 
@@ -71,7 +93,7 @@ A card also carries the first of what the worker told Paul, except for the kinds
 
 ## The gate (`src/index.ts`)
 
-One middleware over everything under `/app`, matched the way Express matches routes. The open list is the sign-in page, `/app/auth` and `/app/assets` (a fixed table of five files that hold no data). Everything else needs a session: a page is sent to the sign-in, a JSON route answers 401. A route added under `/app` later is behind the gate without anyone putting it there. Two routes are not a GET: the one that ends the session, and Paul's message to the chief.
+One middleware over everything under `/app`, matched the way Express matches routes. The open list is the sign-in page, `/app/auth` and `/app/assets` (a fixed table of five files that hold no data). Everything else needs a session: a page is sent to the sign-in, a JSON route answers 401. A route added under `/app` later is behind the gate without anyone putting it there. Four routes are not a GET: ending the session, Paul's message to the chief, his decision on a waiting item, and an action on a job.
 
 ## What it shows, and the rules it keeps (`src/app-data.ts`)
 

@@ -13,9 +13,12 @@
  *    outcomes only for the kinds that work over Paul's mail, calendar, CV and zones.
  *  - A saved output is served only where src/reports.ts would serve it (`reportFor`), so an assistant,
  *    CV or upload-derived output is not here either.
- *  - Something waiting on Paul is named by what it is and its id only. What an email says or what a
- *    basket holds stays where he approves it.
+ *  - Something waiting on Paul is shown as the gate itself would show it in chat (`preview`), because
+ *    since slice 3 the app is a place he approves it (src/app-approver.ts). Each item carries a
+ *    fingerprint of that exact text, and the approval route refuses a tap whose fingerprint is not the
+ *    current one, so what he approves is what he was shown.
  */
+import { createHash } from "node:crypto";
 import { config } from "./config.js";
 import { PR_KINDS, runLimits, workerSpec } from "./agents.js";
 import { failureLabel } from "./failures.js";
@@ -23,7 +26,7 @@ import { boardHealth } from "./health.js";
 import { describeJob, kindName, liveStep, repoLabel } from "./job-descriptions.js";
 import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
 import { shortText } from "./messages.js";
-import { resolveModel, runRoute } from "./llm.js";
+import { PER_JOB_MODELS, resolveModel, runRoute } from "./llm.js";
 import { londonYmd } from "./london.js";
 import { renderMarkdown, reportFor } from "./reports.js";
 import { redact } from "./repos.js";
@@ -33,7 +36,7 @@ import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLi
 import { realCost } from "./worker-stats.js";
 import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
-import type { Job, Store } from "./store.js";
+import type { DnsAction, Job, OutboundAction, PurchaseAction, SignupAction, Store } from "./store.js";
 import type { UptimeReport } from "./uptime.js";
 
 /** Finished jobs this recent are on the board itself; older ones are history, a page at a time. */
@@ -49,6 +52,8 @@ export interface AppSource {
   uptime?: { report: () => UptimeReport };
   probes?: { snapshot: () => ProbeResult[] };
   activeWorkers?: () => number;
+  /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
+  gates?: AppGates;
   /** Where traces are read from, for the tests. */
   traceDir?: string;
   now?: number;
@@ -118,6 +123,18 @@ export interface AppSpend {
   capLifted: boolean;
 }
 
+/** One approval gate, as far as the app reads it: what is pending, and how the gate words an item. */
+interface AppGate<T> {
+  pending(): T[];
+  preview(a: T): string;
+}
+export interface AppGates {
+  outbound: AppGate<OutboundAction>;
+  dns: AppGate<DnsAction>;
+  signup: AppGate<SignupAction>;
+  purchase: AppGate<PurchaseAction>;
+}
+
 export interface AppWaiting {
   /** What kind of thing is waiting: "email", "purchase", "dns", "signup". */
   what: "email" | "purchase" | "dns" | "signup";
@@ -129,6 +146,10 @@ export interface AppWaiting {
   createdAt: string;
   expiresAt: string;
   jobId?: string;
+  /** The item exactly as its gate shows it in chat. Present when the gates are. */
+  preview?: string;
+  /** A fingerprint of that text. A decision in the app must carry it back unchanged. */
+  seen?: string;
 }
 
 export interface AppBoard {
@@ -157,6 +178,8 @@ export interface AppJobDetail {
   trace: { lines: TraceLine[]; total: number; figures: TraceFigures };
   /** The saved output as HTML rendered by src/reports.ts, which escapes everything. */
   outputHtml?: string;
+  /** What the app's buttons may do to it right now. */
+  actions: AppJobActions;
   /** The jobs around it: what it reviews, and what followed it. */
   related: Array<{ id: string; title: string; kind: string; status: Job["status"]; relation: string }>;
 }
@@ -325,15 +348,53 @@ function spendOf(source: AppSource, now: number): AppSpend {
   };
 }
 
-/** What waits on Paul's own approval, named and nothing more. */
-function waitingOf(store: Store, now: number): AppWaiting[] {
+/** The fingerprint a decision in the app must carry: which item, and the exact words shown for it. */
+export function seenHash(what: AppWaiting["what"], id: string, preview: string): string {
+  return createHash("sha256").update(`${what}\n${id}\n${preview}`).digest("hex");
+}
+
+/** What waits on Paul's own approval: worded by its gate when the gates are given, otherwise named only. */
+export function appWaiting(store: Store, gates: AppGates | undefined, now: number): AppWaiting[] {
   const live = <T extends { status: string; expiresAt: string }>(items: T[]) => items.filter((a) => a.status === "pending" && Date.parse(a.expiresAt) > now);
+  const shown = <T>(what: AppWaiting["what"], id: string, gate: AppGate<T> | undefined, a: T) => {
+    if (!gate) return {};
+    const preview = redact(gate.preview(a));
+    return { preview, seen: seenHash(what, id, preview) };
+  };
   const out: AppWaiting[] = [];
-  for (const a of live(store.listOutbound())) out.push({ what: "email", id: a.id, label: a.kind === "send_draft" || a.kind === "send_email" ? "An email is ready to send" : "A calendar change is ready to send", command: `send ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt, ...(a.jobId ? { jobId: a.jobId } : {}) });
-  for (const a of live(store.listPurchases())) out.push({ what: "purchase", id: a.id, label: "A purchase is ready to approve", command: `buy ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt });
-  for (const a of live(store.listDns())) out.push({ what: "dns", id: a.id, label: "A DNS change is ready to apply", command: `dns apply ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt });
-  for (const a of live(store.listSignups())) out.push({ what: "signup", id: a.id, label: "A new account is ready to create", command: `signup apply ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt });
+  for (const a of live(gates ? gates.outbound.pending() : store.listOutbound()))
+    out.push({ what: "email", id: a.id, label: a.kind === "send_draft" || a.kind === "send_email" ? "An email is ready to send" : "A calendar change is ready to send", command: `send ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt, ...(a.jobId ? { jobId: a.jobId } : {}), ...shown("email", a.id, gates?.outbound, a) });
+  for (const a of live(gates ? gates.purchase.pending() : store.listPurchases())) out.push({ what: "purchase", id: a.id, label: "A purchase is ready to approve", command: `buy ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt, ...shown("purchase", a.id, gates?.purchase, a) });
+  for (const a of live(gates ? gates.dns.pending() : store.listDns())) out.push({ what: "dns", id: a.id, label: "A DNS change is ready to apply", command: `dns apply ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt, ...shown("dns", a.id, gates?.dns, a) });
+  for (const a of live(gates ? gates.signup.pending() : store.listSignups())) out.push({ what: "signup", id: a.id, label: "A new account is ready to create", command: `signup apply ${a.id}`, createdAt: a.createdAt, expiresAt: a.expiresAt, ...shown("signup", a.id, gates?.signup, a) });
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** Why a job cannot be run again from the app on another model, or undefined when it can. */
+export function rerunRefusal(job: Job): string | undefined {
+  if (job.kind === "ea") return "The executive assistant always runs on Claude, so it cannot be run on another model.";
+  if (job.reviewOf || job.fixRound || job.designLoop) return "This job belongs to a review or design loop, which starts its own follow-ups.";
+  if (job.origin || job.commission || job.importedRun || job.docSnapshot) return "This job was not started from your own chat, so it is not run again from here.";
+  return undefined;
+}
+
+/** What Paul may do to a job from the app right now. */
+export interface AppJobActions {
+  cancel: boolean;
+  front: boolean;
+  retry: boolean;
+  /** The models it may be run again on; empty when it may not. */
+  rerunModels: string[];
+}
+
+function actionsOf(job: Job): AppJobActions {
+  const active = job.status === "running" || job.status === "queued";
+  return {
+    cancel: active,
+    front: job.status === "queued" && !!job.waitingFor && job.waitingFor !== job.id,
+    retry: job.status === "failed",
+    rerunModels: rerunRefusal(job) ? [] : [...PER_JOB_MODELS],
+  };
 }
 
 const finishedDesc = (a: Job, b: Job) => (b.finishedAt ?? b.createdAt).localeCompare(a.finishedAt ?? a.createdAt);
@@ -354,7 +415,7 @@ export function appBoard(source: AppSource): AppBoard {
     spend: spendOf(source, now),
     health: { level: health.level, headline: health.headline, live: health.live },
     paused: !!source.store.queueHold(),
-    waiting: waitingOf(source.store, now),
+    waiting: appWaiting(source.store, source.gates, now),
     jobs: [...running, ...queued, ...recent].map((j) => toAppJob(source, j, ev)),
     hasOlder: finished.length > recent.length,
   };
@@ -447,6 +508,7 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
     limits: { maxTurns: limits.maxTurns, ...(limits.realBudgetUsd !== undefined ? { budgetUsd: limits.realBudgetUsd } : {}) },
     trace: { lines: lines.slice(-APP_TRACE_LINES), total: lines.length, figures: traceFigures(lines) },
     ...(report?.markdown !== undefined ? { outputHtml: renderMarkdown(report.markdown) } : {}),
+    actions: actionsOf(job),
     related,
   };
 }

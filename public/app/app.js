@@ -121,6 +121,11 @@ const state = {
   chatRaw: "",
   chatProblem: undefined,
   sending: false,
+  /** What the last button press did, said once at the top of the page. */
+  notice: undefined,
+  /** The button being acted on, so it cannot be pressed twice. */
+  busy: undefined,
+  rerunModel: undefined,
   view: VIEWS.some(([v]) => v === store("clearops.view")) ? store("clearops.view") : "status",
   detail: store("clearops.trace") === "full" ? "full" : "plain",
   board: undefined,
@@ -149,6 +154,48 @@ async function getJson(path) {
   if (!res.ok) throw new Error(`The service answered ${res.status}.`);
   return res.text();
 }
+
+/** The few things the app changes: a message, a decision, a job action. Always this site's own JSON. */
+async function postJson(path, body) {
+  const res = await fetch(`${API}${path}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, credentials: "same-origin", body: JSON.stringify(body) });
+  if (res.status === 401) {
+    location.assign(SIGN_IN);
+    throw new Error("signed out");
+  }
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    // A refusal with no body still has its status.
+  }
+  return { ok: res.ok, status: res.status, data };
+}
+
+function say(text, bad = false) {
+  state.notice = text ? { text, bad } : undefined;
+}
+
+/** One press, one request: the button is held while it is in flight, and what happened is said plainly. */
+async function act(key, path, body, after) {
+  if (state.busy) return;
+  state.busy = key;
+  draw();
+  try {
+    const res = await postJson(path, body);
+    say(res.ok ? res.data.text || "Done." : res.data.error || "That could not be done just now.", !res.ok);
+    if (res.ok && after) after(res.data);
+  } catch (err) {
+    if (err.message !== "signed out") say("The service could not be reached, so nothing was done.", true);
+  }
+  state.busy = undefined;
+  state.boardRaw = "";
+  state.jobRaw = "";
+  await Promise.all([refreshBoard(), route().name === "job" ? refreshJob(route().id) : false]);
+  draw();
+  void chatTick();
+}
+
+const DECIDE = { email: ["Send", "Do not send"], purchase: ["Buy", "Decline"], dns: ["Apply", "Cancel"], signup: ["Create account", "Cancel"] };
 
 /* ---------- Pieces ---------- */
 
@@ -204,15 +251,31 @@ function jobCard(job, now) {
 }
 
 function waitingCard(item, now) {
+  const key = `${item.what}:${item.id}`;
+  const busy = state.busy !== undefined;
+  const [yes, no] = DECIDE[item.what] ?? ["Approve", "Decline"];
+  const decide = (verb) => () => void act(key, "/approvals", { what: item.what, id: item.id, verb, seen: item.seen });
   return h(
     "div",
     { class: "card wait" },
     h("div", { class: "card-main" }, h("div", { class: "card-title" }, item.label), h("div", { class: "card-sub" }, `Asked ${ago(item.createdAt, now)} · open for another ${span(Date.parse(item.expiresAt) - now)}`)),
-    h("div", { class: "card-sub" }, "Approve it in chat by sending:"),
-    h("div", { class: "cmd" }, item.command),
+    // With the item's own words and its fingerprint the app can decide it; without them it only names it.
+    item.preview && item.seen
+      ? [
+          h("div", { class: "preview" }, item.preview),
+          h(
+            "div",
+            { class: "links" },
+            h("button", { class: "btn primary", type: "button", disabled: busy, onclick: decide("approve") }, state.busy === key ? "Working" : yes),
+            h("button", { class: "btn", type: "button", disabled: busy, onclick: decide("decline") }, no),
+          ),
+        ]
+      : [h("div", { class: "card-sub" }, "Approve it in chat by sending:"), h("div", { class: "cmd" }, item.command)],
     item.jobId ? h("a", { href: `#/job/${item.jobId}` }, "See the job") : null,
   );
 }
+
+const noticeBar = () => (state.notice ? h("div", { class: `banner${state.notice.bad ? " bad" : ""}`, role: "status" }, state.notice.text) : null);
 
 function column(tone, title, cards, emptyText, extra) {
   return h(
@@ -372,8 +435,9 @@ function boardPage() {
       ),
     ),
     state.problem ? h("div", { class: "banner" }, h("b", {}, "Not up to date. "), state.problem) : null,
-    board.paused ? h("div", { class: "banner" }, h("b", {}, "The queues are held. "), "A credit or key failure stopped new engineering jobs. Send /resume in chat once it is fixed.") : null,
-    board.spend.capReached ? h("div", { class: "banner" }, h("b", {}, "Today's cap is reached. "), "New jobs wait until tomorrow, or until you send /resume in chat.") : null,
+    noticeBar(),
+    board.paused ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "The queues are held. "), "A credit or key failure stopped new engineering jobs."), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Resume")) : null,
+    board.spend.capReached ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Today's cap is reached. "), "New jobs wait until tomorrow."), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
     view,
   );
 }
@@ -429,6 +493,36 @@ function traceRows(detail, job, said) {
 
 function stat(label, value, note, extra) {
   return h("div", { class: "stat" }, h("div", { class: "stat-label" }, label), h("div", { class: "stat-value num" }, value), extra ?? null, note ? h("div", { class: "stat-note" }, note) : null);
+}
+
+/** What Paul may do to this job from here. Each is the job runner's own operation. */
+function jobActions(detail) {
+  const a = detail.actions;
+  const job = detail.job;
+  if (!a) return null;
+  const busy = state.busy !== undefined;
+  const key = `job:${job.id}`;
+  const out = [];
+  if (a.cancel) out.push(h("button", { class: "btn", type: "button", disabled: busy, onclick: () => void act(key, `/jobs/${job.id}/action`, { action: "cancel" }) }, "Stop this job"));
+  if (a.front) out.push(h("button", { class: "btn", type: "button", disabled: busy, onclick: () => void act(key, `/jobs/${job.id}/action`, { action: "front" }) }, "Move to the front"));
+  if (a.retry) out.push(h("button", { class: "btn", type: "button", disabled: busy, onclick: () => { say("Asked for a retry. The answer is in the chat."); void send(`retry ${job.id}`); draw(); } }, "Try again"));
+  if (a.rerunModels.length) {
+    const chosen = a.rerunModels.includes(state.rerunModel) ? state.rerunModel : a.rerunModels[0];
+    const select = h("select", { class: "pick", "aria-label": "Model to run it on", onchange: (e) => { state.rerunModel = e.target.value; } }, a.rerunModels.map((m) => h("option", { value: m, selected: m === chosen }, modelName(m))));
+    out.push(
+      h(
+        "span",
+        { class: "rerun" },
+        select,
+        h(
+          "button",
+          { class: "btn", type: "button", disabled: busy, onclick: () => void act(key, `/jobs/${job.id}/action`, { action: "rerun", model: select.value }, (d) => { if (d.jobId) location.hash = `#/job/${d.jobId}`; }) },
+          job.status === "running" || job.status === "queued" ? "Stop and run on this model" : "Run again on this model",
+        ),
+      ),
+    );
+  }
+  return out.length ? h("div", { class: "actions" }, out) : null;
 }
 
 function jobPage() {
@@ -511,6 +605,8 @@ function jobPage() {
       h("div", { class: "job-id" }, h("div", { class: "job-title" }, h("h1", {}, job.title), statusTag(job)), h("div", { class: "muted" }, [who(job), job.repositoryName, job.fixRound ? `fix round ${job.fixRound}` : null, job.failure].filter(Boolean).join(" · "))),
     ),
     state.problem ? h("div", { class: "banner" }, h("b", {}, "Not up to date. "), state.problem) : null,
+    noticeBar(),
+    jobActions(detail),
     h("div", { class: "stats" }, cost, model, steps, time),
     h("div", { class: "panes" }, about, trace),
     output,
@@ -531,8 +627,9 @@ function besideBoard() {
   const not = few(by("not_met"));
   return [
     h("div", { class: "page-head" }, h("h2", { class: "pane-title" }, "Board"), h("button", { class: "btn", type: "button", onclick: () => setLayout("board") }, "Open the board")),
-    board.paused ? h("div", { class: "banner" }, h("b", {}, "The queues are held. "), "Send /resume once the credit or key is fixed.") : null,
-    board.spend.capReached ? h("div", { class: "banner" }, h("b", {}, "Today's cap is reached. "), "New jobs wait until tomorrow, or until you send /resume.") : null,
+    noticeBar(),
+    board.paused ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "The queues are held.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Resume")) : null,
+    board.spend.capReached ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Today's cap is reached.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
     column("wait", "Waiting on me", [...board.waiting.map((w) => waitingCard(w, now)), ...by("waiting").map((j) => jobCard(j, now))], "Nothing needs you."),
     column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),
     column("", "Queued", by("queued").map((j) => jobCard(j, now)), "The queue is empty."),
@@ -823,6 +920,7 @@ async function tick() {
 }
 
 window.addEventListener("hashchange", () => {
+  if (!state.busy) state.notice = undefined;
   state.job = undefined;
   state.jobRaw = "";
   state.jobMissing = false;

@@ -24,6 +24,11 @@ const { AppAuth, APP_PATH, APP_SIGN_IN_PATH, APP_AUTH_START_PATH, APP_AUTH_CALLB
 const { appBoard, appChat, appHistory, appJob, APP_HISTORY_PAGE } = await import("../src/app-data.js");
 const { WebChat, routeWeb, webRefusal, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_TEXT_MAX } = await import("../src/web-chat.js");
 const { isAllowed } = await import("../src/config.js");
+const { mintAppApproval, spendAppApproval, APP_APPROVER, APP_GRANT_MS } = await import("../src/app-approver.js");
+const { DnsGate } = await import("../src/dns-gate.js");
+const { OutboundGate } = await import("../src/outbound.js");
+const { SignupGate } = await import("../src/signup-gate.js");
+const { seenHash } = await import("../src/app-data.js");
 const { appAsset, APP_CSP } = await import("../src/app-pages.js");
 const { workerGithubEnv } = await import("../src/github-auth.js");
 const { tracesDir } = await import("../src/trace.js");
@@ -87,7 +92,9 @@ async function signInAs(user: typeof githubUser): Promise<Response> {
   const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
   return get(`${APP_AUTH_CALLBACK_PATH}?code=abc&state=${state}`, pair(cookieNamed(started, APP_STATE_COOKIE)));
 }
-const session = async () => pair(cookieNamed(await signInAs({ login: "drpaulfarrow", id: 4242 }), APP_SESSION_COOKIE));
+/** One signed-in session for the whole file: the sign-in itself is limited per minute, and the clock here is pinned. */
+let signedIn: string | undefined;
+const session = async () => (signedIn ??= pair(cookieNamed(await signInAs({ login: "drpaulfarrow", id: 4242 }), APP_SESSION_COOKIE)));
 
 function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
   const messenger = { send: async (to: string, text: string) => void elsewhere.push({ to, text }) };
@@ -277,7 +284,7 @@ test("the files the app is made of are a fixed list and need no session", async 
   assert.doesNotMatch(js, /\beval\(|new Function\(|document\.write/);
   assert.equal((js.match(/innerHTML/g) ?? []).length, 1, "one place sets HTML: text the service already rendered and escaped");
   assert.equal((js.match(/method: "post"/g) ?? []).length, 1, "the one form is sign-out");
-  assert.deepEqual(js.match(/fetch\(`\$\{API\}[^`]*`, \{ method: "[A-Z]+"/g), ['fetch(`${API}/chat`, { method: "POST"'], "the one request that is not a GET is Paul's own message");
+  assert.deepEqual(js.match(/fetch\(`\$\{API\}[^`]*`, \{ method: "[A-Z]+"/g), ['fetch(`${API}${path}`, { method: "POST"', 'fetch(`${API}/chat`, { method: "POST"'], "two places post: Paul's message, and the helper his buttons use");
   assert.doesNotMatch(js, /method:\s*"(PUT|PATCH|DELETE)"/);
 });
 
@@ -430,10 +437,10 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal(typeof board.health.headline, "string");
 });
 
-test("two things under /app are not a GET, sign-out and Paul's message, and the data module never writes", () => {
+test("four things under /app are not a GET, and the data module never writes", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const appRoutes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
-  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`"]);
+  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`"]);
   assert.match(appRoutes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some/, "one gate over everything under /app");
   const data = fs.readFileSync(new URL("../src/app-data.ts", import.meta.url), "utf8");
   assert.doesNotMatch(data, /\.(updateJob|createJob|importJob|setSetting|setCapDays|setQueueHold|writeOutput|put[A-Z]\w*|update[A-Z]\w*|create[A-Z]\w*|disableSchedule|addNote)\(/);
@@ -495,7 +502,7 @@ test("no approval word works from the app, and a one-time code is never written 
   for (const word of words) {
     assert.equal(webRefusal(word), WEB_APPROVAL_REFUSAL, word);
     assert.equal((await postChat({ text: word }, cookie)).status, 202, word);
-    assert.match(chat.view().messages.at(-1)!.text, /Approvals are not switched on in the app yet/, word);
+    assert.match(chat.view().messages.at(-1)!.text, /Typed approvals do not work in the app/, word);
   }
   assert.equal(store.settings().actAsMe, undefined, "nothing was unlocked");
   assert.equal(webRefusal("What is the code review status?"), undefined, "ordinary words still reach the chief");
@@ -576,6 +583,146 @@ test("the chat carries the jobs started from it, so each can be shown as a card"
   const view = appChat({ store: s, queue: quietQueue, now }, c);
   assert.deepEqual(view.jobs.map((j) => j.id), [mine.id]);
   assert.deepEqual(view.messages.map((m) => [m.from, m.text]), [["paul", "Look into it"]]);
+});
+
+/* ---------- Approving and acting from the app ---------- */
+
+const postApi = (p: string, body: unknown, cookie?: string, headers: Record<string, string> = {}) =>
+  fetch(`${base}${APP_PATH}/api${p}`, { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}), ...headers }, body: JSON.stringify(body) });
+
+test("a grant is a single use of something only the app's route can mint", () => {
+  const grant = mintAppApproval(1_000);
+  assert.match(grant, /^app-grant:[a-f0-9]{48}$/);
+  assert.equal(spendAppApproval("app-grant:" + "0".repeat(48), 1_000), false, "a made-up grant is nothing");
+  assert.equal(spendAppApproval(APP_APPROVER, 1_000), false, "the name it is recorded under is not a grant");
+  assert.equal(spendAppApproval(WEB_SENDER, 1_000), false);
+  assert.equal(spendAppApproval(grant, 1_000), true);
+  assert.equal(spendAppApproval(grant, 1_000), false, "spent once, gone");
+  assert.equal(spendAppApproval(mintAppApproval(1_000), 1_000 + APP_GRANT_MS + 1), false, "and it does not keep");
+  assert.equal(isAllowed(grant), false);
+});
+
+test("a gate takes a decision from a chat account or a spent grant, and from nothing else", async () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-gates-")));
+  const soon = new Date(Date.now() + 3_600_000).toISOString();
+  const at = new Date().toISOString();
+  const outbound = new OutboundGate(s, {} as never);
+  const dns = new DnsGate(s, {} as never);
+  const signup = new SignupGate(s, {} as never, {} as never, { mayAct: () => false });
+  s.putOutbound({ id: "aaaaaa", kind: "send_email", status: "pending", createdAt: at, expiresAt: soon, replyTo: PAUL } as never);
+  s.putDns({ id: "bbbbbb", status: "pending", createdAt: at, expiresAt: soon, replyTo: PAUL, domain: "example.org", changes: [] } as never);
+  s.putSignup({ id: "cccccc", status: "pending", createdAt: at, expiresAt: soon, replyTo: PAUL, domain: "example.org" } as never);
+
+  for (const forged of ["app-grant:" + "1".repeat(48), APP_APPROVER, WEB_SENDER, "web:main", ""]) {
+    assert.equal(outbound.cancel("aaaaaa", forged), "", forged);
+    assert.equal(dns.cancel("bbbbbb", forged), "", forged);
+    assert.equal(signup.cancel("cccccc", forged), "", forged);
+    await assert.rejects(outbound.approve("aaaaaa", forged), /only Paul's own chat account can approve/);
+    await assert.rejects(dns.approve("bbbbbb", forged), /only Paul's own chat account can approve/);
+    await assert.rejects(signup.approve("cccccc", forged), /only Paul's own chat account can approve/);
+  }
+  assert.equal(s.getOutbound("aaaaaa")!.status, "pending", "nothing a forged name did changed anything");
+
+  // A real grant is accepted once, and the record says where the decision came from.
+  const grant = mintAppApproval();
+  assert.match(outbound.cancel("aaaaaa", grant), /^Cancelled aaaaaa/);
+  assert.equal(s.getOutbound("aaaaaa")!.note, `cancelled by ${APP_APPROVER}`);
+  assert.equal(dns.cancel("bbbbbb", grant), "", "the same grant decides nothing a second time");
+  assert.match(dns.cancel("bbbbbb", mintAppApproval()), /^Cancelled DNS change bbbbbb/);
+  assert.match(signup.cancel("cccccc", mintAppApproval()), /^Cancelled sign-up cccccc/);
+  // Approving goes through the same door: a grant gets past the check to the gate's own answer.
+  assert.equal(await outbound.approve("nope00", mintAppApproval()), "No pending send or invitation nope00.");
+  assert.equal(await dns.approve("nope00", mintAppApproval()), "No DNS change nope00.");
+  assert.equal(await signup.approve("nope00", mintAppApproval()), "No sign-up nope00.");
+  // And a chat account still decides exactly as before.
+  s.putDns({ id: "dddddd", status: "pending", createdAt: at, expiresAt: soon, replyTo: PAUL, domain: "example.org", changes: [] } as never);
+  assert.match(dns.cancel("dddddd", PAUL), /^Cancelled DNS change dddddd/);
+  assert.equal(s.getDns("dddddd")!.note, `cancelled by ${PAUL}`);
+});
+
+test("a tap decides only the item that is waiting, as it was shown, from this site's own script", async () => {
+  const cookie = await session();
+  const soon = new Date(Date.now() + 60 * 60_000).toISOString();
+  store.putDns({ id: "abc123", status: "pending", createdAt: new Date().toISOString(), expiresAt: soon, replyTo: PAUL, domain: "example.org", reason: "The site check asked for it.", before: [], changes: [{ action: "add", type: "TXT", name: "_check", data: "hello" }] } as never);
+  // A purchase whose job no longer holds the basket is not waiting, so the app does not offer it.
+  store.putPurchase({ id: "def456", status: "pending", createdAt: new Date().toISOString(), expiresAt: soon, replyTo: PAUL, host: "shop.example", total: "£23.98" } as never);
+  type Waiting = { waiting: Array<{ what: string; id: string; preview?: string; seen?: string }> };
+  const board = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as Waiting;
+  assert.equal(board.waiting.find((w) => w.id === "def456"), undefined);
+  const item = board.waiting.find((w) => w.id === "abc123")!;
+  assert.match(item.preview!, /Domain: example\.org\.[\s\S]*Add TXT _check/, "the app shows the item as its gate words it");
+  assert.equal(item.seen, seenHash("dns", "abc123", item.preview!));
+  const decision = { what: "dns", id: "abc123", verb: "decline", seen: item.seen };
+
+  assert.equal((await postApi("/approvals", decision)).status, 401, "no session");
+  assert.equal((await postApi("/approvals", decision, cookie, { origin: "https://elsewhere.example" })).status, 403);
+  assert.equal((await fetch(`${base}${APP_PATH}/api/approvals`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: "what=dns&id=abc123&verb=approve" })).status, 403, "a form cannot decide");
+  assert.equal((await postApi("/approvals", { ...decision, id: "zzz999" }, cookie)).status, 404);
+  assert.equal((await postApi("/approvals", { ...decision, what: "purchase" }, cookie)).status, 404, "an id is only good for its own kind");
+  assert.equal((await postApi("/approvals", { ...decision, what: "purchase", id: "def456" }, cookie)).status, 404, "what is not waiting cannot be decided");
+  assert.equal((await postApi("/approvals", { ...decision, verb: "maybe" }, cookie)).status, 404);
+  assert.equal((await postApi("/approvals", { ...decision, seen: "0".repeat(64) }, cookie)).status, 409, "not what was shown");
+  assert.equal((await postApi("/approvals", { ...decision, seen: undefined }, cookie)).status, 409);
+  assert.equal(store.getDns("abc123")!.status, "pending", "none of that decided anything");
+
+  // What is shown changes: the old fingerprint decides nothing.
+  store.updateDns("abc123", { reason: "A different reason." } as never);
+  assert.equal((await postApi("/approvals", decision, cookie)).status, 409);
+  assert.equal(store.getDns("abc123")!.status, "pending");
+  const fresh = (JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as Waiting).waiting.find((w) => w.id === "abc123")!;
+  assert.notEqual(fresh.seen, item.seen);
+
+  // The current fingerprint reaches the DNS gate itself, which answers exactly as it does in chat.
+  const before = elsewhere.length;
+  const res = await postApi("/approvals", { ...decision, seen: fresh.seen }, cookie, { origin: "https://workforce.example", "sec-fetch-site": "same-origin" });
+  assert.equal(res.status, 200);
+  const said = ((await res.json()) as { text: string }).text;
+  assert.equal(said, "Cancelled DNS change abc123. Nothing was changed.");
+  assert.equal(store.getDns("abc123")!.status, "cancelled");
+  assert.equal(store.getDns("abc123")!.note, `cancelled by ${APP_APPROVER}`, "the record says where the decision came from");
+  assert.equal(chat.view().messages.at(-1)!.text, said, "what happened is said in the app");
+  assert.deepEqual(elsewhere.slice(before), [{ to: PAUL, text: said }], "and where the item was first put to him");
+  assert.equal((await postApi("/approvals", { ...decision, seen: fresh.seen }, cookie)).status, 404, "decided once: it is no longer waiting");
+  assert.equal(chiefAsked.length, 1, "no model was asked anything");
+});
+
+test("a job can be stopped or run again from the app, and nothing it was permitted is carried over", async () => {
+  const cookie = await session();
+  const original = store.updateJob(store.createJob("research", "Find where it is in stock.", PAUL, "product", PAUL, { title: "Stock check", permits: ["purchase"] } as never).id, { status: "failed", finishedAt: iso(5), failure: "stalled" });
+  const review = store.updateJob(store.createJob("maintain", "Review it.", PAUL, "self", PAUL, { title: "Review: thing", reviewOf: original.id } as never).id, { status: "done", finishedAt: iso(5) });
+  const assistant = store.updateJob(store.createJob("ea", "Check mail.", PAUL, "product", PAUL, { title: "Brief" } as never).id, { status: "done", finishedAt: iso(5) });
+  const queued = store.createJob("research", "Wait here.", PAUL, "product", PAUL, { title: "Waiting job" } as never);
+
+  const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${original.id}`, cookie))) as { actions: { cancel: boolean; retry: boolean; rerunModels: string[] } };
+  assert.deepEqual(detail.actions, { cancel: false, front: false, retry: true, rerunModels: ["z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro", "anthropic/claude-opus-5.5"] });
+
+  assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" })).status, 401);
+  assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" }, cookie, { "sec-fetch-site": "cross-site" })).status, 403);
+  assert.equal((await postApi(`/jobs/nope/action`, { action: "cancel" }, cookie)).status, 404);
+  assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "delete" }, cookie)).status, 400);
+  assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "opus" }, cookie)).status, 409, "only a model a job may be pinned to");
+  assert.equal((await postApi(`/jobs/${review.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" }, cookie)).status, 409, "a review belongs to its loop");
+  assert.equal((await postApi(`/jobs/${assistant.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" }, cookie)).status, 409, "the assistant stays on Claude");
+  assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "cancel" }, cookie)).status, 409, "a finished job cannot be stopped");
+  assert.equal((await postApi(`/jobs/${queued.id}/action`, { action: "front" }, cookie)).status, 409, "it is not waiting behind anything");
+
+  const stopped = await postApi(`/jobs/${queued.id}/action`, { action: "cancel" }, cookie);
+  assert.equal(stopped.status, 200);
+  assert.equal(store.getJob(queued.id)!.status, "failed");
+  assert.equal(store.getJob(queued.id)!.failure, "cancelled");
+
+  chiefSays = "Three pharmacies have it.";
+  try {
+    const res = await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" }, cookie);
+    assert.equal(res.status, 200);
+    const { jobId } = (await res.json()) as { jobId: string };
+    const again = store.getJob(jobId)!;
+    assert.deepEqual([again.kind, again.brief, again.title, again.model, again.requestedBy, again.replyTo], ["research", "Find where it is in stock.", "Stock check", "z-ai/glm-5.3", WEB_SENDER, WEB_CONVERSATION]);
+    assert.equal(again.permits, undefined, "the permit the first job had is not carried over");
+    for (let i = 0; i < 200 && store.getJob(jobId)!.status !== "done" && store.getJob(jobId)!.status !== "failed"; i++) await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    chiefSays = undefined;
+  }
 });
 
 test("the OAuth client never reaches a worker, a page or a cookie", async () => {
