@@ -71,6 +71,48 @@ test("a fix round is told what earlier rounds already tried", () => {
   assert.match(t, /Earlier review \(job r1\)/);
 });
 
+/**
+ * The fix round answering the Nth review, chosen by its own properties: its round number and its
+ * brief. Store.allJobs() is Object.values and its order is not guaranteed; a job id that happens to
+ * be all digits (about one in seventeen, shortId's six hex characters) is an integer-like key, which
+ * JavaScript orders ahead of every string key, shuffling that job to the front of the array. This is
+ * the old flake in test/contract.test.ts (CI run 44271905913), demonstrated deterministically below.
+ */
+const roundFix = (jobs: ReturnType<Store["allJobs"]>, round: number) => jobs.find((j) => j.kind === "engineer" && j.fixRound === round);
+
+test("an all-digit job id shuffles store order: order-based selection reads the wrong fix round, semantic selection the intended one", () => {
+  const orig = withContract("Fix the redirect loop", "expired session goes to /login");
+  const lead = (round: number) =>
+    `Address the maintainer's review on the existing pull request ${PR} (automatic fix round ${round} of 3). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${PR} --comments. Do not open a new pull request.`;
+  const round1Brief = `${lead(1)}\n\nOriginal task:\n${orig}\n\nMaintainer's review (job r1):\n${reviewA}`;
+  const round2Brief = `${lead(2)}\n\nOriginal task:\n${orig}\n\nMaintainer's review (job r2):\n${reviewB}${deadEnds([{ id: "r1", text: reviewA }])}`;
+  const fix = (id: string, fixRound: number, brief: string) => ({
+    id, kind: "engineer", target: "product", brief, requestedBy: FOUNDER, replyTo: FOUNDER,
+    status: "done", createdAt: new Date().toISOString(), title: `Fix round ${fixRound}: Redirect loop`, fixRound,
+  });
+  const dir = tmp();
+  // Synthetic ids, invented for this demonstration: the round-1 job under the hex id 8301fb, the
+  // round-2 job under the all-digit id 276523 (the id shape CI run 44271905913 happened to draw).
+  // No such store or job ever existed; both records are fixtures. Round 1 was "created" first, as in
+  // the real loop, but its hex key sorts after the round-2 job's integer-like key.
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ jobs: { "8301fb": fix("8301fb", 1, round1Brief), "276523": fix("276523", 2, round2Brief) } }));
+  const store = new Store(dir);
+  const fixes = store.allJobs().filter((j) => j.kind === "engineer" && j.fixRound);
+  assert.equal(fixes.length, 2, "both fix rounds are in the store");
+  // The defect, shown not assumed: allJobs() hands the round-2 job back first, so the old
+  // order-based selection (fixes[1], the array's second job) reads the round-1 brief, which carries
+  // no "Already tried" section. That is exactly what the failed CI run asserted against.
+  assert.equal(fixes[0].fixRound, 2, "the all-digit id shuffles its job to the front");
+  assert.equal(fixes[1].fixRound, 1, "the old order-based fixes[1] is the round-1 job");
+  assert.doesNotMatch(fixes[1].brief, /Already tried/, "the old check read the wrong brief");
+  // The semantic selection finds the intended round whatever order the store returns.
+  const second = roundFix(fixes, 2);
+  assert.ok(second, "the second fix round is found by its own round number");
+  assert.match(second.brief, /Already tried: this pull request has been through 1 earlier review/);
+  assert.match(second.brief, /Original task:\nFix the redirect loop\n\nDone when:\nexpired session goes to \/login\n\nMaintainer's review/);
+  assert.equal(roundFix(fixes, 1)?.brief, round1Brief, "the first fix round is found the same way");
+});
+
 test("the same blockers twice stop the fix loop early and go to Paul; new blockers start another round", async () => {
   for (const [second, stops] of [[reviewA2, true], [reviewB, false]] as const) {
     const store = new Store(tmp());
@@ -94,8 +136,12 @@ test("the same blockers twice stop the fix loop early and go to Paul; new blocke
       assert.match(said, /is stuck: the last two reviews raised the same blocking issues/);
     } else {
       assert.equal(fixes.length, 2, "a second fix round ran");
-      assert.match(fixes[1].brief, /Already tried: this pull request has been through 1 earlier review/);
-      assert.match(fixes[1].brief, /Original task:\nFix the redirect loop\n\nDone when:\nexpired session goes to \/login\n\nMaintainer's review/);
+      // Selected semantically (roundFix above), never by array position: allJobs() order is not
+      // guaranteed, and an all-digit job id shuffles its job to the front (see the demonstration test).
+      const second = roundFix(fixes, 2);
+      assert.ok(second, "the second fix round is found by its round number, not the store's order");
+      assert.match(second.brief, /Already tried: this pull request has been through 1 earlier review/);
+      assert.match(second.brief, /Original task:\nFix the redirect loop\n\nDone when:\nexpired session goes to \/login\n\nMaintainer's review/);
       assert.doesNotMatch(said, /is stuck/);
     }
   }
