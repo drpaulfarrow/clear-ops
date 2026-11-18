@@ -726,7 +726,7 @@ export function buildApp(given: AppDeps) {
   // What GitHub says of each job's pull request (src/pr-state.ts): read-only, asked in the background
   // with the credential the service already uses for that repository, and never waited for.
   const prStates = deps.prStates ?? new PrStates({ token: async (slug) => repoTokens.get({ slug }) ?? (await githubAuth.token().catch(() => undefined)) });
-  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.get(url) });
+  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.info(url) });
   /**
    * Whether a request that changes something came from this site's own script: a JSON body, and where
    * the browser says where the request came from, from here. A form, or a page on another site, fails

@@ -13,10 +13,19 @@
  *    in the background, a few at a time, so a page is never held up by GitHub.
  *  - A merged pull request stays merged, so it is asked once. An open one is asked again after a few
  *    minutes, a closed one after an hour, and a failed request is left alone for ten minutes.
+ *  - It also keeps when the pull request was opened, so the app can tell the job that opened it from
+ *    jobs that only diagnosed, reviewed or pushed to it (src/app-data.ts).
  *  - Only an address of exactly the shape `https://github.com/<owner>/<repo>/pull/<n>` is ever asked
  *    about, and the token goes in a header to api.github.com and nowhere else.
  */
 export type PrState = "open" | "merged" | "closed";
+
+/** What GitHub says of a pull request: its state, and when it was opened. */
+export interface PrInfo {
+  state: PrState;
+  /** When the pull request was opened, as GitHub gives it. Tells a job that opened it from one that only worked on it. */
+  openedAt?: string;
+}
 
 const PR_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/;
 
@@ -46,7 +55,7 @@ export interface PrStatesOptions {
 }
 
 export class PrStates {
-  private known = new Map<string, { state?: PrState; at: number }>();
+  private known = new Map<string, { state?: PrState; openedAt?: string; at: number }>();
   private queued: string[] = [];
   private flying = new Set<string>();
   private readonly token: PrStatesOptions["token"];
@@ -59,15 +68,20 @@ export class PrStates {
     this.now = o.now ?? Date.now;
   }
 
-  /** What is known of a pull request right now. Never waits; asks GitHub in the background when it should. */
+  /** The state of a pull request, as far as it is known right now. Never waits. */
   get(url: string): PrState | undefined {
+    return this.info(url)?.state;
+  }
+
+  /** What is known of a pull request right now. Never waits; asks GitHub in the background when it should. */
+  info(url: string): PrInfo | undefined {
     if (!parsePr(url)) return undefined;
     const seen = this.known.get(url);
     if (this.stale(seen) && !this.flying.has(url) && !this.queued.includes(url)) {
       this.queued.push(url);
       this.pump();
     }
-    return seen?.state;
+    return seen?.state ? { state: seen.state, ...(seen.openedAt ? { openedAt: seen.openedAt } : {}) } : undefined;
   }
 
   private stale(seen: { state?: PrState; at: number } | undefined): boolean {
@@ -83,9 +97,10 @@ export class PrStates {
       this.flying.add(url);
       void this.ask(url)
         .catch(() => undefined)
-        .then((state) => {
+        .then((info) => {
           // A failed request keeps what was known before and is simply not asked again for a while.
-          this.known.set(url, { state: state ?? this.known.get(url)?.state, at: this.now() });
+          const before = this.known.get(url);
+          this.known.set(url, { state: info?.state ?? before?.state, openedAt: info?.openedAt ?? before?.openedAt, at: this.now() });
           if (this.known.size > KEEP) this.known.delete(this.known.keys().next().value!);
           this.flying.delete(url);
           this.pump();
@@ -94,7 +109,7 @@ export class PrStates {
   }
 
   /** Asks GitHub once. Resolves undefined for anything but a clear answer. */
-  private async ask(url: string): Promise<PrState | undefined> {
+  private async ask(url: string): Promise<PrInfo | undefined> {
     const pr = parsePr(url);
     if (!pr) return undefined;
     const { owner, repo, number } = pr;
@@ -105,9 +120,11 @@ export class PrStates {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!res.ok) return undefined;
-    const body = (await res.json()) as { state?: unknown; merged?: unknown };
-    if (body.merged === true) return "merged";
-    return body.state === "open" ? "open" : body.state === "closed" ? "closed" : undefined;
+    const body = (await res.json()) as { state?: unknown; merged?: unknown; created_at?: unknown };
+    const state: PrState | undefined = body.merged === true ? "merged" : body.state === "open" ? "open" : body.state === "closed" ? "closed" : undefined;
+    if (!state) return undefined;
+    const openedAt = typeof body.created_at === "string" && Number.isFinite(Date.parse(body.created_at)) ? body.created_at : undefined;
+    return { state, ...(openedAt ? { openedAt } : {}) };
   }
 
   /** Resolves once nothing is queued or in flight. For the tests. */
