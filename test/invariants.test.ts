@@ -7,6 +7,20 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const src = (f: string) => fs.readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
+/**
+ * index.ts without the one route where the signed-in web app carries Paul's own tap to a gate
+ * (18 Nov 2026, his call: approve from the app, one tap). The older rules below, that nothing but the
+ * orchestrator and the gate itself approves, hold for everything outside that route, and the route has
+ * an invariant of its own at the end of this file.
+ */
+const outsideAppApprovals = (f: string) => {
+  const text = src(f);
+  if (f !== "index.ts") return text;
+  const from = text.indexOf("app.post(`${APP_PATH}/api/approvals`");
+  const to = text.indexOf("app.post(`${APP_PATH}/api/jobs/:id/action`");
+  assert.ok(from > 0 && to > from, "the app's approval route is where it is expected");
+  return text.slice(0, from) + text.slice(to);
+};
 
 test("only allowlisted numbers are answered", () => {
   const orch = src("orchestrator.ts");
@@ -388,7 +402,7 @@ test("sending mail and inviting people happen only through the approval gate: on
   }
   for (const f of files) if (f !== "google.ts" && f !== "outbound.ts") assert.ok(!/["'`]\s*(messages|drafts)\/send/.test(src(f)), `${f} must not reference a send endpoint`);
   // Approval is reachable from exactly one place: the orchestrator's chat handler, after the allowlist check, with no model.
-  for (const f of files) if (f !== "outbound.ts" && f !== "orchestrator.ts") assert.ok(!/\.approve\(/.test(src(f)) || f === "jobs.ts", `${f} must not approve outbound actions`);
+  for (const f of files) if (f !== "outbound.ts" && f !== "orchestrator.ts") assert.ok(!/\.approve\(/.test(outsideAppApprovals(f)) || f === "jobs.ts", `${f} must not approve outbound actions`);
   const orch = src("orchestrator.ts");
   assert.equal([...orch.matchAll(/this\.outbound!?\.approve\(|gate\.approve\(/g)].length, 1, "one approval call site");
   assert.ok(orch.indexOf("parseOutboundCommand(trimmed)") > orch.indexOf("if (!isAllowed(sender))"), "approval is parsed only after the allowlist check");
@@ -732,7 +746,7 @@ test("the dns worker reads and prepares only: no Bash, Edit, Write or web, no ap
   const orch = src("orchestrator.ts");
   assert.equal([...orch.matchAll(/dnsGate\.approve\(/g)].length, 1, "one DNS approval call site");
   assert.ok(orch.indexOf("parseDnsCommand(trimmed)") > orch.indexOf("if (!isAllowed(sender))"), "DNS approval is parsed only after the allowlist check");
-  for (const f of fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"))) if (!["dns-gate.ts", "orchestrator.ts"].includes(f)) assert.ok(!/dnsGate\.approve|dns\.approve\(/.test(src(f)), `${f} must not approve DNS changes`);
+  for (const f of fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"))) if (!["dns-gate.ts", "orchestrator.ts"].includes(f)) assert.ok(!/dnsGate\.approve|dns\.approve\(/.test(outsideAppApprovals(f)), `${f} must not approve DNS changes`);
   // Scheduled runs and the chief's permits: the permit is per job, and the scheduler never passes one.
   assert.doesNotMatch(src("scheduler.ts"), /permits:\s*\[/, "scheduled runs get no permits");
 });
@@ -768,7 +782,7 @@ test("an account is created for Paul only through the sign-up gate, and only his
   assert.equal([...orch.matchAll(/signupGate\.approve\(/g)].length, 1, "one approval call site");
   assert.ok(orch.indexOf("parseSignupCommand(trimmed)") > orch.indexOf("if (!isAllowed(sender))"), "signup approval is parsed only after the allowlist check");
   assert.match(orch, /if \(signupCmd && this\.signup\) return this\.handleSignup/, "the approval command returns before any model runs");
-  for (const f of all()) if (!["signup-gate.ts", "orchestrator.ts"].includes(f)) assert.ok(!/signupGate\.approve|signup\.approve\(/.test(src(f)), `${f} must not approve a sign-up`);
+  for (const f of all()) if (!["signup-gate.ts", "orchestrator.ts"].includes(f)) assert.ok(!/signupGate\.approve|signup\.approve\(/.test(outsideAppApprovals(f)), `${f} must not approve a sign-up`);
   // Only the gate submits: the form-filling path is reachable from signup.ts and the gate alone.
   for (const f of all()) if (!["signup.ts", "signup-gate.ts", "browse.ts", "index.ts"].includes(f)) assert.ok(!/BrowserSignupSubmitter|SignupSession|fillForm\(|pageStep\(|outcomeStep\(/.test(src(f)), `${f} must never submit a sign-up`);
   assert.equal([...src("signup-gate.ts").matchAll(/submitter\.submit\(/g)].length, 1, "one place submits a sign-up: the gate");
@@ -1162,12 +1176,14 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
   // Two routes under /app are not a GET: the one that ends the session, and Paul's own message to the
   // chief (slice 2). Nothing under /app approves, starts, stops or edits anything directly.
-  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`"]);
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`"]);
+  // Every one of the three that does something is taken from this site's own script only.
+  assert.match(routes, /const ownScript = \(req: express\.Request\): boolean => \{[\s\S]*?return !!req\.is\("application\/json"\) && \(origin === undefined \|\| origin === new URL\(config\.publicUrl\)\.origin\) && \(site === undefined \|\| site === "same-origin"\);/);
+  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 3);
   // That message is taken from this site's own script only, is refused before it is kept when it is an
   // approval word, is never kept when it is a one-time code, and reaches the orchestrator as the app's
   // own sender with the flag no channel listener sets.
   const post = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/chat`"));
-  assert.match(post, /if \(!req\.is\("application\/json"\) \|\| \(origin !== undefined && origin !== new URL\(config\.publicUrl\)\.origin\) \|\| \(site !== undefined && site !== "same-origin"\)\) return void res\.status\(403\)/);
   assert.match(post, /const refused = webRefusal\(text\);\s*chat\.inbound\(parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text\);\s*if \(refused\) void chat\.send\(WEB_CONVERSATION, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: WEB_CONVERSATION, web: true \}\);/);
   assert.equal((index.match(/web: true/g) ?? []).length, 1, "the app's route is the only caller that says a message is from the app");
   for (const listener of ["discord.ts", "telegram.ts", "whatsapp.ts", "voice-bridge.ts", "instinct-chat.ts", "instinct-bridge.ts", "device.ts"]) assert.doesNotMatch(src(listener), /\bweb: true\b|WEB_SENDER/, `${listener} cannot speak as the app`);
@@ -1194,4 +1210,41 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(data, /const cost = realCost\(job\);/);
   assert.doesNotMatch(data, /job\.costUsd/);
   assert.match(src("github-auth.ts"), /const WORKER_STRIPPED = \[[^\]]*"UI_GITHUB_CLIENT_ID", "UI_GITHUB_CLIENT_SECRET"\]/);
+});
+
+test("a decision in the web app is Paul's own tap on the exact item shown, and reaches a gate only as a single-use grant", () => {
+  const index = src("index.ts");
+  const route = index.slice(index.indexOf("app.post(`${APP_PATH}/api/approvals`"), index.indexOf("app.post(`${APP_PATH}/api/jobs/:id/action`"));
+  // In order: this site's own script, an item that is waiting now, the fingerprint of what was shown,
+  // and only then a grant.
+  const own = route.indexOf("if (!ownScript(req)) return void res.status(403)");
+  const waiting = route.indexOf("appWaiting(deps.store, appSource().gates, Date.now()).find((w) => w.what === b.what && w.id === b.id)");
+  const seen = route.indexOf("!timingSafeEqual(Buffer.from(seen), Buffer.from(item.seen))) return void res.status(409)");
+  const mint = route.indexOf("const grant = mintAppApproval();");
+  assert.ok(own > 0 && waiting > own && seen > waiting && mint > seen, "the grant is minted last");
+  // That route is the only place in the service that mints one.
+  for (const f of fs.readdirSync(new URL("../src/", import.meta.url)).filter((n) => n.endsWith(".ts"))) {
+    const uses = (src(f).match(/mintAppApproval\(/g) ?? []).length;
+    assert.equal(uses, f === "index.ts" ? 1 : f === "app-approver.ts" ? 1 : 0, `${f} mints no grant of its own`);
+  }
+  // A grant is random, spent on first use, and short-lived.
+  const approver = src("app-approver.ts");
+  assert.match(approver, /const grant = `app-grant:\$\{randomBytes\(24\)\.toString\("hex"\)\}`;/);
+  assert.match(approver, /grants\.delete\(grant\);\s*return until >= now;/);
+  // Each gate still asks first whether it is an allowlisted chat account, and takes a grant only when it is not.
+  for (const [f, refuse] of [["outbound.ts", "OutboundError"], ["dns-gate.ts", "DnsError"], ["signup-gate.ts", "SignupError"]] as const) {
+    const gate = src(f);
+    assert.match(gate, new RegExp(`if \\(!isAllowed\\(approver\\)\\) \\{[^}]*if \\(!spendAppApproval\\(approver\\)\\) throw new ${refuse}\\("Refused: only Paul's own chat account can approve\\."\\);\\s*approver = APP_APPROVER;\\s*\\}`), `${f} approve`);
+    assert.match(gate, /if \(!isAllowed\(by\)\) \{[^}]*if \(!spendAppApproval\(by\)\) return "";\s*by = APP_APPROVER;\s*\}/, `${f} cancel`);
+  }
+  // The purchase gate's chat path is untouched; the app has its own door to the same settle as the page's tap.
+  const purchase = src("purchase.ts");
+  assert.match(purchase, /decide\(id: string, verb: "approve" \| "decline", by: string\): string \{\s*if \(!isAllowed\(by\)\) return "";/);
+  assert.match(purchase, /decideFromApp\(id: string, verb: "approve" \| "decline", grant: string\): string \{\s*if \(!spendAppApproval\(grant\)\) return "";\s*return this\.settle\(id, verb, APP_APPROVER\);/);
+  // Typed words in the app's chat still approve nothing, and the app's sender is still on no allowlist.
+  assert.match(src("web-chat.ts"), /parsePurchaseCommand\(t\) \|\|\s*parseOutboundCommand\(t\)/);
+  // A job run again from the app is given a model and nothing it was permitted before.
+  const action = index.slice(index.indexOf("app.post(`${APP_PATH}/api/jobs/:id/action`"), index.indexOf("app.get(`${APP_PATH}/api/jobs/:id`"));
+  assert.doesNotMatch(action, /permits|reviewOnly|origin:/);
+  assert.match(action, /const refused = rerunRefusal\(job\) \?\? perJobModelError\(model\);/);
 });
