@@ -859,8 +859,8 @@ export function buildApp(given: AppDeps) {
     res.json({ ok: true, text });
   });
   /**
-   * What Paul may do to a job from the app: stop it, move it to the front of its queue, or run it again
-   * on one of the models a job may be pinned to. Each is the job runner's own operation, the one the
+   * What Paul may do to a job from the app: say whether it did what he asked, stop it, move it to the
+   * front of its queue, or run it again on one of the models a job may be pinned to. Each is the job runner's own operation, the one the
    * chief's tools call. A job run again keeps its brief, title and pull request and nothing else: no
    * permit is ever carried over or granted here.
    */
@@ -872,6 +872,14 @@ export function buildApp(given: AppDeps) {
     if (!job) return void res.status(404).json({ error: "There is no job with that id." });
     const b = (req.body ?? {}) as { action?: unknown; model?: unknown };
     try {
+      // His own answer to "did this do what I asked?": kept on the job, and nothing else follows from it.
+      if (b.action === "verdict") {
+        if (job.status !== "done" && job.status !== "failed") return void res.status(409).json({ error: "It has not finished yet." });
+        const met = (b as { met?: unknown }).met;
+        if (met !== true && met !== false && met !== null) return void res.status(400).json({ error: "refused" });
+        deps.store.updateJob(id, { verdict: met === null ? undefined : { met, at: new Date().toISOString() } });
+        return void res.json({ ok: true, text: met === null ? "Cleared your answer." : met ? "Marked as done." : "Marked as not done." });
+      }
       if (b.action === "cancel") {
         const text = await jobs.cancel(id);
         tell(text, job.replyTo);

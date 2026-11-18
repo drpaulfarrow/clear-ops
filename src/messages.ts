@@ -18,7 +18,7 @@ export const MESSAGE_CLOSE = "</message_to_paul>";
 /** Appended to every worker prompt (see workerSpec in agents.ts): the two-part final answer. */
 export const REPORT_RULE = `${PAUL_STYLE}
 
-Your final answer has two parts. First, your full report: everything the instructions above ask of your report, with all the detail, lists, tables and links it needs. It is saved as the job's output, which Paul, the chief of staff and other workers can read. Any lines the instructions above require in your report (REVIEW, DESIGN, IMAGE or VERDICT lines) stay in the report exactly as specified. Then, last of all, your message to Paul in chat, on its own lines between ${MESSAGE_OPEN} and ${MESSAGE_CLOSE}: three or four plain sentences in one short paragraph saying what you did or found, what Paul needs to do if anything (or that nothing needs him), and the one most useful link (the pull request, the draft, the document). It must make sense on its own on a phone. No headings, labels, bullets, tables, markdown, job ids, costs or verdict lines in the message, and do not restate his brief. Paul sees only the message unless he asks for the full report.`;
+Your final answer has two parts. First, your full report: everything the instructions above ask of your report, with all the detail, lists, tables and links it needs. It is saved as the job's output, which Paul, the chief of staff and other workers can read. Any lines the instructions above require in your report (REVIEW, DESIGN, IMAGE or VERDICT lines) stay in the report exactly as specified. End the report with one more line of its own, after any of those, that says honestly how it turned out: "GOAL: met", or "GOAL: not met: <the one reason>", or "GOAL: needs Paul: <the one thing he must do>". It is met only if the thing Paul asked for now exists or has happened. Trying, getting part of the way, or explaining why you could not is not met: if you were asked to buy, send, book, fix or change something and it did not happen, say not met and why. Then, last of all, your message to Paul in chat, on its own lines between ${MESSAGE_OPEN} and ${MESSAGE_CLOSE}: three or four plain sentences in one short paragraph saying what you did or found, what Paul needs to do if anything (or that nothing needs him), and the one most useful link (the pull request, the draft, the document). It must make sense on its own on a phone. No headings, labels, bullets, tables, markdown, job ids, costs or verdict lines in the message, and do not restate his brief. Paul sees only the message unless he asks for the full report.`;
 
 /** At most this many sentences reach chat from a worker's message. */
 export const MAX_SENTENCES = 4;
@@ -26,7 +26,25 @@ export const MAX_SENTENCES = 4;
 export const MAX_MESSAGE_CHARS = 600;
 
 /** Lines the job runner reads from a report. They belong in the saved output, never in chat. */
-const MACHINE_LINE = /^[ \t>*`_-]*(?:REVIEW[ \t]+\S+?[ \t]*:|DESIGN[ \t]*:|IMAGE[ \t]*:|VERDICT[ \t]*:)/i;
+const MACHINE_LINE = /^[ \t>*`_-]*(?:REVIEW[ \t]+\S+?[ \t]*:|DESIGN[ \t]*:|IMAGE[ \t]*:|VERDICT[ \t]*:|GOAL[ \t]*:[ \t]*(?:not met|needs Paul|met)\b)/i;
+
+/** What a worker's own report says of how its job turned out. A claim to be shown as one, never evidence. */
+export interface ClaimedOutcome {
+  state: "met" | "not_met" | "needs_paul";
+  /** The one reason, or the one thing Paul must do, in the worker's words. */
+  detail?: string;
+}
+
+/** Reads the report's "GOAL: ..." line (REPORT_RULE). The last one counts; none means the worker said nothing. */
+export function parseOutcome(report: string): ClaimedOutcome | undefined {
+  let found: ClaimedOutcome | undefined;
+  for (const m of (report ?? "").matchAll(/^[ \t>*`_-]*GOAL[ \t]*:[ \t]*(not met|needs Paul|met)\b[ \t:]*(.*)$/gim)) {
+    const word = m[1].toLowerCase();
+    const detail = m[2].replace(/[*`_]+$/, "").trim();
+    found = { state: word === "met" ? "met" : word === "not met" ? "not_met" : "needs_paul", ...(detail ? { detail: detail.slice(0, 300) } : {}) };
+  }
+  return found;
+}
 /** The agent-creator's schedule recommendation fields, which follow its VERDICT line. */
 const SCHEDULE_FIELD = /^[ \t>*_-]*(?:Kind|Cron|Brief|Why)[ \t]*:/;
 /** Report-style labels at the start of a line: "Outcome:", "**What changed:**", "TL;DR:". */

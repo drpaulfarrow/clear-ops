@@ -22,7 +22,7 @@ import { BRIDGE_READ_DENY, CONTRACT_HEADING, DEEP_RESEARCH_NOTE, detectDepth, re
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
-import { addToReport, shortText, splitReport } from "./messages.js";
+import { addToReport, parseOutcome, shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type BudgetStop, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
@@ -1203,10 +1203,14 @@ export class JobRunner {
       // over one and never short-circuits the review flow (src/brief.ts).
       const { report, message } = splitReport(result.text);
       const outputPath = this.store.writeOutput(id, report);
+      // What the worker itself says came of it (its GOAL line). Kept as a claim and shown as one:
+      // nothing here acts on it, and no job is failed, retried or reviewed differently because of it.
+      const claimed = parseOutcome(report);
       this.store.updateJob(id, {
         status: "done",
         finishedAt: new Date().toISOString(),
         summary: message,
+        ...(claimed ? { claimed } : {}),
         outputPath,
         costUsd: result.costUsd,
       });

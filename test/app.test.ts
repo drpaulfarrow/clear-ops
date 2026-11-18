@@ -361,22 +361,91 @@ test("a run that ended is not a wish that was met: only the service's own eviden
 
   const board = appBoard({ store: s, queue: quietQueue, now });
   const of = (id: string) => board.jobs.find((j) => j.id === id)!;
-  assert.deepEqual(of(never.id).outcome, { state: "not_met", text: "Nothing was bought: no purchase was put to you." });
+  assert.deepEqual(of(never.id).outcome, { state: "not_met", text: "Nothing was bought: no purchase was put to you.", by: "service" });
   assert.equal(of(never.id).said, "I could not get past the sign-in, so nothing was ordered.");
-  assert.deepEqual(of(expired.id).outcome, { state: "not_met", text: "Nothing was bought: it expired before you approved it." });
-  assert.deepEqual(of(bought.id).outcome, { state: "met", text: "Bought: £23.98 on shop.example." });
+  assert.deepEqual(of(expired.id).outcome, { state: "not_met", text: "Nothing was bought: it expired before you approved it.", by: "service" });
+  assert.deepEqual(of(bought.id).outcome, { state: "met", text: "Bought: £23.98 on shop.example.", by: "service" });
   assert.equal(of(asking.id).outcome!.state, "waiting");
   assert.equal(of(plain.id).outcome!.state, "unconfirmed", "a worker saying it went well is not evidence");
-  assert.deepEqual(of(merged.id).outcome, { state: "met", text: "Reviewed and merged." });
-  assert.deepEqual(of(left.id).outcome, { state: "waiting", text: "Reviewed and left for you: merge it yourself" });
-  assert.deepEqual(of(sentBack.id).outcome, { state: "not_met", text: "The review asked for changes." });
+  assert.deepEqual(of(merged.id).outcome, { state: "met", text: "Reviewed and merged.", by: "service" });
+  assert.deepEqual(of(left.id).outcome, { state: "waiting", text: "Reviewed and left for you: merge it yourself", by: "service" });
+  assert.deepEqual(of(sentBack.id).outcome, { state: "not_met", text: "The review asked for changes.", by: "service" });
   assert.equal(of(unreviewed.id).outcome!.state, "unconfirmed");
   assert.equal(of(failed.id).outcome!.state, "not_met");
   assert.equal(of(assistant.id).said, undefined, "what the assistant told him is not put on a card");
   assert.ok(!JSON.stringify(board).includes("someone's email"));
   const ticks = board.jobs.filter((j) => j.outcome?.state === "met").map((j) => j.title).sort();
   assert.deepEqual(ticks, ["Merged work", "Order bought", "Review: Left for Paul", "Review: Merged work", "Review: Sent back"], "what is ticked is what the service can confirm: a purchase, a merge, and a review that gave its verdict");
-  assert.deepEqual(of(mergedReview.id).outcome, { state: "met", text: "Reviewed: merged." });
+  assert.deepEqual(of(mergedReview.id).outcome, { state: "met", text: "Reviewed: merged.", by: "service" });
+});
+
+test("Paul's own answer comes first, then the service's records, then what the worker says of itself", async () => {
+  const { parseOutcome, splitReport, plainMessage, REPORT_RULE, MESSAGE_OPEN, MESSAGE_CLOSE } = await import("../src/messages.js");
+  // The worker is told to say how it turned out, and what "met" means.
+  assert.match(REPORT_RULE, /"GOAL: met", or "GOAL: not met: <the one reason>", or "GOAL: needs Paul: <the one thing he must do>"/);
+  assert.match(REPORT_RULE, /It is met only if the thing Paul asked for now exists or has happened\./);
+  assert.deepEqual(parseOutcome("All good.\n\nGOAL: met"), { state: "met" });
+  assert.deepEqual(parseOutcome("**GOAL: not met: the checkout asked for a code I could not get**"), { state: "not_met", detail: "the checkout asked for a code I could not get" });
+  assert.deepEqual(parseOutcome("- GOAL: needs Paul: approve the purchase"), { state: "needs_paul", detail: "approve the purchase" });
+  assert.deepEqual(parseOutcome("GOAL: met\nlater\nGOAL: not met: second thoughts"), { state: "not_met", detail: "second thoughts" }, "the last line counts");
+  assert.equal(parseOutcome("The goal: met expectations."), undefined, "a sentence is not the line");
+  assert.equal(parseOutcome("GOAL: metric collected"), undefined);
+  // The line belongs to the report and never reaches chat.
+  const split = splitReport(`The basket is full.\n\nGOAL: not met: no code\n${MESSAGE_OPEN}I filled the basket but could not check out.${MESSAGE_CLOSE}`);
+  assert.match(split.report, /GOAL: not met: no code/);
+  assert.equal(split.message, "I filled the basket but could not check out.");
+  assert.doesNotMatch(plainMessage("I tried.\nGOAL: not met: no code"), /GOAL/);
+
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-claims-")));
+  const done = (kind: string, title: string, patch: Record<string, unknown> = {}) =>
+    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, "product", PAUL, { title } as never).id, { status: "done", startedAt: iso(20), finishedAt: iso(10), ...patch } as never);
+  const saysMet = done("research", "Says met", { claimed: { state: "met" } });
+  const saysNot = done("research", "Says not", { claimed: { state: "not_met", detail: "the site was down" } });
+  const saysNeeds = done("write", "Says needs", { claimed: { state: "needs_paul", detail: "pick a title" } });
+  const silent = done("research", "Says nothing");
+  const privateNot = done("ea", "Private not", { claimed: { state: "not_met", detail: "a private reason about someone" } });
+  const boughtButSaysNot = done("research", "Bought anyway", { permits: ["purchase"], claimed: { state: "not_met", detail: "I am not sure" } });
+  s.putPurchase({ id: "pbought", status: "executed", jobId: boughtButSaysNot.id, host: "shop.example", total: "£5.00", createdAt: iso(15), expiresAt: iso(-5), replyTo: PAUL } as never);
+  const saysMetButDidNot = done("research", "Claims a purchase", { permits: ["purchase"], claimed: { state: "met" } });
+  const overruled = done("research", "Overruled", { claimed: { state: "met" }, verdict: { met: false, at: iso(1) } });
+  const blessed = done("research", "Blessed", { verdict: { met: true, at: iso(1) } });
+
+  const board = appBoard({ store: s, queue: quietQueue, now });
+  const of = (id: string) => board.jobs.find((j) => j.id === id)!.outcome!;
+  assert.deepEqual(of(saysMet.id), { state: "unconfirmed", text: "It says it did what you asked. Nothing here confirms that.", by: "worker" }, "a worker saying met earns no tick");
+  assert.deepEqual(of(saysNot.id), { state: "not_met", text: "It says it did not get there: the site was down", by: "worker" });
+  assert.deepEqual(of(saysNeeds.id), { state: "waiting", text: "It says it needs you: pick a title", by: "worker" });
+  assert.equal(of(silent.id).by, "nobody");
+  assert.deepEqual(of(privateNot.id), { state: "not_met", text: "It says it did not get there.", by: "worker" }, "the assistant's reason is not put on a card");
+  assert.deepEqual(of(boughtButSaysNot.id), { state: "met", text: "Bought: £5.00 on shop.example.", by: "service" }, "the service's own record outranks the worker");
+  assert.deepEqual(of(saysMetButDidNot.id), { state: "not_met", text: "Nothing was bought: no purchase was put to you.", by: "service" }, "and a claim of met does not survive the record");
+  assert.deepEqual(of(overruled.id), { state: "not_met", text: "You marked this as not done.", by: "you" });
+  assert.deepEqual(of(blessed.id), { state: "met", text: "You marked this as done.", by: "you" });
+  assert.ok(!JSON.stringify(board).includes("a private reason"));
+});
+
+test("only Paul's button sets his answer, on a finished job, and it changes nothing else", async () => {
+  const cookie = await session();
+  const job = store.updateJob(store.createJob("research", "Look into it.", PAUL, "product", PAUL, { title: "Judged" } as never).id, { status: "done", startedAt: iso(9), finishedAt: iso(8), summary: "Found it." });
+  const running = store.updateJob(store.createJob("research", "Still going.", PAUL, "product", PAUL, { title: "Not yet" } as never).id, { status: "queued", capBlocked: true });
+  const mark = (id: string, met: unknown, c: string | undefined = cookie, headers: Record<string, string> = {}) => postApi(`/jobs/${id}/action`, { action: "verdict", met }, c, headers);
+  assert.equal((await mark(job.id, true, "")).status, 401);
+  assert.equal((await mark(job.id, true, cookie, { origin: "https://elsewhere.example" })).status, 403);
+  assert.equal((await mark(job.id, "yes")).status, 400);
+  assert.equal((await mark(running.id, true)).status, 409, "a job that has not finished cannot be judged");
+  assert.equal(store.getJob(job.id)!.verdict, undefined);
+
+  const before = { chat: chat.view().messages.length, elsewhere: elsewhere.length };
+  assert.equal((await mark(job.id, false)).status, 200);
+  assert.equal(store.getJob(job.id)!.verdict!.met, false);
+  const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${job.id}`, cookie))) as { job: { outcome: { state: string; by: string } }; actions: { verdict: boolean; yourVerdict?: boolean } };
+  assert.deepEqual([detail.job.outcome.state, detail.job.outcome.by, detail.actions.verdict, detail.actions.yourVerdict], ["not_met", "you", true, false]);
+  assert.equal((await mark(job.id, true)).status, 200);
+  assert.equal(store.getJob(job.id)!.verdict!.met, true);
+  assert.equal((await mark(job.id, null)).status, 200);
+  assert.equal(store.getJob(job.id)!.verdict, undefined, "cleared");
+  assert.deepEqual([store.getJob(job.id)!.status, store.getJob(job.id)!.summary], ["done", "Found it."], "nothing else about the job changed");
+  assert.deepEqual({ chat: chat.view().messages.length, elsewhere: elsewhere.length }, before, "and it is not announced anywhere");
 });
 
 test("the history pages through every finished job", () => {
@@ -694,7 +763,7 @@ test("a job can be stopped or run again from the app, and nothing it was permitt
   const queued = store.createJob("research", "Wait here.", PAUL, "product", PAUL, { title: "Waiting job" } as never);
 
   const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${original.id}`, cookie))) as { actions: { cancel: boolean; retry: boolean; rerunModels: string[] } };
-  assert.deepEqual(detail.actions, { cancel: false, front: false, retry: true, rerunModels: ["z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro", "anthropic/claude-opus-5.5"] });
+  assert.deepEqual(detail.actions, { verdict: true, cancel: false, front: false, retry: true, rerunModels: ["z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro", "anthropic/claude-opus-5.5"] });
 
   assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" })).status, 401);
   assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" }, cookie, { "sec-fetch-site": "cross-site" })).status, 403);
