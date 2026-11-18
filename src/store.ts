@@ -439,6 +439,16 @@ export interface Settings {
    */
   pageSessionKey?: string;
   /**
+   * The web app's own key for signing its session cookie (src/app-auth.ts), minted on first use and
+   * kept here so a restart does not sign Paul out. Never printed, never logged, never handed to a model.
+   */
+  appSessionKey?: string;
+  /**
+   * The GitHub account the web app first signed in (src/app-auth.ts): the allowed login and GitHub's
+   * own numeric id for it, so a login that is later renamed and taken by someone else is refused.
+   */
+  appGithubUser?: { login: string; id: number };
+  /**
    * The reports view's long-lived token (src/reports.ts), minted on first use and printed in chat by
    * /reports. It is its own token, not the board's, because it opens saved outputs rather than job
    * metadata; the same rules apply (compared in constant time, never logged, read-only pages only).

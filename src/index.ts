@@ -46,6 +46,9 @@ import { PASSWORD_PATH, SIGN_IN_PATH, SIGN_OUT_PATH, noPasswordPage, passwordPag
 import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
+import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
+import { appBoard, appHistory, appJob, type AppSource } from "./app-data.js";
+import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
 import { defaultCanary, type Canary } from "./auto-resume.js";
 import { INSTINCT_PATH, instinctRouter } from "./instinct-bridge.js";
@@ -84,6 +87,8 @@ export interface AppDeps {
   /** The card vault, for the same reason. */
   cardVault?: CardVault;
   /** The board's heartbeat log. Built from the data directory by default; a test injects one. */
+  /** The web app's GitHub sign-in (src/app-auth.ts). Tests inject one with a fake GitHub. */
+  appAuth?: AppAuth;
   uptime?: UptimeLog;
   /** The board's dependency checks. Built from config by default; a test injects fakes. */
   probes?: HealthProbes;
@@ -682,6 +687,89 @@ export function buildApp(deps: AppDeps) {
     }
     reportHeaders(res, PAGE_CSP);
     res.type("html").send(renderReportPage(report.entry, report.markdown ?? "", token));
+  });
+
+  /**
+   * The web app (docs/APP.md): the interface Paul asked for on 18 Nov 2026 in place of Discord. This
+   * first slice is read-only: the board in three views, the whole job history, and one job with its
+   * trace and what it cost. It sits behind its own gate, GitHub's sign-in for one account
+   * (src/app-auth.ts), and everything under /app is closed unless it is on the short open list below:
+   * the sign-in page, the round trip to GitHub and the static files, which hold no data. A route added
+   * under /app later is therefore behind the gate without anyone remembering to put it there.
+   *
+   * Every route that reads anything is a GET that writes nothing. The one POST ends the session.
+   */
+  const appAuthz = deps.appAuth ?? serviceAppAuth;
+  const APP_OPEN = [APP_SIGN_IN_PATH, `${APP_PATH}/auth`, APP_ASSETS_PATH];
+  const appHeaders = (res: express.Response) => {
+    noStore(res);
+    res.set("Content-Security-Policy", APP_CSP);
+    res.set("X-Content-Type-Options", "nosniff");
+    res.set("Referrer-Policy", "no-referrer");
+  };
+  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount() });
+  app.use((req, res, next) => {
+    if (!under(req.path, APP_PATH) || APP_OPEN.some((p) => under(req.path, p))) return next();
+    if (appAuthz.sessionValid(deps.store, req.headers.cookie)) return next();
+    appHeaders(res);
+    if (under(req.path, `${APP_PATH}/api`)) return void res.status(401).json({ error: "signed out" });
+    res.redirect(303, APP_SIGN_IN_PATH);
+  });
+  app.get(`${APP_ASSETS_PATH}/:name`, (req, res) => {
+    const asset = appAsset(String(req.params.name ?? ""));
+    res.set("X-Content-Type-Options", "nosniff");
+    if (!asset) return void res.status(404).type("text/plain").send("Not found");
+    res.set("Cache-Control", "public, max-age=300");
+    res.type(asset.type).send(asset.body);
+  });
+  const refusalOf = (value: unknown): string | undefined => (typeof value === "string" && Object.hasOwn(REFUSAL_TEXT, value) ? REFUSAL_TEXT[value as AppAuthRefusal] : undefined);
+  app.get(APP_SIGN_IN_PATH, (req, res) => {
+    appHeaders(res);
+    if (appAuthz.sessionValid(deps.store, req.headers.cookie)) return res.redirect(303, APP_PATH);
+    const error = refusalOf(req.query.refused);
+    res.type("html").send(appSignInPage({ enabled: appAuthz.enabled(), login: appAuthz.allowedLogin(), ...(error ? { error } : {}) }));
+  });
+  app.get(APP_AUTH_START_PATH, (_req, res) => {
+    appHeaders(res);
+    const started = appAuthz.start();
+    if (!started) return res.redirect(303, `${APP_SIGN_IN_PATH}?refused=off`);
+    res.set("Set-Cookie", started.cookie);
+    res.redirect(303, started.url);
+  });
+  app.get(APP_AUTH_CALLBACK_PATH, async (req, res) => {
+    appHeaders(res);
+    const result = await appAuthz.finish(deps.store, { code: req.query.code, state: req.query.state, cookieHeader: req.headers.cookie });
+    if ("refused" in result) {
+      res.set("Set-Cookie", appAuthz.clearStateCookie());
+      return res.redirect(303, `${APP_SIGN_IN_PATH}?refused=${result.refused}`);
+    }
+    res.set("Set-Cookie", [appAuthz.clearStateCookie(), result.cookie]);
+    res.redirect(303, APP_PATH);
+  });
+  app.post(APP_SIGN_OUT_PATH, (_req, res) => {
+    // Behind the gate, so only a request that carried this service's own session reaches here, and a
+    // form on another site (which sends no SameSite=Lax cookie on a POST) cannot sign him out.
+    appHeaders(res);
+    res.set("Set-Cookie", appAuthz.clearCookie());
+    res.redirect(303, APP_SIGN_IN_PATH);
+  });
+  app.get(APP_PATH, (_req, res) => {
+    appHeaders(res);
+    res.type("html").send(appShell());
+  });
+  app.get(`${APP_PATH}/api/board`, (_req, res) => {
+    appHeaders(res);
+    res.json(appBoard(appSource()));
+  });
+  app.get(`${APP_PATH}/api/history`, (req, res) => {
+    appHeaders(res);
+    res.json(appHistory(appSource(), typeof req.query.before === "string" ? req.query.before : undefined));
+  });
+  app.get(`${APP_PATH}/api/jobs/:id`, (req, res) => {
+    appHeaders(res);
+    const detail = appJob(appSource(), String(req.params.id ?? ""));
+    if (!detail) return void res.status(404).json({ error: "no such job" });
+    res.json(detail);
   });
 
   return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, startHealth, voice };

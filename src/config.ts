@@ -289,6 +289,15 @@ export const config = {
    */
   publicUrl: (process.env.PUBLIC_URL || (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : `http://localhost:${process.env.PORT ?? 8080}`)).replace(/\/+$/, ""),
   /**
+   * The signed-in web app (src/app-auth.ts, docs/APP.md): a GitHub OAuth client, and the one GitHub
+   * login that may sign in. Off, with every page under /app refused, until both client values are set.
+   */
+  app: {
+    githubClientId: process.env.UI_GITHUB_CLIENT_ID ?? "",
+    githubClientSecret: process.env.UI_GITHUB_CLIENT_SECRET ?? "",
+    githubLogin: (process.env.UI_GITHUB_LOGIN || "drpaulfarrow").trim().toLowerCase(),
+  },
+  /**
    * Paul's Google Workspace, for the executive assistant: an OAuth client for his own user account
    * (no service account, no domain-wide delegation). GOOGLE_ACCOUNT, when set, is the only account
    * that may be connected. GOOGLE_TOKEN_KEY encrypts the stored refresh token; without it the key is

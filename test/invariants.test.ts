@@ -1153,3 +1153,26 @@ test("a document through the Instinct bridge is a private upload, validated befo
   const jsonAt = index.indexOf("app.use(express.json(");
   assert.ok(bridgeAt > -1 && jsonAt > -1 && bridgeAt < jsonAt, "the bearer token is checked before any document body is parsed");
 });
+
+test("the web app is behind GitHub sign-in for one account, reads only, and its client secret never reaches a worker", () => {
+  const index = src("index.ts");
+  const routes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
+  // One gate over everything under /app, with a short open list that holds no data.
+  assert.match(routes, /const APP_OPEN = \[APP_SIGN_IN_PATH, `\$\{APP_PATH\}\/auth`, APP_ASSETS_PATH\];/);
+  assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
+  // Nothing under /app changes anything: the only route that is not a GET ends the session.
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH"]);
+  const auth = src("app-auth.ts");
+  // GitHub is asked for no scope, the answer is tied to the browser, and only the login and id are kept.
+  assert.doesNotMatch(auth, /\bscope[:=]/);
+  assert.match(auth, /!safeEqual\(o\.state, expected\)\) return \{ refused: "state" \}/);
+  assert.match(auth, /if \(user\.login\.toLowerCase\(\) !== this\.login\) return \{ refused: "account" \}/);
+  assert.match(auth, /pinned\.id !== user\.id\) return \{ refused: "account" \}/);
+  assert.doesNotMatch(auth, /setSetting\([^)]*token/i);
+  // Money on the app is the provider's own figure or nothing, and the data module writes nothing.
+  const data = src("app-data.ts");
+  assert.match(data, /spendDisplay\(source\.queue\.spendState\(\)\)/);
+  assert.match(data, /const cost = realCost\(job\);/);
+  assert.doesNotMatch(data, /job\.costUsd/);
+  assert.match(src("github-auth.ts"), /const WORKER_STRIPPED = \[[^\]]*"UI_GITHUB_CLIENT_ID", "UI_GITHUB_CLIENT_SECRET"\]/);
+});
