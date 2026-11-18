@@ -4,7 +4,7 @@ Paul asked on 18 Nov 2026 for a proper interface in place of Discord. This is it
 
 ## What slice 1 does
 
-Read-only. Nothing in it starts, stops, approves or changes anything.
+The board and the job page. They only read.
 
 - **The board**, in three views: by status (waiting on Paul, running, queued, done, failed), as a timeline, and by repository.
 - **The whole history**: the timeline loads older finished jobs a page at a time, back to the first.
@@ -13,7 +13,29 @@ Read-only. Nothing in it starts, stops, approves or changes anything.
 
 `docs/app/board.png`, `docs/app/job.png` and `docs/app/phone.png` show it with made-up jobs.
 
-What it does not do yet: chat with the chief, approving anything, cancelling or re-running a job, merging a pull request, changing caps or models, project spaces of Paul's own, voice, push notifications, search. Each is a later slice. Something waiting on Paul is shown with the words to send in chat, and nothing else about it.
+## What slice 2 adds: chat with the chief
+
+The app opens on a conversation with the chief, with the board beside it. A switch in the header shows the chat, both, or the board; a phone shows one at a time. `docs/app/home.png` and `docs/app/phone-chat.png` show it with made-up jobs.
+
+- **It is its own conversation.** The chief keeps a separate thread of talk for the app, so it does not remember what was said in Discord, and Discord does not see what is said here.
+- **Jobs started here report here**, and each appears in the conversation as a card that updates and opens the job page. They do not also post to Discord yet.
+- **While the chief works** the conversation shows what it is doing, as Discord does.
+- **Slash commands work as typed**: `/jobs`, `/spend`, `/resume`, `/trace <id>` and the rest. There is no menu of them yet.
+- **Approvals do not work here.** `send`, `buy`, `dns apply`, `signup apply`, a one-time code, `act as me`, `read doc`, `yes <id>`, `/password` and device pairing are refused with one plain line, and still work in Discord. Something prepared from the app (an email, a purchase) is approved in Discord by its id. The app approving things is a later slice and will be its own change.
+- **Not yet**: attaching files, voice notes, pictures in replies (the caption is kept), a separate conversation per project.
+
+### How the chat is kept safe (`src/web-chat.ts`, `src/orchestrator.ts`)
+
+- A message enters only through `POST /app/api/chat`, behind the gate. It must be a JSON request from this site's own script: a form, or a page on another site, is refused even with Paul's cookie.
+- It reaches the orchestrator as `web:paul` with a flag only that route sets. `web:paul` is on no allowlist, so every approval gate that checks `isAllowed` refuses it for itself, and the orchestrator lets it through only as exactly that sender, in exactly the app's conversation, with no files.
+- Approval words are refused twice, in the route before the message is kept and in the orchestrator before any command is parsed.
+- A message shaped like a one-time code is never written down: a placeholder is kept instead, and it never reaches the orchestrator.
+- The transcript is one owner-only file, `DATA_DIR/app/chat.json`, capped at 500 messages, with tokens redacted. It holds what the chief told Paul, which can include what a job found. The status line is never saved.
+- What the service says is rendered and escaped by `src/reports.ts` before the app sees it; Paul's own words travel as text.
+
+## Still to come
+
+What it does not do yet: approving anything, cancelling or re-running a job, merging a pull request, changing caps or models, project spaces of Paul's own, voice, push notifications, search. Each is a later slice. Something waiting on Paul is shown with the words to send in chat, and nothing else about it.
 
 ## Switching it on (Paul, once, about five minutes)
 
@@ -38,7 +60,7 @@ Only the GitHub account `drpaulfarrow` gets in. To allow a different account ins
 
 ## The gate (`src/index.ts`)
 
-One middleware over everything under `/app`, matched the way Express matches routes. The open list is the sign-in page, `/app/auth` and `/app/assets` (a fixed table of five files that hold no data). Everything else needs a session: a page is sent to the sign-in, a JSON route answers 401. A route added under `/app` later is behind the gate without anyone putting it there. The only route that is not a GET ends the session.
+One middleware over everything under `/app`, matched the way Express matches routes. The open list is the sign-in page, `/app/auth` and `/app/assets` (a fixed table of five files that hold no data). Everything else needs a session: a page is sent to the sign-in, a JSON route answers 401. A route added under `/app` later is behind the gate without anyone putting it there. Two routes are not a GET: the one that ends the session, and Paul's message to the chief.
 
 ## What it shows, and the rules it keeps (`src/app-data.ts`)
 
@@ -52,4 +74,4 @@ The app shows more than the jobs board at `/jobs`, on Paul's instruction: spend,
 
 ## The page itself (`src/app-pages.ts`, `public/app/`)
 
-One stylesheet and one script, no framework and no build step, plus three open-licensed fonts served from the npm packages. The policy allows script, styles, fonts and requests from this service only, no inline script or style, and no frames. The script draws with DOM nodes, never by assembling HTML; the one exception is the saved output the service already rendered. It asks for the board every five seconds while the tab is visible.
+One stylesheet and one script, no framework and no build step, plus three open-licensed fonts served from the npm packages. The policy allows script, styles, fonts and requests from this service only, no inline script or style, and no frames. The script draws with DOM nodes, never by assembling HTML; the one exception is the saved output the service already rendered. It asks for the board every five seconds while the tab is visible, and for the conversation every second and a half while something is happening in it.
