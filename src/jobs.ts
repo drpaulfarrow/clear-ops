@@ -17,6 +17,7 @@ import { londonYmd } from "./london.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner, RunResult } from "./agents.js";
 import { describeWorkerTool, JobProgress, type JobProgressOptions } from "./status.js";
+import { hasAcceptanceIds, isShapedBrief, SHAPING_REFUSAL, unmetAcceptance } from "./brief.js";
 import { nextCheckAt, type Canary, type CanaryProvider } from "./auto-resume.js";
 import { BRIDGE_READ_DENY, CONTRACT_HEADING, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
@@ -407,6 +408,15 @@ export class JobRunner {
       if (!PR_KINDS.includes(kind)) throw new Error(`A ${kind} job cannot be review only: only ${PR_KINDS.join(" and ")} open a pull request for Paul to review.`);
       if (extra.reviewOnly !== true) delete extra.reviewOnly;
     }
+    // The shaped brief (src/brief.ts): an informal request the chief shaped carries the requester's
+    // own words verbatim and separates confirmed intent from assumptions and unknowns, and its
+    // contract must name its acceptances ("A1:", "A2:"), so a job can fail against a specific one and
+    // Paul can check each. The rule lives here, in the one function every job goes through, not in a
+    // prompt. Only a job the chief starts itself: a fix round or a design-loop build quotes an
+    // original brief that may be shaped, and its contract is the one it inherited, not a new one to
+    // check here. The orchestrator's start_job says the same thing to the chief before this, with a
+    // message worded for the model; this is the backstop for every other caller.
+    if (kind === "engineer" && !extra.fixRound && !extra.designLoop && isShapedBrief(brief) && !hasAcceptanceIds(extra.doneWhen)) throw new Error(SHAPING_REFUSAL);
     // The contract: only an engineer job has one, and it rides at the end of the brief, so the review
     // and every fix round (which quote the brief) carry it with no further plumbing.
     if (kind !== "engineer" || !extra.doneWhen?.trim()) delete extra.doneWhen;
@@ -1194,6 +1204,28 @@ export class JobRunner {
       if (BUILDS(job.kind)) result.text = addToReport(result.text, jobCredentialNote(job.target));
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
       const { report, message } = splitReport(result.text);
+      // An engineer that reports one of its own acceptances unmet has not reached the finish line
+      // (src/brief.ts): the job is failed naming that acceptance, with the full report still saved,
+      // and nothing follows it (no review, no fix round, no merge), exactly as for any other failure.
+      // A report with no verdict lines is never failed on that account alone: the maintainer checks
+      // every line of the contract as before, and this path acts only on the engineer's own word.
+      const unmet = job.kind === "engineer" ? unmetAcceptance(report, job.doneWhen) : undefined;
+      if (unmet) {
+        const detail = `Acceptance ${unmet.id} of its contract is not met: ${unmet.reason}`;
+        this.jobTrace(job).noteEnd(false, `unmet acceptance ${unmet.id}`, unmet.reason);
+        const failedPath = this.store.writeOutput(id, `${report}\n\n${detail}\n`);
+        this.store.updateJob(id, {
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+          error: detail,
+          failure: "error",
+          outputPath: failedPath,
+          summary: `Failed (unmet acceptance ${unmet.id}): ${shortText(unmet.reason, 200)}`,
+        });
+        const failed = this.store.getJob(id) ?? job;
+        await this.messenger.send(job.replyTo ?? job.requestedBy, `Failed: ${jobLabel(failed)}. ${shortText(detail)}`).catch(() => undefined);
+        return;
+      }
       const outputPath = this.store.writeOutput(id, report);
       this.store.updateJob(id, {
         status: "done",

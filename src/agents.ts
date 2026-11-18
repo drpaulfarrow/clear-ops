@@ -403,9 +403,17 @@ const BUILD_TEST_DISCIPLINE = `Machine and time: the dependencies this repositor
  */
 export const CONTRACT_HEADING = "Done when:";
 
-export const CONTRACT_RULE_ENGINEER = `The finish line: if your brief has a "${CONTRACT_HEADING}" section, the task is finished only when every line of it is true, and not before. For a bug fix or a change in behaviour, write the test first: a test that fails on the current code for the reason the brief describes, run it and see it fail, then make the change and see the same test pass. In your report, name that test and say that you saw it fail before the change. If a line cannot be met, say which line and why; never report an easier version of the task as done.`;
+export const CONTRACT_RULE_ENGINEER = `The finish line: if your brief has a "${CONTRACT_HEADING}" section, the task is finished only when every line of it is true, and not before. For a bug fix or a change in behaviour, write the test first: a test that fails on the current code for the reason the brief describes, run it and see it fail, then make the change and see the same test pass. In your report, name that test and say that you saw it fail before the change. If a line cannot be met, say which line and why; never report an easier version of the task as done. When the contract's lines carry acceptance IDs ("A1:", "A2:"), each line is a separately identified acceptance: work to each one, and end your report with one line per acceptance, exactly "ACCEPT A1: met" or "ACCEPT A2: not met: <one short reason>". Say met only for an acceptance you have evidence for; the service reads these lines, and an acceptance you report not met fails the job naming that acceptance. Never report an easier version of a line as met.`;
 
-export const CONTRACT_RULE_MAINTAINER = `The finish line: if the original task has a "${CONTRACT_HEADING}" section, check every line of it against the diff and the test run, and say in your report which lines are met. A line that is not met is a blocking issue. So is a bug fix or a change in behaviour with no test that would have failed before it: check by reading the test, and where it is cheap, by running that test against the default branch. Request changes naming the line; do not merge.`;
+export const CONTRACT_RULE_MAINTAINER = `The finish line: if the original task has a "${CONTRACT_HEADING}" section, check every line of it against the diff and the test run, and say in your report which lines are met. A line that is not met is a blocking issue. So is a bug fix or a change in behaviour with no test that would have failed before it: check by reading the test, and where it is cheap, by running that test against the default branch. Request changes naming the line; do not merge. When the contract's lines carry acceptance IDs ("A1:", "A2:"), check each acceptance by its ID and say in your report which IDs are met; an unmet acceptance is a blocking issue that names its ID.`;
+
+/**
+ * How an engineer reads a shaped brief (src/brief.ts): the requester's own words kept verbatim, the
+ * confirmed intent kept separate from what the chief inferred and from what remains open. The
+ * engineer works to the confirmed intent; an assumption is a proposal to verify, an unknown is a
+ * question to resolve, and neither is ever settled.
+ */
+export const SHAPED_BRIEF_RULE = `A shaped brief quotes the requester's own words under "Request (verbatim):" and keeps what the request actually says ("Confirmed intent:") visibly separate from what the chief inferred ("Assumptions (inferred, not confirmed):") and what remains open ("Unknowns (open questions):"). Work to the confirmed intent; treat each assumption as a proposal to verify rather than a settled requirement, and say in your report where one proved wrong; resolve what you can of the unknowns from the repository and flag what you cannot. Never present an assumption or an unknown as settled, and never widen the work past the non-scope.`;
 
 export const REVIEW_VERDICT_RULES = `End your report with one line per pull request you reviewed, in exactly one of these forms, with the pull request's full URL:
 REVIEW <url>: merged
@@ -595,6 +603,8 @@ ${UPDATE_BRANCH}
 ${BUILD_TEST_DISCIPLINE}
 
 ${CONTRACT_RULE_ENGINEER}
+
+${SHAPED_BRIEF_RULE}
 
 Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with your report: the pull request URL, what changed, which files, test results, and open questions. ${CLEAN_ROOM}`,
       };
