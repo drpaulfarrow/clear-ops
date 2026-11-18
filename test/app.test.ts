@@ -29,6 +29,7 @@ const { DnsGate } = await import("../src/dns-gate.js");
 const { OutboundGate } = await import("../src/outbound.js");
 const { SignupGate } = await import("../src/signup-gate.js");
 const { seenHash } = await import("../src/app-data.js");
+const { PrStates, PR_STATE_CONCURRENCY } = await import("../src/pr-state.js");
 const { appAsset, APP_CSP } = await import("../src/app-pages.js");
 const { workerGithubEnv } = await import("../src/github-auth.js");
 const { tracesDir } = await import("../src/trace.js");
@@ -98,7 +99,8 @@ const session = async () => (signedIn ??= pair(cookieNamed(await signInAs({ logi
 
 function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
   const messenger = { send: async (to: string, text: string) => void elsewhere.push({ to, text }) };
-  const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c });
+  // No test here may reach the real GitHub: the app is given a pull-request reader with no credential.
+  const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c, prStates: new PrStates({ token: () => undefined }) });
   return new Promise<{ server: import("node:http").Server; base: string; scheduler: Scheduler; orchestrator: typeof built.orchestrator }>((resolve) => {
     const srv = built.app.listen(0, () => resolve({ server: srv, base: `http://127.0.0.1:${(srv.address() as import("node:net").AddressInfo).port}`, scheduler: built.scheduler, orchestrator: built.orchestrator }));
   });
@@ -422,6 +424,90 @@ test("Paul's own answer comes first, then the service's records, then what the w
   assert.deepEqual(of(overruled.id), { state: "not_met", text: "You marked this as not done.", by: "you" });
   assert.deepEqual(of(blessed.id), { state: "met", text: "You marked this as done.", by: "you" });
   assert.ok(!JSON.stringify(board).includes("a private reason"));
+});
+
+test("GitHub is asked what became of a pull request: in the background, read-only, and only as often as it should be", async () => {
+  let clock = 1_000_000;
+  const asked: Array<{ url: string; method: string; auth: string | null }> = [];
+  let flying = 0;
+  let most = 0;
+  let answer: (url: string) => Response = () => new Response("{}", { status: 404 });
+  const fake = (async (url: string | URL, init?: RequestInit) => {
+    asked.push({ url: String(url), method: init?.method ?? "GET", auth: new Headers(init?.headers).get("authorization") });
+    flying += 1;
+    most = Math.max(most, flying);
+    await new Promise((r) => setTimeout(r, 2));
+    flying -= 1;
+    return answer(String(url));
+  }) as typeof fetch;
+  const body = (o: unknown) => new Response(JSON.stringify(o), { status: 200 });
+  const prs = new PrStates({ token: (slug) => (slug === "o/secret" ? undefined : "tok-123"), fetch: fake, now: () => clock });
+  const pr = (n: number, repo = "o/r") => `https://github.com/${repo}/pull/${n}`;
+
+  answer = (url) => (url.endsWith("/1") ? body({ state: "closed", merged: true }) : url.endsWith("/2") ? body({ state: "closed", merged: false }) : url.endsWith("/3") ? body({ state: "open", merged: false }) : new Response("no", { status: 500 }));
+  assert.equal(prs.get(pr(1)), undefined, "the first look never waits: it answers that it does not know yet");
+  for (const n of [2, 3, 4]) prs.get(pr(n));
+  prs.get(pr(1));
+  await prs.settled();
+  assert.deepEqual([prs.get(pr(1)), prs.get(pr(2)), prs.get(pr(3)), prs.get(pr(4))], ["merged", "closed", "open", undefined]);
+  assert.deepEqual(asked.map((a) => a.url).sort(), [1, 2, 3, 4].map((n) => `https://api.github.com/repos/o/r/pulls/${n}`), "one request each, to GitHub's own API");
+  assert.ok(asked.every((a) => a.method === "GET" && a.auth === "Bearer tok-123" && !a.url.includes("tok-123")), "read-only, the credential in a header");
+
+  // Not asked again until it should be: merged never, open after a few minutes, closed after an hour, a failure after ten minutes.
+  asked.length = 0;
+  for (const n of [1, 2, 3, 4]) prs.get(pr(n));
+  await prs.settled();
+  assert.equal(asked.length, 0);
+  clock += 4 * 60_000;
+  answer = () => body({ state: "closed", merged: true });
+  for (const n of [1, 2, 3, 4]) prs.get(pr(n));
+  await prs.settled();
+  assert.deepEqual(asked.map((a) => a.url), ["https://api.github.com/repos/o/r/pulls/3"], "only the open one, now merged");
+  assert.equal(prs.get(pr(3)), "merged");
+  clock += 7 * 60_000;
+  answer = () => new Response("no", { status: 503 });
+  asked.length = 0;
+  for (const n of [1, 2, 3, 4]) prs.get(pr(n));
+  await prs.settled();
+  assert.deepEqual(asked.map((a) => a.url), ["https://api.github.com/repos/o/r/pulls/4"]);
+  clock += 61 * 60_000;
+  prs.get(pr(2));
+  await prs.settled();
+  assert.equal(prs.get(pr(2)), "closed", "a failed look keeps what was known");
+
+  // Nothing but a pull request's own address is ever asked about, and nothing is asked without a credential.
+  asked.length = 0;
+  for (const bad of ["https://github.com/o/r/pull/5/files", "https://evil.example/o/r/pull/5", "https://github.com/o/r/issues/5", "#12", "https://github.com/o/r/pull/5?x=1", "https://github.com/o/../pull/5"]) assert.equal(prs.get(bad), undefined, bad);
+  prs.get(pr(9, "o/secret"));
+  await prs.settled();
+  assert.equal(asked.length, 0);
+
+  // A page full of jobs does not become a flood.
+  answer = () => body({ state: "open" });
+  for (let n = 100; n < 140; n++) prs.get(pr(n));
+  await prs.settled();
+  assert.ok(most <= PR_STATE_CONCURRENCY, `at most ${PR_STATE_CONCURRENCY} at once (saw ${most})`);
+});
+
+test("a pull request Paul merged himself counts as done, and one he closed does not", () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-prs-")));
+  const done = (kind: string, title: string, patch: Record<string, unknown> = {}) =>
+    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, "self", PAUL, { title } as never).id, { status: "done", startedAt: iso(20), finishedAt: iso(10), ...patch } as never);
+  const url = (n: number) => `https://github.com/o/r/pull/${n}`;
+  const merged = done("engineer", "Merged by Paul", { pr: url(1), reviewOnly: true });
+  const closed = done("engineer", "Closed", { pr: url(2), reviewOnly: true });
+  const open = done("engineer", "Still open", { pr: url(3), reviewOnly: true });
+  const unknown = done("engineer", "Not asked yet", { pr: url(4), reviewOnly: true });
+  const sentBackThenMerged = done("engineer", "Sent back then merged", { pr: url(5) });
+  s.writeOutput(done("maintain", "Review: Sent back then merged", { reviewOf: sentBackThenMerged.id }).id, `REVIEW ${url(5)}: changes requested: a test is missing`);
+  const states: Record<string, "merged" | "closed" | "open"> = { [url(1)]: "merged", [url(2)]: "closed", [url(3)]: "open", [url(5)]: "merged" };
+  const board = appBoard({ store: s, queue: quietQueue, now, prState: (u) => states[u] });
+  const of = (id: string) => board.jobs.find((j) => j.id === id)!.outcome!;
+  assert.deepEqual(of(merged.id), { state: "met", text: "Its pull request was merged.", by: "service" });
+  assert.deepEqual(of(closed.id), { state: "not_met", text: "Its pull request was closed without being merged.", by: "service" });
+  assert.deepEqual(of(open.id), { state: "waiting", text: "Its pull request is open for you to review.", by: "service" });
+  assert.equal(of(unknown.id).state, "waiting", "until GitHub has answered, it reads as it did before");
+  assert.equal(of(sentBackThenMerged.id).state, "met", "what GitHub says now outranks an earlier review");
 });
 
 test("only Paul's button sets his answer, on a finished job, and it changes nothing else", async () => {

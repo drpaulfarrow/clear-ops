@@ -93,10 +93,10 @@ Paul's point on 18 Nov 2026: a run that ended is not a wish that was met, and th
 Who is believed, in order (19 Nov 2026):
 
 1. **Paul.** A finished job's page asks "Did it do what you asked?" with Yes and No buttons. His answer is kept on the job (`verdict`), outranks everything else, can be cleared, and changes nothing else about the job.
-2. **The service's own records**, as above.
+2. **The service's own records**, as above, and now **GitHub's own word on a job's pull request** (`src/pr-state.ts`): merged means done, closed without merging means not done, and this is the only record of a merge Paul makes himself. It outranks an earlier review verdict. GitHub is asked in the background, read-only, with the credential the service already uses for that repository; a page never waits for it, a merged pull request is asked about once, and an open one again every few minutes. Until GitHub has answered, a job reads as it did before.
 3. **The worker's own report.** Every worker now ends its report with a line saying how it turned out: `GOAL: met`, `GOAL: not met: <why>` or `GOAL: needs Paul: <what>` (`REPORT_RULE` in `src/messages.ts`; kept on the job as `claimed`). A worker that says it did not get there, or that it needs him, is taken at its word and shown as Not done or Needs you. A worker that says "met" still gets no tick: the card reads "It says it did what you asked. Nothing here confirms that." Nothing in the service acts on the line; no job is failed, retried or reviewed differently because of it. The line never reaches chat.
 
-Jobs that finished before this have no such line and read as before.
+Jobs that finished before this have no such line and read as before. Their pull requests are still looked up, so old jobs Paul has merged move from Waiting on me to Confirmed done.
 
 A card also carries the first of what the worker told Paul, except for the kinds that work over his mail, calendar, CV and zones. The board's status view is piled the same way: Confirmed done, Finished not confirmed, Did not get there. Nothing here asks a model anything.
 

@@ -36,6 +36,7 @@ import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLi
 import { realCost } from "./worker-stats.js";
 import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
+import type { PrState } from "./pr-state.js";
 import type { DnsAction, Job, OutboundAction, PurchaseAction, SignupAction, Store } from "./store.js";
 import type { UptimeReport } from "./uptime.js";
 
@@ -52,6 +53,8 @@ export interface AppSource {
   uptime?: { report: () => UptimeReport };
   probes?: { snapshot: () => ProbeResult[] };
   activeWorkers?: () => number;
+  /** What GitHub says of a pull request, when it has been asked (src/pr-state.ts). Never waits. */
+  prState?: (url: string) => PrState | undefined;
   /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
   gates?: AppGates;
   /** Where traces are read from, for the tests. */
@@ -249,10 +252,10 @@ function askedFor(job: Job): Array<"purchase" | "email" | "dns" | "signup"> {
  * what the worker's report says. A worker saying "met" earns no tick; a worker saying it did not get
  * there, or that it needs him, is taken at its word, because that is not a claim anyone inflates.
  */
-function outcomeOf(store: Store, job: Job, ev: Evidence): AppOutcome | undefined {
+function outcomeOf(store: Store, job: Job, ev: Evidence, prState?: AppSource["prState"]): AppOutcome | undefined {
   if (job.status !== "done" && job.status !== "failed") return undefined;
   if (job.verdict) return job.verdict.met ? { state: "met", text: "You marked this as done.", by: "you" } : { state: "not_met", text: "You marked this as not done.", by: "you" };
-  const held = recorded(store, job, ev);
+  const held = recorded(store, job, ev, prState);
   if (held.state !== "unconfirmed") return { ...held, by: "service" };
   const claim = job.claimed;
   // The words of a job that works over his private things are not put on a card.
@@ -265,7 +268,7 @@ function outcomeOf(store: Store, job: Job, ev: Evidence): AppOutcome | undefined
 }
 
 /** What the service's own records say of a finished job, or "unconfirmed" when they say nothing. */
-function recorded(store: Store, job: Job, ev: Evidence): Omit<AppOutcome, "by"> {
+function recorded(store: Store, job: Job, ev: Evidence, prState?: AppSource["prState"]): Omit<AppOutcome, "by"> {
   if (job.status === "failed") return { state: "not_met", text: `Stopped before it finished: ${failureLabel(job.failure)}.` };
   // A job that was allowed to buy, send, change DNS or sign up: the gate's own record says whether it did.
   for (const what of askedFor(job)) {
@@ -284,8 +287,12 @@ function recorded(store: Store, job: Job, ev: Evidence): Omit<AppOutcome, "by"> 
     if (!verdict) return { state: "unconfirmed", text: "The review finished without a verdict line." };
     return { state: "met", text: verdict.outcome === "merged" ? "Reviewed: merged." : verdict.outcome === "needs_founder" ? "Reviewed: left for you." : "Reviewed: asked for changes." };
   }
-
+  // An engineering job: first what GitHub itself says of its pull request, which settles it either way
+  // and is the only record of a merge Paul made himself; then its review's own verdict line.
   if (PR_KINDS.includes(job.kind)) {
+    const github = job.pr && PR_URL.test(job.pr) ? prState?.(job.pr) : undefined;
+    if (github === "merged") return { state: "met", text: "Its pull request was merged." };
+    if (github === "closed") return { state: "not_met", text: "Its pull request was closed without being merged." };
     const review = ev.reviews.get(job.id);
     const verdict = review ? verdictsOf(store, review).at(-1) : undefined;
     if (verdict?.outcome === "merged") return { state: "met", text: "Reviewed and merged." };
@@ -318,7 +325,7 @@ function modelOf(job: Job): { model?: string; modelPinned?: boolean } {
 function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
   const repository = lockKey(job) ?? job.target ?? "product";
   const cost = realCost(job);
-  const outcome = outcomeOf(source.store, job, ev);
+  const outcome = outcomeOf(source.store, job, ev, source.prState);
   const said = job.status === "done" || job.status === "failed" ? saidOf(job) : undefined;
   const base: AppJob = {
     id: job.id,
