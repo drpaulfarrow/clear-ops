@@ -20,8 +20,10 @@ primary_region = "lhr"
   # message, and the engineer get GLM; the maintainer, which reviews what the engineer wrote, gets Kimi.
   # The agents run on OpenRouter, full stop. Without OPENROUTER_API_KEY they fail with a plain message;
   # they never fall back to Claude on the Anthropic key (the executive assistant uses that key by design).
+  # Spend (18 Nov 2026): GLM on the chief cost more than everything else combined, because it reads every
+  # message. The chief goes back to the flash model; GLM stays on the engineer, Kimi on the reviewer.
   LLM_PROVIDER = "openrouter"
-  CHIEF_MODEL = "sonnet"
+  CHIEF_MODEL = "haiku"
   WORKER_MODEL = "haiku"
   ENGINEER_MODEL = "sonnet"
   MAINTAINER_MODEL = "opus"
@@ -33,6 +35,11 @@ primary_region = "lhr"
   # gone badly wrong. A job's own cap, when one is set (JOB_BUDGET_USD and friends), counts the
   # provider's real money instead, call by call.
   SDK_RUNAWAY_BUDGET_USD = "1000"
+  # Paul's target (18 Nov 2026): under $20 a day. Past it new jobs wait (running ones finish) until he
+  # sends /resume or the London day turns. An engineering or maintainer job stops at $8 of real spend,
+  # which also bounds a job pinned to Claude Opus 5.5.
+  DAILY_BUDGET_USD = "20"
+  ENGINEER_BUDGET_USD = "8"
   # Engineering jobs per repository that may run at once, each in its own working copy.
   ENGINEER_SLOTS = "2"
   # And across all repositories together. Four per repository across five repositories (up to twenty
