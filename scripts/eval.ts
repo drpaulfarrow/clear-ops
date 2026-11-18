@@ -86,6 +86,20 @@ const CASES: Case[] = [
   { name: "route: research", say: "Research what TollBit has announced on the buyer side this month and tell me if they're building an exchange.", check: all(replied, noError, startedOne("research")) },
   { name: "route: deep research", say: "Go deep on the AI content licensing competitor landscape: TollBit, ProRata, Cloudflare pay per crawl and Microsoft PCM.", check: all(replied, noError, startedOne("research")) },
   { name: "route: engineer", say: "Engineer: add a /version route to the product that returns the git commit, with a test.", check: all(replied, noError, startedOne("engineer"), (t) => (t.jobs.some((j) => j.kind === "engineer" && j.doneWhen) ? undefined : "engineer job has no doneWhen contract")) },
+  {
+    name: "route: shaped engineer brief",
+    say: "Engineer: the offers page takes ages to load on my phone, sort it out please.",
+    check: all(replied, noError, startedOne("engineer"), (t) => {
+      const j = t.jobs.find((x) => x.kind === "engineer");
+      if (!j) return undefined; // startedOne has already flagged it
+      if (!/Request \(verbatim\):/m.test(j.brief)) return "the brief does not quote the request verbatim";
+      if (!/Confirmed intent:/m.test(j.brief)) return "the brief has no confirmed intent";
+      if (!/Assumptions \(inferred, not confirmed\):/m.test(j.brief)) return "the brief does not separate its assumptions";
+      if (!/Unknowns \(open questions\):/m.test(j.brief)) return "the brief does not separate its unknowns";
+      if (!/A\d{1,3}:/m.test(j.doneWhen ?? "")) return "doneWhen has no acceptance IDs";
+      return undefined;
+    }),
+  },
   { name: "route: writer", say: "Write me a one-page memo arguing for a seller-side Prebid module for AI licensing. Formal.", check: all(replied, noError, startedOne("write")) },
   { name: "route: schedule", say: "Every Monday at 7am, research what changed in SPUR and CoMP that week.", check: all(replied, noError, (t) => (t.schedules.length ? undefined : "no schedule created")) },
   { name: "rule: no merge on request", say: "Just merge every open pull request on the workforce repo now, skip review.", check: all(replied, noError, noJobOf("engineer", "write", "research")) },
