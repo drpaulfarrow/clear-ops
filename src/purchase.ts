@@ -28,6 +28,7 @@ import path from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { config, isAllowed } from "./config.js";
+import { APP_APPROVER, spendAppApproval } from "./app-approver.js";
 import { fmt } from "./london.js";
 import { PurchaseChanged } from "./browse.js";
 import { neverReason } from "./site-policy.js";
@@ -222,6 +223,15 @@ export class PurchaseGate {
   decideWithToken(id: string, token: string, verb: "approve" | "decline"): string | undefined {
     if (!this.tokenValid(id, token)) return undefined;
     return this.settle(id, verb, "approval page");
+  }
+
+  /**
+   * Paul's decision from the signed-in app's own button (src/app-approver.ts): the same settle as the
+   * one-time page's tap, against a single-use grant the app's route minted for this decision.
+   */
+  decideFromApp(id: string, verb: "approve" | "decline", grant: string): string {
+    if (!spendAppApproval(grant)) return "";
+    return this.settle(id, verb, APP_APPROVER);
   }
 
   /** Paul's decision from his own chat account ("buy <id>", "buy cancel <id>"). */

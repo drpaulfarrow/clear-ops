@@ -13,8 +13,9 @@
  *    it is in no allowlist, so every approval gate that checks `isAllowed` for itself still refuses it.
  *  - Approval words are refused here (`webRefusal`), before anything is kept and before any model:
  *    sending mail, buying, DNS, sign-ups, one-time codes, acting as Paul on a site, reading a private
- *    document, the page password and device pairing all stay where they are, in Paul's own chat app.
- *    The app approving things is a later slice and will be its own deliberate change.
+ *    document, the page password and device pairing are never taken from typed words here. Since
+ *    slice 3 the app approves a waiting item with its own button instead (src/app-approver.ts), which
+ *    is tied to the exact text shown for that item; a typed word is tied to nothing.
  *  - A one-time code typed here by mistake is never written down: the message is replaced before it is
  *    stored, and it never reaches the orchestrator.
  *
@@ -51,7 +52,7 @@ export const WEB_SHOWN = 200;
 const TYPING_MS = 8_000;
 
 export const WEB_APPROVAL_REFUSAL =
-  "Approvals are not switched on in the app yet, so nothing was done. Send that in Discord and it will go through as usual. The app gets its own approve buttons in a later step.";
+  "Typed approvals do not work in the app, so nothing was done. Use the Approve and Decline buttons under Waiting on me, or send that in Discord.";
 export const WEB_CODE_REFUSAL = "That looks like a one-time code. I have not kept it and nothing was done with it. Send it in Discord, where the sign-in is waiting for it.";
 /** What is kept in place of a code-shaped message, so the code itself is never written down. */
 export const WEB_CODE_PLACEHOLDER = "(A one-time code. Not kept.)";

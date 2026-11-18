@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config, engineerSlotsLine } from "./config.js";
@@ -47,8 +48,11 @@ import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
-import { appBoard, appChat, appHistory, appJob, type AppSource } from "./app-data.js";
-import { routeWeb, webChat as serviceWebChat, webRefusal, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
+import { appBoard, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
+import { mintAppApproval } from "./app-approver.js";
+import { jobTitle } from "./titles.js";
+import { perJobModelError } from "./llm.js";
+import { routeWeb, webChat as serviceWebChat, webRefusal, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
 import { parseCodeCommand } from "./otp.js";
 import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
@@ -715,7 +719,23 @@ export function buildApp(given: AppDeps) {
     res.set("X-Content-Type-Options", "nosniff");
     res.set("Referrer-Policy", "no-referrer");
   };
-  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount() });
+  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase } });
+  /**
+   * Whether a request that changes something came from this site's own script: a JSON body, and where
+   * the browser says where the request came from, from here. A form, or a page on another site, fails
+   * this even with Paul's cookie.
+   */
+  const ownScript = (req: express.Request): boolean => {
+    const origin = req.headers.origin;
+    const site = req.headers["sec-fetch-site"];
+    return !!req.is("application/json") && (origin === undefined || origin === new URL(config.publicUrl).origin) && (site === undefined || site === "same-origin");
+  };
+  /** What an action in the app did, said in the app's conversation and, where it began elsewhere, there too. */
+  const tell = (text: string, alsoTo?: string) => {
+    if (!text) return;
+    void chat.send(WEB_CONVERSATION, text);
+    if (alsoTo && !alsoTo.startsWith(WEB_PREFIX)) void deps.messenger.send(alsoTo, text).catch(() => undefined);
+  };
   app.use((req, res, next) => {
     if (!under(req.path, APP_PATH) || APP_OPEN.some((p) => under(req.path, p))) return next();
     if (appAuthz.sessionValid(deps.store, req.headers.cookie)) return next();
@@ -787,9 +807,7 @@ export function buildApp(given: AppDeps) {
    */
   app.post(`${APP_PATH}/api/chat`, (req, res) => {
     appHeaders(res);
-    const origin = req.headers.origin;
-    const site = req.headers["sec-fetch-site"];
-    if (!req.is("application/json") || (origin !== undefined && origin !== new URL(config.publicUrl).origin) || (site !== undefined && site !== "same-origin")) return void res.status(403).json({ error: "refused" });
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
     const text = typeof (req.body as { text?: unknown } | undefined)?.text === "string" ? (req.body as { text: string }).text.trim() : "";
     if (!text) return void res.status(400).json({ error: "empty" });
     if (text.length > WEB_TEXT_MAX) return void res.status(413).json({ error: "too long" });
@@ -798,6 +816,86 @@ export function buildApp(given: AppDeps) {
     if (refused) void chat.send(WEB_CONVERSATION, refused);
     else void orchestrator.handle(WEB_SENDER, text, { replyTo: WEB_CONVERSATION, web: true });
     res.status(202).json({ ok: true });
+  });
+  /**
+   * Paul's decision on something waiting for him, from the app's own button (slice 3; his call on 18 Nov
+   * 2026: one tap, for everything). It is the second way a gate takes a decision, and it is held to the
+   * same things as the typed word. It is behind the gate above and taken from this site's own script
+   * only. It names one item that is waiting now. It must carry the fingerprint of the exact text the
+   * service showed for that item, so a tap on a stale card decides nothing. Only then is a single-use
+   * grant minted (src/app-approver.ts) and handed to that item's own gate, which runs every check it
+   * runs for a typed approval: expiry, caps, and that what was shown is still what is true.
+   */
+  app.post(`${APP_PATH}/api/approvals`, async (req, res) => {
+    appHeaders(res);
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
+    const b = (req.body ?? {}) as { what?: unknown; id?: unknown; verb?: unknown; seen?: unknown };
+    const verb = b.verb === "approve" || b.verb === "decline" ? b.verb : undefined;
+    const item = appWaiting(deps.store, appSource().gates, Date.now()).find((w) => w.what === b.what && w.id === b.id);
+    if (!verb || !item || !item.seen) return void res.status(404).json({ error: "That is no longer waiting." });
+    const seen = typeof b.seen === "string" ? b.seen : "";
+    if (seen.length !== item.seen.length || !timingSafeEqual(Buffer.from(seen), Buffer.from(item.seen))) return void res.status(409).json({ error: "This changed since it was shown. Look at it again before deciding." });
+    const grant = mintAppApproval();
+    let text: string;
+    let replyTo: string | undefined;
+    try {
+      if (item.what === "email") {
+        replyTo = deps.store.getOutbound(item.id)?.replyTo;
+        text = verb === "approve" ? await outbound.approve(item.id, grant) : outbound.cancel(item.id, grant);
+      } else if (item.what === "dns") {
+        replyTo = deps.store.getDns(item.id)?.replyTo;
+        text = verb === "approve" ? await dns.approve(item.id, grant) : dns.cancel(item.id, grant);
+      } else if (item.what === "signup") {
+        replyTo = deps.store.getSignup(item.id)?.replyTo;
+        text = verb === "approve" ? await signup.approve(item.id, grant) : signup.cancel(item.id, grant);
+      } else {
+        replyTo = deps.store.getPurchase(item.id)?.replyTo;
+        text = purchase.decideFromApp(item.id, verb, grant);
+      }
+    } catch (err) {
+      text = `Nothing was done: ${err instanceof Error ? err.message : "it could not be decided just now"}`;
+    }
+    tell(text, replyTo);
+    res.json({ ok: true, text });
+  });
+  /**
+   * What Paul may do to a job from the app: stop it, move it to the front of its queue, or run it again
+   * on one of the models a job may be pinned to. Each is the job runner's own operation, the one the
+   * chief's tools call. A job run again keeps its brief, title and pull request and nothing else: no
+   * permit is ever carried over or granted here.
+   */
+  app.post(`${APP_PATH}/api/jobs/:id/action`, async (req, res) => {
+    appHeaders(res);
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
+    const id = String(req.params.id ?? "");
+    const job = /^[A-Za-z0-9_-]{1,64}$/.test(id) ? deps.store.getJob(id) : undefined;
+    if (!job) return void res.status(404).json({ error: "There is no job with that id." });
+    const b = (req.body ?? {}) as { action?: unknown; model?: unknown };
+    try {
+      if (b.action === "cancel") {
+        const text = await jobs.cancel(id);
+        tell(text, job.replyTo);
+        return void res.json({ ok: true, text });
+      }
+      if (b.action === "front") {
+        const text = jobs.moveToFront(id);
+        tell(text, job.replyTo);
+        return void res.json({ ok: true, text });
+      }
+      if (b.action === "rerun") {
+        const model = typeof b.model === "string" ? b.model : "";
+        const refused = rerunRefusal(job) ?? perJobModelError(model);
+        if (refused) return void res.status(409).json({ error: refused });
+        if (job.status === "running" || job.status === "queued") await jobs.cancel(id);
+        const again = jobs.start(job.kind, job.brief, WEB_SENDER, job.target, WEB_CONVERSATION, { model, ...(job.title ? { title: job.title } : {}), ...(job.pr ? { pr: job.pr } : {}), ...(job.depth ? { depth: job.depth } : {}), ...(job.doneWhen ? { doneWhen: job.doneWhen } : {}) });
+        const text = `Running ${jobTitle(job)} again on ${model} as job ${again.id}.`;
+        tell(text, job.replyTo);
+        return void res.json({ ok: true, text, jobId: again.id });
+      }
+    } catch (err) {
+      return void res.status(409).json({ error: err instanceof Error ? err.message : "That could not be done just now." });
+    }
+    res.status(400).json({ error: "refused" });
   });
   app.get(`${APP_PATH}/api/jobs/:id`, (req, res) => {
     appHeaders(res);
