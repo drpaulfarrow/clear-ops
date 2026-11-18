@@ -24,7 +24,7 @@ import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, Save
 import type { Messenger } from "./whatsapp.js";
 import { addToReport, shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type BudgetStop, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
-import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
+import { RealCostMeter, usdAmount, type JobCostWatch, type RealCost } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
@@ -33,7 +33,7 @@ import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
-import { isPrivateKind, jobUsageFromRun, roleForKind, UsageRecorder, type JobUsage, type RunUsage } from "./telemetry.js";
+import { isPrivateKind, jobUsageFromRun, roleForKind, UsageRecorder, type JobUsage, type ModelCall, type RunUsage } from "./telemetry.js";
 
 const exec = promisify(execFile);
 
@@ -1152,9 +1152,9 @@ export class JobRunner {
           if (this.store.getJob(id)?.sessionId !== sessionId) this.store.updateJob(id, { sessionId });
         },
         telemetry: { role: roleForKind(job.kind), private: isPrivateKind(job.kind) },
-        onCall: (call) => {
+        onCall: (call: ModelCall) => {
           usage.add(call);
-          this.persistUsage(id, job, live, usage);
+          this.persistUsage(id, job, live, usage, this.realCostFor(costMeter));
         },
       };
       // Interrupted by a restart: carry on the same conversation, so the worker keeps everything it had
@@ -1195,7 +1195,7 @@ export class JobRunner {
       // it is recorded as failed, and nothing follows it (no review, no fix round, no "Finished").
       const failed = runFailure(result);
       if (failed) {
-        this.store.updateJob(id, { ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}), usage: this.usageFor(job, result.usage, usage) });
+        this.store.updateJob(id, { ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}), usage: this.usageFor(job, result.usage, usage, this.realCostFor(costMeter)) });
         throw new RunFailedError(failed);
       }
       // A job that clones and pushes gains one plain line at the end of its saved report saying which
@@ -1212,7 +1212,7 @@ export class JobRunner {
         summary: message,
         outputPath,
         costUsd: result.costUsd,
-        usage: this.usageFor(job, result.usage, usage),
+        usage: this.usageFor(job, result.usage, usage, this.realCostFor(costMeter)),
       });
       try {
         const done = this.store.getJob(id);
@@ -1293,7 +1293,7 @@ export class JobRunner {
     } catch (err) {
       // Whatever the job had used before it stopped or failed is kept, marked as partial: a job that
       // was cancelled or crashed still spent what it spent, and the record should say so.
-      if (!usage.empty) this.store.updateJob(id, { usage: this.usageFor(job, undefined, usage) });
+      if (!usage.empty) this.store.updateJob(id, { usage: this.usageFor(job, undefined, usage, this.realCostFor(costMeter)) });
       if (live.stop) await this.recordStop(job, live);
       else await this.recordFailure(job, failureFromError(err));
     } finally {
@@ -1339,23 +1339,35 @@ export class JobRunner {
    * Writes what a running job has used so far, at most once a minute (state.json is one file rewritten
    * whole, so this must not happen on every call). Marked partial: the job is still running.
    */
-  private persistUsage(id: string, job: Job, live: LiveRun, usage: UsageRecorder): void {
+  private persistUsage(id: string, job: Job, live: LiveRun, usage: UsageRecorder, realCost: RealCost | undefined): void {
     const now = this.now();
     if (now - live.usagePersistedAt < MINUTE || !this.store.getJob(id)) return;
     live.usagePersistedAt = now;
     try {
-      this.store.updateJob(id, { usage: this.usageFor(job, undefined, usage) });
+      this.store.updateJob(id, { usage: this.usageFor(job, undefined, usage, realCost) });
     } catch (err) {
       console.warn(`usage not written for job ${id}: ${err instanceof Error ? err.message : err}`);
     }
   }
 
   /**
+   * The provider's own figure for what this job's calls have cost, when its cap meter read one
+   * (src/realcost.ts). Cheap: the meter only sums what it has already read, so this asks nobody for
+   * anything. Where it read nothing (no cap was counting, or the provider has not published yet), there
+   * is no figure and the usage record says so; the SDK's estimate is never offered in its place.
+   */
+  private realCostFor(meter: JobCostWatch | undefined): RealCost | undefined {
+    if (!meter) return undefined;
+    const cost = meter.cost();
+    return cost.source === "provider" ? cost : undefined;
+  }
+
+  /**
    * A job's usage record: the run's own report of itself where there is one, otherwise what the
    * recorder kept (a run that was stopped, or a runner that reports no usage). Numbers only.
    */
-  private usageFor(job: Job, run: RunUsage | undefined, usage: UsageRecorder): JobUsage {
-    if (run) return jobUsageFromRun(run);
+  private usageFor(job: Job, run: RunUsage | undefined, usage: UsageRecorder, realCost: RealCost | undefined = undefined): JobUsage {
+    if (run) return jobUsageFromRun(run, { realCost });
     const kept = usage.summary();
     return jobUsageFromRun(
       {
@@ -1365,7 +1377,7 @@ export class JobRunner {
         ...(kept.callsOmitted ? { callsOmitted: kept.callsOmitted } : {}),
         totals: kept.totals,
       },
-      { partial: true },
+      { partial: true, realCost },
     );
   }
 

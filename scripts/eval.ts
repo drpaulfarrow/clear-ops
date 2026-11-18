@@ -22,10 +22,10 @@
  *
  * Results land in <DATA_DIR>/eval/<time>-<label>.json, owner-only: the pass rate, the names of the
  * checks that failed, the tokens, and the Agent SDK's own price for the run, which is an internal
- * ESTIMATE for comparing runs, never a bill (on OpenRouter the provider reports one figure for the
- * whole key, so there is no per-task amount to read). No answer text is written down anywhere. The
- * tasks themselves are public or about our own repositories: none touches Paul's mail, calendar or
- * uploads. See docs/EVALS.md.
+ * ESTIMATE for comparing runs, never a bill (the chief's chat turns carry no cap meter, so it is the
+ * only per-task figure there is). No answer text is written down anywhere. The tasks themselves are
+ * public or about our own repositories: none touches Paul's mail, calendar or uploads. See
+ * docs/EVALS.md.
  */
 import fs from "node:fs";
 import { config } from "../src/config.js";

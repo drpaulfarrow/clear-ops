@@ -106,8 +106,9 @@ test("totals, the cache hit rate and the call cap", () => {
 test("a job's cost is named for the figure it is, and an estimate is never shown", () => {
   const base = { role: "worker" as const, calls: [], totals: T.emptyTotals() };
 
-  // OpenRouter: one figure for the whole key, so there is no per-job amount. The SDK's own price is
-  // kept internally (it is what a later slice compares against) and never appears in a line.
+  // OpenRouter, nothing read: the cap meter priced none of the calls (no cap was counting, or the
+  // provider had published nothing), so there is no figure and the note says so. The SDK's own price
+  // is kept internally (it is what a later slice compares against) and never appears in a line.
   const or = T.jobUsageFromRun({ ...base, provider: "openrouter", estimateUsd: 0.4213 });
   assert.equal(or.costSource, "unavailable");
   assert.equal(or.costUsd, undefined);
@@ -117,6 +118,29 @@ test("a job's cost is named for the figure it is, and an estimate is never shown
   assert.match(orLine, /no figure/);
   assert.doesNotMatch(orLine, /0\.4213/);
   assert.doesNotMatch(orLine, /\$0\.42/);
+  // A meter that read nothing changes nothing: an unavailable reading is not a figure.
+  const none = T.jobUsageFromRun(
+    { ...base, provider: "openrouter" },
+    { realCost: { usd: 0, calls: 3, read: 0, source: "unavailable", note: "OpenRouter has not priced this job's 3 calls yet" } },
+  );
+  assert.equal(none.costSource, "unavailable");
+  assert.equal(none.costUsd, undefined);
+  assert.equal(none.costNote, T.NO_PER_JOB_FIGURE);
+  assert.match(T.jobCostLine(none), /no figure/);
+
+  // OpenRouter, the cap meter read the provider's own per-call figures: that is the job's figure,
+  // named as the provider's, and a lower bound is labelled as one rather than passed off as complete.
+  const read = T.jobUsageFromRun(
+    { ...base, provider: "openrouter", estimateUsd: 0.4213 },
+    { realCost: { usd: 0.31, calls: 12, read: 11, source: "provider", note: "OpenRouter priced 11 of this job's 12 calls, so the figure is a lower bound" } },
+  );
+  assert.equal(read.costSource, "provider");
+  assert.equal(read.costUsd, 0.31);
+  assert.equal(read.estimateUsd, 0.4213);
+  const readLine = T.jobCostLine(read);
+  assert.match(readLine, /\$0\.3100 \(the provider's own figure/);
+  assert.match(readLine, /lower bound/);
+  assert.doesNotMatch(readLine, /0\.4213/);
 
   // Anthropic directly: the SDK's price is Anthropic's own list price, which is the bill there.
   const an = T.jobUsageFromRun({ ...base, provider: "anthropic", costUsd: 0.5, estimateUsd: 0.5 });

@@ -69,6 +69,8 @@ export interface CostMeter {
 
 /** What the job runner uses: the meter, the cap check and the settled total. */
 export interface JobCostWatch extends CostMeter {
+  /** What has been read so far, summed, without asking the provider for anything more. */
+  cost(): RealCost;
   /** The reading that passed the job's cap, when one did. */
   exceededBy(): RealCost | undefined;
   /** Waits (bounded) for the outstanding reads and returns what is known about this job's calls. */

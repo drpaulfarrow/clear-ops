@@ -10,14 +10,13 @@
  * gap between the call's reply and the previous message the SDK produced, so it is an upper bound on
  * the call itself: any local tool work in between is included.
  *
- * Money is the awkward part, and this module is careful about it. The provider's figure (src/spend.ts,
- * OpenRouter's `GET /api/v1/key`) is cumulative for the whole key, not per call and not per job, so
- * there is no honest per-call or per-job amount on OpenRouter and `costSource` says so
- * ("unavailable") rather than inventing one. The Agent SDK's own `total_cost_usd`, priced from the
- * rounded-up table in src/llm.ts, is an ESTIMATE: it is kept as an internal number for the per-run cap
- * and for comparing one slice with the next, and it is never shown to anyone. Where the workforce runs
- * on Anthropic directly the SDK prices every call at Anthropic's own list prices, which is the bill,
- * so there a job's recorded cost is real and is labelled "anthropic".
+ * Money is the awkward part, and this module is careful about it. A job's figure is only ever the
+ * provider's own (src/realcost.ts: what OpenRouter charged for this job's calls, read by its cap meter
+ * while one was counting) or Anthropic's own list price (which is the bill on Anthropic's API), and
+ * where neither could be read `costSource` says "unavailable" and no number is shown, rather than one
+ * being invented. The Agent SDK's own `total_cost_usd`, priced from the rounded-up table in src/llm.ts,
+ * is an ESTIMATE: it is kept as an internal number for the per-run cap and for comparing one slice with
+ * the next, and it is never shown to anyone.
  *
  * Privacy. An executive-assistant job works over Paul's mail and calendar, and a cv job over his
  * uploads, so nothing about their content may be recorded: for those kinds a call record keeps the
@@ -25,6 +24,7 @@
  * text for any kind. `PRIVATE_KINDS`.
  */
 import type { Provider } from "./llm.js";
+import type { RealCost } from "./realcost.js";
 import { spendDisplay, type RealSpend } from "./spend.js";
 import type { JobKind } from "./store.js";
 
@@ -63,9 +63,12 @@ export function roleLabel(role: TelemetryRole): string {
  */
 export type UsageCostSource = "provider" | "anthropic" | "estimate" | "unavailable";
 
-/** The reason no per-call or per-job amount exists on OpenRouter, in one plain clause. */
-export const NO_PER_JOB_FIGURE =
-  "OpenRouter reports one figure for the whole API key, so there is no per-job or per-call amount to read";
+/**
+ * Why a record has no money figure, in one plain clause. On OpenRouter the provider is asked per call
+ * only while a cap is counting (src/realcost.ts), and it had published nothing these calls could be
+ * read for; on Anthropic it is only a run that reports no cost at all.
+ */
+export const NO_PER_JOB_FIGURE = "no amount the provider itself reported could be read for these calls";
 
 /** One model call: the numbers only, never a prompt, an output or a tool input. */
 export interface ModelCall {
@@ -354,16 +357,19 @@ export interface RunUsage {
 
 /**
  * The job's usage record from a finished run: the calls, the totals, the models, and the money that
- * can honestly be attached to it. On OpenRouter nothing can, and the note says exactly why.
+ * can honestly be attached to it. On OpenRouter that is the provider's own per-call figures where the
+ * job's cap meter read them (`realCost`, src/realcost.ts; a lower bound until the provider has priced
+ * every call, and the note says so); where it read none, the record says there is no figure.
  */
-export function jobUsageFromRun(run: RunUsage, o: { partial?: boolean } = {}): JobUsage {
+export function jobUsageFromRun(run: RunUsage, o: { partial?: boolean; realCost?: RealCost } = {}): JobUsage {
   const anthropic = run.provider === "anthropic";
+  const provider = !anthropic && o.realCost?.source === "provider" ? o.realCost : undefined;
   const usage: JobUsage = {
     role: run.role,
     provider: run.provider,
     calls: run.calls,
     totals: run.totals,
-    costSource: anthropic && run.costUsd !== undefined ? "anthropic" : "unavailable",
+    costSource: anthropic && run.costUsd !== undefined ? "anthropic" : provider ? "provider" : "unavailable",
   };
   if (run.callsOmitted) usage.callsOmitted = run.callsOmitted;
   if (run.models?.length) usage.models = run.models;
@@ -371,7 +377,10 @@ export function jobUsageFromRun(run: RunUsage, o: { partial?: boolean } = {}): J
   if (run.numTurns !== undefined) usage.numTurns = run.numTurns;
   if (run.estimateUsd !== undefined && Number.isFinite(run.estimateUsd)) usage.estimateUsd = run.estimateUsd;
   if (usage.costSource === "anthropic") usage.costUsd = run.costUsd;
-  else usage.costNote = NO_PER_JOB_FIGURE;
+  else if (provider) {
+    usage.costUsd = provider.usd;
+    if (provider.note) usage.costNote = provider.note;
+  } else usage.costNote = NO_PER_JOB_FIGURE;
   if (o.partial) usage.partial = true;
   return usage;
 }
@@ -444,7 +453,9 @@ export function tokenLine(totals: UsageTotals): string {
  */
 export function jobCostLine(usage: JobUsage): string {
   if (usage.costSource === "anthropic" && usage.costUsd !== undefined) return `Cost: $${usage.costUsd.toFixed(4)} (Anthropic's own list price, which is the bill there).`;
-  if (usage.costSource === "provider" && usage.costUsd !== undefined) return `Cost: $${usage.costUsd.toFixed(4)} (the provider's own figure).`;
+  if (usage.costSource === "provider" && usage.costUsd !== undefined) return `Cost: $${usage.costUsd.toFixed(4)} (the provider's own figure${usage.costNote ? `; ${usage.costNote}` : ""}).`;
+  if (usage.costSource === "unavailable") return `Cost: no figure (${usage.costNote ?? NO_PER_JOB_FIGURE}). The Agent SDK's estimate is internal and is not shown.`;
+  // "estimate" (and anything else): the SDK's rounded-up price is never a figure, so it is never shown.
   return `Cost: no figure (${usage.costNote ?? NO_PER_JOB_FIGURE}). The Agent SDK's estimate is internal and is not shown.`;
 }
 
@@ -522,7 +533,14 @@ export function usageLines(view: UsageView): string[] {
     const top = [...withCost].sort((a, b) => (b.usage?.costUsd ?? 0) - (a.usage?.costUsd ?? 0)).slice(0, 3);
     lines.push(`Top jobs by cost: ${top.map((j) => `${j.title ?? j.id} (${j.id}) $${(j.usage?.costUsd ?? 0).toFixed(2)}`).join(", ")}.`);
   } else if (jobs.length) {
-    lines.push(priced ? "No per-kind cost: no job that day recorded a figure." : `No cost per kind or top jobs by cost: ${NO_PER_JOB_FIGURE}. The split below is by tokens, which are the provider's own counts.`);
+    // Honest about why: a per-job figure is the provider's own only where its cap meter read one, and
+    // where it exists it can be a lower bound, so the per-kind sums would not add up to the day's one
+    // figure above and are not shown. The token split is the provider's own counts.
+    lines.push(
+      priced
+        ? "No per-kind cost: no job that day recorded a figure."
+        : "No cost per kind or top jobs by cost: a job's money figure is the provider's own only where its cap meter read one, and it can miss calls, so those amounts are not summed here. The split below is by tokens, which are the provider's own counts.",
+    );
   }
   const tokensByKind = new Map<string, number>();
   for (const j of jobs) tokensByKind.set(j.kind, (tokensByKind.get(j.kind) ?? 0) + jobTokens(j));
