@@ -33,7 +33,7 @@ import { buildApp } from "../src/index.js";
 import { Store } from "../src/store.js";
 import { ConsoleMessenger } from "../src/whatsapp.js";
 import { sdkRunner } from "../src/agents.js";
-import { evalResultsDir, evalSummaryLine, failuresByCategory, loadEvalSet, runEvalSet, writeEvalResult, type EvalRunResult, type EvalTask } from "../src/eval.js";
+import { evalExitCode, evalResultsDir, evalSummaryLine, failuresByCategory, loadEvalSet, runEvalSet, writeEvalResult, type EvalRunResult, type EvalTask } from "../src/eval.js";
 import { emptyTotals, type UsageTotals } from "../src/telemetry.js";
 
 const label = argValue("--label") ?? process.env.EVAL_LABEL ?? (isLive() ? "manual" : "recorded");
@@ -66,6 +66,8 @@ console.log(`\n${evalSummaryLine(result)}`);
 if (!isLive()) console.log("Recorded mode: these numbers describe the fixture file, not the live chief; run with --live for a real baseline.");
 for (const c of failuresByCategory(result)) if (c.failed) console.log(`  ${c.category}: ${c.failed}/${c.ran} failed`);
 console.log(`Results: ${file}`);
+// A failing run never reports success: the exit code says what the score says (src/eval.ts).
+process.exit(evalExitCode(result));
 
 function isLive(): boolean {
   return process.argv.includes("--live") || process.env.EVAL_LIVE === "1";
@@ -74,7 +76,9 @@ function isLive(): boolean {
 /** The recorded answers, read once; a task with no recording fails the run rather than being skipped. */
 function recordedRunner() {
   const file = process.env.EVAL_RECORDED ?? new URL("../eval/recorded.v1.json", import.meta.url).pathname;
-  const recorded = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, RecordedAnswer>;
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { answers?: Record<string, RecordedAnswer> };
+  const recorded = parsed.answers;
+  if (!recorded) throw new Error(`${file} has no "answers" object; a recording is a map from task id to recorded answer`);
   return async (task: EvalTask): Promise<EvalRunResult> => {
     const answer = recorded[task.id];
     if (!answer) throw new Error(`no recorded answer for task ${task.id} in ${file}`);

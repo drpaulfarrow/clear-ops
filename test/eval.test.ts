@@ -43,9 +43,11 @@ test("judging is deterministic, and names the checks that failed without repeati
   assert.equal(E.judgeAnswer(grouped, "Research, research and designer only.").pass, false);
   assert.equal(E.judgeAnswer(grouped, "Research gets it; the engineer does not.").pass, true);
 
-  // A not-found task: saying so passes; inventing a number fails.
-  const nf = task({ notFound: true, forbid: ["per share"] });
-  assert.equal(E.judgeAnswer(nf, "I could not find any share price for Clear Exchange: it is not a listed company.").pass, true);
+  // A not-found task: saying so passes; inventing a number fails. The ban is on the invented figure
+  // (a dollar amount), not on the phrase "per share": an honest answer may say "there is no
+  // per-share price" and must not fail for it.
+  const nf = task({ notFound: true, forbid: ["$"] });
+  assert.equal(E.judgeAnswer(nf, "I could not find any share price for Clear Exchange: it is not a listed company, so there is no per-share figure.").pass, true);
   assert.equal(E.judgeAnswer(nf, "I could not find a listing, but the price is $12.40 per share.").pass, false);
 
   // Patterns and length.
@@ -123,6 +125,20 @@ test("the runner scores the set, counts what it cost and stops when the budget i
   assert.equal(thrown.passed, 2);
   assert.equal(thrown.failed, 1);
   assert.match(thrown.tasks[1].failed[0], /the run threw: no credit/);
+});
+
+test("a failing run never reports success: the exit code follows the score", async () => {
+  // A clean pass exits 0; a failing task, a skipped task or both exit 1. Two eval runs once scored
+  // 0/30 and exited 0, so nothing downstream noticed the failure (18 Nov 2026).
+  const tasks: EvalTask[] = [{ id: "a", category: "drafting", prompt: "A", judge: { all: ["yes"] } }];
+  const passing = await E.runEvalSet({ tasks, run: async () => ({ text: "yes" }) });
+  assert.equal(E.evalExitCode(passing), 0);
+  const failing = await E.runEvalSet({ tasks, run: async () => ({ text: "no" }) });
+  assert.equal(failing.failed, 1);
+  assert.equal(E.evalExitCode(failing), 1, "a run with a failed task must exit non-zero");
+  const skipped = await E.runEvalSet({ tasks, budgetUsd: 0, run: async () => ({ text: "yes" }) });
+  assert.equal(skipped.skipped, 1);
+  assert.equal(E.evalExitCode(skipped), 1, "a run that could not finish its set must exit non-zero");
 });
 
 test("results are written owner-only, and never hold a prompt or an answer", async () => {

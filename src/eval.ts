@@ -282,6 +282,15 @@ export function evalSummaryLine(run: EvalRun): string {
   return `${run.label} (set v${run.version}): ${run.passed}/${run.passed + run.failed} passed (${rate}), ${run.skipped} skipped, ${run.totals.calls} model calls, ${run.totals.promptTokens + run.totals.cachedTokens} input tokens, ${run.totals.completionTokens} output tokens, ${cache}. Cost: $${run.estimateUsd.toFixed(4)} (the Agent SDK's own price, an internal estimate for comparing runs, not a bill).`;
 }
 
+/**
+ * A run that failed a task, or skipped one because its budget ran out, never reports success: the
+ * script's exit code comes from here, so a failing run cannot exit 0 again (18 Nov 2026: two runs
+ * that scored 0/30 both exited 0, and nothing downstream noticed).
+ */
+export function evalExitCode(run: EvalRun): number {
+  return run.failed > 0 || run.skipped > 0 ? 1 : 0;
+}
+
 /** Where results land: a folder on the data volume, outside every checkout, owner-only. */
 export function evalResultsDir(dataDir: string): string {
   return path.join(dataDir, "eval");

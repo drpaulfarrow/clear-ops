@@ -185,7 +185,7 @@ test("the day report says whose money figure it is, and says so when there is no
   const read = T.usageLines({ ymd: "2026-11-13", label: "Today", spend: { usd: 3.5, source: "provider" }, jobs });
   const text = read.join("\n");
   assert.match(text, /Today \(2026-11-13\): \$3\.50 \(OpenRouter's own figure\)/);
-  assert.match(text, /No cost per kind or top jobs by cost: OpenRouter reports one figure for the whole API key/);
+  assert.match(text, /No cost per kind or top jobs by cost: a job's money figure is the provider's own only where its cap meter read one/);
   assert.match(text, /Tokens per kind: research 105, engineer 105\./);
   assert.match(text, /The chief's own chat turns are not recorded for that day/);
   // Nothing the SDK priced appears in anything Paul can read: the internal estimate is in the record,
