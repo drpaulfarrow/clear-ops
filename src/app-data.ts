@@ -36,7 +36,7 @@ import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLi
 import { realCost } from "./worker-stats.js";
 import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
-import type { PrState } from "./pr-state.js";
+import type { PrInfo } from "./pr-state.js";
 import type { DnsAction, Job, OutboundAction, PurchaseAction, SignupAction, Store } from "./store.js";
 import type { UptimeReport } from "./uptime.js";
 
@@ -54,7 +54,7 @@ export interface AppSource {
   probes?: { snapshot: () => ProbeResult[] };
   activeWorkers?: () => number;
   /** What GitHub says of a pull request, when it has been asked (src/pr-state.ts). Never waits. */
-  prState?: (url: string) => PrState | undefined;
+  prState?: (url: string) => PrInfo | undefined;
   /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
   gates?: AppGates;
   /** Where traces are read from, for the tests. */
@@ -268,6 +268,21 @@ function outcomeOf(store: Store, job: Job, ev: Evidence, prState?: AppSource["pr
 }
 
 /** What the service's own records say of a finished job, or "unconfirmed" when they say nothing. */
+/** How far GitHub's clock and the service's may disagree about when a pull request was opened. */
+const OWN_PR_SLACK_MS = 2 * 60_000;
+
+/**
+ * Whether a job's pull request is its own: one the service handed it to fix (a fix round), or one
+ * GitHub says was opened while the job existed and before it finished. Anything else it only worked on.
+ */
+function ownPr(job: Job, github: PrInfo): boolean {
+  if (job.fixRound) return true;
+  const opened = github.openedAt ? Date.parse(github.openedAt) : NaN;
+  const from = Date.parse(job.createdAt);
+  const to = job.finishedAt ? Date.parse(job.finishedAt) : NaN;
+  return Number.isFinite(opened) && Number.isFinite(from) && Number.isFinite(to) && opened >= from - OWN_PR_SLACK_MS && opened <= to + OWN_PR_SLACK_MS;
+}
+
 function recorded(store: Store, job: Job, ev: Evidence, prState?: AppSource["prState"]): Omit<AppOutcome, "by"> {
   if (job.status === "failed") return { state: "not_met", text: `Stopped before it finished: ${failureLabel(job.failure)}.` };
   // A job that was allowed to buy, send, change DNS or sign up: the gate's own record says whether it did.
@@ -288,14 +303,19 @@ function recorded(store: Store, job: Job, ev: Evidence, prState?: AppSource["prS
     return { state: "met", text: verdict.outcome === "merged" ? "Reviewed: merged." : verdict.outcome === "needs_founder" ? "Reviewed: left for you." : "Reviewed: asked for changes." };
   }
   // An engineering job: first what GitHub itself says of its pull request, which settles it either way
-  // and is the only record of a merge Paul made himself; then its review's own verdict line.
+  // and is the only record of a merge Paul made himself; then its review's own verdict line. GitHub's
+  // word counts for the job only when the pull request is its own. A job's `pr` is often just the first
+  // pull request its report names, so a job that diagnosed or reviewed one is not done because it merged.
   if (PR_KINDS.includes(job.kind)) {
     const github = job.pr && PR_URL.test(job.pr) ? prState?.(job.pr) : undefined;
-    if (github === "merged") return { state: "met", text: "Its pull request was merged." };
-    if (github === "closed") return { state: "not_met", text: "Its pull request was closed without being merged." };
+    const own = !!github && ownPr(job, github);
+    if (own && github.state === "merged") return { state: "met", text: "Its pull request was merged." };
+    if (own && github.state === "closed") return { state: "not_met", text: "Its pull request was closed without being merged." };
     const review = ev.reviews.get(job.id);
     const verdict = review ? verdictsOf(store, review).at(-1) : undefined;
     if (verdict?.outcome === "merged") return { state: "met", text: "Reviewed and merged." };
+    // Someone else's pull request that is now settled: nothing is waiting on Paul, and nothing says this job did its part.
+    if (github && github.state !== "open") return { state: "unconfirmed", text: `The pull request it worked on was ${github.state === "merged" ? "merged" : "closed without being merged"}. Nothing here confirms this job's own part.` };
     if (verdict?.outcome === "needs_founder") return { state: "waiting", text: `Reviewed and left for you${verdict.detail ? `: ${shortText(redact(verdict.detail), 140)}` : "."}` };
     if (verdict?.outcome === "changes_requested") return { state: "not_met", text: "The review asked for changes." };
     if (job.reviewOnly && job.pr) return { state: "waiting", text: "Its pull request is open for you to review." };

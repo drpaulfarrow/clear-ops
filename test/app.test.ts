@@ -444,12 +444,14 @@ test("GitHub is asked what became of a pull request: in the background, read-onl
   const prs = new PrStates({ token: (slug) => (slug === "o/secret" ? undefined : "tok-123"), fetch: fake, now: () => clock });
   const pr = (n: number, repo = "o/r") => `https://github.com/${repo}/pull/${n}`;
 
-  answer = (url) => (url.endsWith("/1") ? body({ state: "closed", merged: true }) : url.endsWith("/2") ? body({ state: "closed", merged: false }) : url.endsWith("/3") ? body({ state: "open", merged: false }) : new Response("no", { status: 500 }));
+  answer = (url) => (url.endsWith("/1") ? body({ state: "closed", merged: true, created_at: "2026-11-18T09:00:00Z" }) : url.endsWith("/2") ? body({ state: "closed", merged: false }) : url.endsWith("/3") ? body({ state: "open", merged: false }) : new Response("no", { status: 500 }));
   assert.equal(prs.get(pr(1)), undefined, "the first look never waits: it answers that it does not know yet");
   for (const n of [2, 3, 4]) prs.get(pr(n));
   prs.get(pr(1));
   await prs.settled();
   assert.deepEqual([prs.get(pr(1)), prs.get(pr(2)), prs.get(pr(3)), prs.get(pr(4))], ["merged", "closed", "open", undefined]);
+  assert.deepEqual(prs.info(pr(1)), { state: "merged", openedAt: "2026-11-18T09:00:00Z" }, "with when GitHub says it was opened");
+  assert.deepEqual(prs.info(pr(2)), { state: "closed" });
   assert.deepEqual(asked.map((a) => a.url).sort(), [1, 2, 3, 4].map((n) => `https://api.github.com/repos/o/r/pulls/${n}`), "one request each, to GitHub's own API");
   assert.ok(asked.every((a) => a.method === "GET" && a.auth === "Bearer tok-123" && !a.url.includes("tok-123")), "read-only, the credential in a header");
 
@@ -492,15 +494,31 @@ test("GitHub is asked what became of a pull request: in the background, read-onl
 test("a pull request Paul merged himself counts as done, and one he closed does not", () => {
   const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-prs-")));
   const done = (kind: string, title: string, patch: Record<string, unknown> = {}) =>
-    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, "self", PAUL, { title } as never).id, { status: "done", startedAt: iso(20), finishedAt: iso(10), ...patch } as never);
+    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, "self", PAUL, { title } as never).id, { status: "done", createdAt: iso(30), startedAt: iso(20), finishedAt: iso(10), ...patch } as never);
   const url = (n: number) => `https://github.com/o/r/pull/${n}`;
+  // Opened while the job ran, so the job's own; `before` is a pull request that was there already.
+  const during = iso(15);
+  const before = iso(600);
   const merged = done("engineer", "Merged by Paul", { pr: url(1), reviewOnly: true });
   const closed = done("engineer", "Closed", { pr: url(2), reviewOnly: true });
   const open = done("engineer", "Still open", { pr: url(3), reviewOnly: true });
   const unknown = done("engineer", "Not asked yet", { pr: url(4), reviewOnly: true });
   const sentBackThenMerged = done("engineer", "Sent back then merged", { pr: url(5) });
   s.writeOutput(done("maintain", "Review: Sent back then merged", { reviewOf: sentBackThenMerged.id }).id, `REVIEW ${url(5)}: changes requested: a test is missing`);
-  const states: Record<string, "merged" | "closed" | "open"> = { [url(1)]: "merged", [url(2)]: "closed", [url(3)]: "open", [url(5)]: "merged" };
+  // Jobs that only diagnosed, reviewed or pushed to a pull request someone else opened.
+  const diagnosed = done("engineer", "Diagnosed a merged one", { pr: url(6), reviewOnly: true });
+  const diagnosedClosed = done("engineer", "Diagnosed a closed one", { pr: url(7), reviewOnly: true });
+  const diagnosedOpen = done("engineer", "Diagnosed an open one", { pr: url(8), reviewOnly: true });
+  const noDate = done("engineer", "GitHub gave no date", { pr: url(9), reviewOnly: true });
+  const fixRound = done("engineer", "Fix round 1", { pr: url(6), fixRound: 1 });
+  const pushedAndReviewed = done("engineer", "Pushed to it, reviewed, merged", { pr: url(6) });
+  s.writeOutput(done("maintain", "Review: Pushed to it", { reviewOf: pushedAndReviewed.id }).id, `REVIEW ${url(6)}: merged`);
+  const leftForPaul = done("engineer", "Pushed to it, left for Paul, since merged", { pr: url(6) });
+  s.writeOutput(done("maintain", "Review: left for Paul", { reviewOf: leftForPaul.id }).id, `REVIEW ${url(6)}: needs Paul: he merges here`);
+  const states: Record<string, { state: "merged" | "closed" | "open"; openedAt?: string }> = {
+    [url(1)]: { state: "merged", openedAt: during }, [url(2)]: { state: "closed", openedAt: during }, [url(3)]: { state: "open", openedAt: during }, [url(5)]: { state: "merged", openedAt: during },
+    [url(6)]: { state: "merged", openedAt: before }, [url(7)]: { state: "closed", openedAt: before }, [url(8)]: { state: "open", openedAt: before }, [url(9)]: { state: "merged" },
+  };
   const board = appBoard({ store: s, queue: quietQueue, now, prState: (u) => states[u] });
   const of = (id: string) => board.jobs.find((j) => j.id === id)!.outcome!;
   assert.deepEqual(of(merged.id), { state: "met", text: "Its pull request was merged.", by: "service" });
@@ -508,6 +526,16 @@ test("a pull request Paul merged himself counts as done, and one he closed does 
   assert.deepEqual(of(open.id), { state: "waiting", text: "Its pull request is open for you to review.", by: "service" });
   assert.equal(of(unknown.id).state, "waiting", "until GitHub has answered, it reads as it did before");
   assert.equal(of(sentBackThenMerged.id).state, "met", "what GitHub says now outranks an earlier review");
+
+  // A merge is the tick only for the job whose pull request it was (18 Nov 2026: four jobs that diagnosed
+  // and reviewed #108 all read as done once it merged, one of them reporting that it had changed nothing).
+  assert.deepEqual(of(diagnosed.id), { state: "unconfirmed", text: "The pull request it worked on was merged. Nothing here confirms this job's own part.", by: "nobody" });
+  assert.deepEqual(of(diagnosedClosed.id), { state: "unconfirmed", text: "The pull request it worked on was closed without being merged. Nothing here confirms this job's own part.", by: "nobody" });
+  assert.equal(of(diagnosedOpen.id).state, "waiting", "an open pull request reads as it did before");
+  assert.equal(of(noDate.id).state, "unconfirmed", "without GitHub's own date nothing says the job opened it");
+  assert.deepEqual(of(fixRound.id), { state: "met", text: "Its pull request was merged.", by: "service" }, "a fix round was handed its pull request by the service");
+  assert.deepEqual(of(pushedAndReviewed.id), { state: "met", text: "Reviewed and merged.", by: "service" }, "the service's own review still counts");
+  assert.equal(of(leftForPaul.id).state, "unconfirmed", "and a settled pull request is never still waiting on Paul");
 });
 
 test("only Paul's button sets his answer, on a finished job, and it changes nothing else", async () => {
