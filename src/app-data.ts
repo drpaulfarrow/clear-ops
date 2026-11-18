@@ -21,14 +21,15 @@ import { PR_KINDS, runLimits, workerSpec } from "./agents.js";
 import { failureLabel } from "./failures.js";
 import { boardHealth } from "./health.js";
 import { describeJob, kindName, liveStep, repoLabel } from "./job-descriptions.js";
-import { lockKey, type JobRunner } from "./jobs.js";
+import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
+import { shortText } from "./messages.js";
 import { resolveModel, runRoute } from "./llm.js";
 import { londonYmd } from "./london.js";
 import { renderMarkdown, reportFor } from "./reports.js";
 import { redact } from "./repos.js";
 import { spendDisplay } from "./spend.js";
 import { jobTitle } from "./titles.js";
-import { readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
+import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
 import { realCost } from "./worker-stats.js";
 import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
@@ -87,6 +88,23 @@ export interface AppJob {
   queuePosition?: number;
   fixRound?: number;
   reviewOf?: string;
+  /** Finished: whether it got what Paul asked for, as far as the service itself can tell. */
+  outcome?: AppOutcome;
+  /** Finished: the first of what the worker told Paul, for kinds that do not work over his private things. */
+  said?: string;
+}
+
+/**
+ * Whether a finished job got what Paul asked for (his point, 18 Nov 2026: a run that ended is not a
+ * wish that was met, and the board must not show them alike). Only what the service itself holds
+ * counts as evidence: a purchase it placed, an email it sent, a record it changed, an account it
+ * created, a review's own verdict line. A worker saying it went well is not evidence, so where the
+ * service holds none the answer is "not confirmed", never "done".
+ */
+export interface AppOutcome {
+  state: "met" | "not_met" | "waiting" | "unconfirmed";
+  /** One plain line saying what the evidence is. */
+  text: string;
 }
 
 export interface AppSpend {
@@ -145,6 +163,101 @@ export interface AppJobDetail {
 
 const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+$/;
 
+/** How long the first line of what a worker told Paul may be on a card. */
+export const APP_SAID_MAX = 220;
+
+/** What the service holds, gathered once per answer, that says how a job's ask turned out. */
+interface Evidence {
+  /** Approval items by the job that prepared them. */
+  acts: Map<string, Array<{ what: "purchase" | "email" | "dns" | "signup"; status: string; line: string }>>;
+  /** The newest review of each engineering job, by that job's id. */
+  reviews: Map<string, Job>;
+}
+
+function evidenceOf(store: Store): Evidence {
+  const acts: Evidence["acts"] = new Map();
+  const add = (jobId: string | undefined, what: "purchase" | "email" | "dns" | "signup", status: string, line: string) => {
+    if (!jobId) return;
+    acts.set(jobId, [...(acts.get(jobId) ?? []), { what, status, line }]);
+  };
+  for (const a of store.listPurchases()) add(a.jobId, "purchase", a.status, `${a.total} on ${a.host}`);
+  for (const a of store.listOutbound()) add(a.jobId, "email", a.status, a.kind === "invite" || a.kind === "cancel_event" ? "the calendar change" : "the email");
+  for (const a of store.listDns()) add(a.jobId, "dns", a.status, `the DNS change on ${a.domain}`);
+  for (const a of store.listSignups()) add(a.jobId, "signup", a.status, `the account on ${a.domain}`);
+  const reviews: Evidence["reviews"] = new Map();
+  for (const j of store.allJobs()) {
+    if (!j.reviewOf || j.status !== "done") continue;
+    const seen = reviews.get(j.reviewOf);
+    if (!seen || (seen.finishedAt ?? "") < (j.finishedAt ?? "")) reviews.set(j.reviewOf, j);
+  }
+  return { acts, reviews };
+}
+
+/** A finished review's own verdict lines, read once: a saved output does not change. */
+const verdictCache = new Map<string, ReturnType<typeof parseReviewVerdicts>>();
+function verdictsOf(store: Store, review: Job): ReturnType<typeof parseReviewVerdicts> {
+  const key = `${review.id}:${review.finishedAt ?? ""}`;
+  const cached = verdictCache.get(key);
+  if (cached) return cached;
+  const parsed = parseReviewVerdicts(store.readOutput(review.id) ?? "");
+  if (verdictCache.size > 2000) verdictCache.clear();
+  verdictCache.set(key, parsed);
+  return parsed;
+}
+
+const DID: Record<"purchase" | "email" | "dns" | "signup", { done: string; not: string; none: string }> = {
+  purchase: { done: "Bought", not: "Nothing was bought", none: "Nothing was bought: no purchase was put to you." },
+  email: { done: "Sent", not: "Nothing was sent", none: "Nothing was sent: nothing was put to you to approve." },
+  dns: { done: "Applied", not: "Nothing was changed", none: "Nothing was changed: no DNS change was put to you." },
+  signup: { done: "Created", not: "No account was created", none: "No account was created: no sign-up was put to you." },
+};
+const STATUS_WORDS: Record<string, string> = { expired: "it expired before you approved it", declined: "you declined it", cancelled: "it was cancelled", failed: "it failed", changed: "what was shown had changed", partial: "only part of it was applied" };
+
+/** What a job was allowed to do that only counts if it actually happened. */
+function askedFor(job: Job): Array<"purchase" | "email" | "dns" | "signup"> {
+  const permits = job.permits ?? [];
+  return [...(permits.includes("purchase") ? (["purchase"] as const) : []), ...(permits.includes("send") ? (["email"] as const) : []), ...(permits.includes("dns") ? (["dns"] as const) : []), ...(permits.includes("signup") ? (["signup"] as const) : [])];
+}
+
+function outcomeOf(store: Store, job: Job, ev: Evidence): AppOutcome | undefined {
+  if (job.status === "failed") return { state: "not_met", text: `Stopped before it finished: ${failureLabel(job.failure)}.` };
+  if (job.status !== "done") return undefined;
+  // A job that was allowed to buy, send, change DNS or sign up: the gate's own record says whether it did.
+  for (const what of askedFor(job)) {
+    const mine = (ev.acts.get(job.id) ?? []).filter((a) => a.what === what);
+    const words = DID[what];
+    const done = mine.find((a) => a.status === "executed");
+    if (done) return { state: "met", text: `${words.done}: ${done.line}.` };
+    const waiting = mine.find((a) => a.status === "pending" || a.status === "approved" || a.status === "executing" || a.status === "needsPaul");
+    if (waiting) return { state: "waiting", text: `Waiting on you: ${waiting.line}.` };
+    const last = mine[mine.length - 1];
+    return { state: "not_met", text: last ? `${words.not}: ${STATUS_WORDS[last.status] ?? last.status}.` : words.none };
+  }
+  // A review did its job when it gave a verdict; what the verdict was belongs to the job it reviewed.
+  if (job.reviewOf) {
+    const verdict = verdictsOf(store, job).at(-1);
+    if (!verdict) return { state: "unconfirmed", text: "The review finished without a verdict line." };
+    return { state: "met", text: verdict.outcome === "merged" ? "Reviewed: merged." : verdict.outcome === "needs_founder" ? "Reviewed: left for you." : "Reviewed: asked for changes." };
+  }
+
+  if (PR_KINDS.includes(job.kind)) {
+    const review = ev.reviews.get(job.id);
+    const verdict = review ? verdictsOf(store, review).at(-1) : undefined;
+    if (verdict?.outcome === "merged") return { state: "met", text: "Reviewed and merged." };
+    if (verdict?.outcome === "needs_founder") return { state: "waiting", text: `Reviewed and left for you${verdict.detail ? `: ${shortText(redact(verdict.detail), 140)}` : "."}` };
+    if (verdict?.outcome === "changes_requested") return { state: "not_met", text: "The review asked for changes." };
+    if (job.reviewOnly && job.pr) return { state: "waiting", text: "Its pull request is open for you to review." };
+    return { state: "unconfirmed", text: job.pr ? "It opened a pull request. No review verdict is recorded." : "It finished without a pull request." };
+  }
+  return { state: "unconfirmed", text: "The run finished. Nothing here can confirm it did what you asked." };
+}
+
+/** The first of what the worker told Paul, for kinds whose words are not about his private things. */
+function saidOf(job: Job): string | undefined {
+  if (!job.summary || PRIVATE_KINDS.includes(job.kind) || job.docSnapshot) return undefined;
+  return shortText(redact(job.summary.replace(/\s+/g, " ").trim()), APP_SAID_MAX) || undefined;
+}
+
 /** The model a job runs or ran on, where that is actually known. A finished, unpinned job is not guessed at. */
 function modelOf(job: Job): { model?: string; modelPinned?: boolean } {
   if (job.model) return { model: job.model, modelPinned: true };
@@ -157,9 +270,11 @@ function modelOf(job: Job): { model?: string; modelPinned?: boolean } {
   }
 }
 
-function toAppJob(source: AppSource, job: Job): AppJob {
+function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
   const repository = lockKey(job) ?? job.target ?? "product";
   const cost = realCost(job);
+  const outcome = outcomeOf(source.store, job, ev);
+  const said = job.status === "done" || job.status === "failed" ? saidOf(job) : undefined;
   const base: AppJob = {
     id: job.id,
     title: jobTitle(job),
@@ -177,6 +292,8 @@ function toAppJob(source: AppSource, job: Job): AppJob {
     ...(job.pr && PR_URL.test(job.pr) ? { pr: job.pr } : {}),
     ...(job.fixRound ? { fixRound: job.fixRound } : {}),
     ...(job.reviewOf ? { reviewOf: job.reviewOf } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(said ? { said } : {}),
   };
   if (job.status === "running") {
     const step = liveStep(source.queue.latestStep(job.id));
@@ -230,6 +347,7 @@ export function appBoard(source: AppSource): AppBoard {
   const queued = all.filter((j) => j.status === "queued").sort((a, b) => (a.queuePos ?? Number.MAX_SAFE_INTEGER) - (b.queuePos ?? Number.MAX_SAFE_INTEGER) || a.createdAt.localeCompare(b.createdAt));
   const finished = all.filter(isFinished).sort(finishedDesc);
   const recent = finished.filter((j) => now - Date.parse(j.finishedAt ?? j.createdAt) <= APP_RECENT_MS).slice(0, APP_RECENT_MAX);
+  const ev = evidenceOf(source.store);
   const health = boardHealth({ store: source.store, uptime: source.uptime, probes: source.probes, activeWorkers: source.activeWorkers, liveness: (id) => source.queue.liveness(id), now });
   return {
     generatedAt: new Date(now).toISOString(),
@@ -237,7 +355,7 @@ export function appBoard(source: AppSource): AppBoard {
     health: { level: health.level, headline: health.headline, live: health.live },
     paused: !!source.store.queueHold(),
     waiting: waitingOf(source.store, now),
-    jobs: [...running, ...queued, ...recent].map((j) => toAppJob(source, j)),
+    jobs: [...running, ...queued, ...recent].map((j) => toAppJob(source, j, ev)),
     hasOlder: finished.length > recent.length,
   };
 }
@@ -252,7 +370,8 @@ export function appHistory(source: AppSource, before: string | undefined, limit 
     .sort(finishedDesc);
   const page = older.slice(0, Math.max(1, Math.min(limit, APP_HISTORY_PAGE)));
   const last = page[page.length - 1];
-  return { jobs: page.map((j) => toAppJob(source, j)), ...(older.length > page.length && last ? { next: last.finishedAt ?? last.createdAt } : {}) };
+  const ev = evidenceOf(source.store);
+  return { jobs: page.map((j) => toAppJob(source, j, ev)), ...(older.length > page.length && last ? { next: last.finishedAt ?? last.createdAt } : {}) };
 }
 
 export interface AppChatMessage {
@@ -283,6 +402,7 @@ export const APP_CHAT_JOBS = 40;
 export function appChat(source: AppSource, chat: Pick<WebChat, "view">): AppChat {
   const now = source.now ?? Date.now();
   const view = chat.view();
+  const ev = evidenceOf(source.store);
   const jobs = source.store
     .allJobs()
     .filter((j) => (j.replyTo ?? j.requestedBy) === WEB_CONVERSATION)
@@ -294,7 +414,7 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view">): AppChat
       m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}) } : { id: m.id, at: m.at, from: m.from, html: renderMarkdown(m.text) },
     ),
     typing: view.typing,
-    jobs: jobs.map((j) => toAppJob(source, j)),
+    jobs: jobs.map((j) => toAppJob(source, j, ev)),
   };
 }
 
@@ -306,7 +426,7 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
   const job = source.store.getJob(id);
   if (!job) return undefined;
   const now = source.now ?? Date.now();
-  const app = toAppJob(source, job);
+  const app = toAppJob(source, job, evidenceOf(source.store));
   const links = app.pr ? [{ what: "pull request", url: app.pr }] : [];
   const described = describeJob(job, { hasPullRequest: !!app.pr }, app.repository);
   const limits = runLimits(job.kind, job.depth);

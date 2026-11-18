@@ -327,6 +327,51 @@ test("the board shows the provider's own figures or none, never the SDK's estima
   assert.equal(page.next, undefined);
 });
 
+test("a run that ended is not a wish that was met: only the service's own evidence earns a tick", () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-outcome-")));
+  const done = (kind: string, title: string, patch: Record<string, unknown> = {}) =>
+    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, "product", PAUL, { title } as never).id, { status: "done", startedAt: iso(20), finishedAt: iso(10), ...patch } as never);
+  const purchase = (jobId: string, status: string) => s.putPurchase({ id: `p${jobId}`, status, jobId, host: "shop.example", total: "£23.98", createdAt: iso(15), expiresAt: iso(-5), replyTo: PAUL } as never);
+
+  const never = done("research", "Order nothing", { permits: ["purchase"], summary: "I could not get past the sign-in, so nothing was ordered." });
+  const expired = done("research", "Order expired", { permits: ["purchase"] });
+  purchase(expired.id, "expired");
+  const bought = done("research", "Order bought", { permits: ["purchase"] });
+  purchase(bought.id, "executed");
+  const asking = done("research", "Order asking", { permits: ["purchase"] });
+  purchase(asking.id, "pending");
+  const plain = done("research", "Plain research", { summary: "Here is what I found." });
+  const merged = done("engineer", "Merged work", { pr: "https://github.com/o/r/pull/1" });
+  const mergedReview = done("maintain", "Review: Merged work", { reviewOf: merged.id });
+  s.writeOutput(mergedReview.id, "Looks right.\n\nREVIEW https://github.com/o/r/pull/1: merged");
+  const left = done("engineer", "Left for Paul", { pr: "https://github.com/o/r/pull/2" });
+  s.writeOutput(done("maintain", "Review: Left for Paul", { reviewOf: left.id }).id, "REVIEW https://github.com/o/r/pull/2: needs Paul: merge it yourself");
+  const sentBack = done("engineer", "Sent back", { pr: "https://github.com/o/r/pull/3" });
+  s.writeOutput(done("maintain", "Review: Sent back", { reviewOf: sentBack.id }).id, "REVIEW https://github.com/o/r/pull/3: changes requested: the test is missing");
+  const unreviewed = done("engineer", "No review yet", { pr: "https://github.com/o/r/pull/4" });
+  const assistant = done("ea", "Morning brief", { summary: "A private line about someone's email." });
+  const failed = s.updateJob(s.createJob("design", "Brief", PAUL, "site", PAUL, { title: "Fell over" } as never).id, { status: "failed", finishedAt: iso(5), failure: "stalled" });
+
+  const board = appBoard({ store: s, queue: quietQueue, now });
+  const of = (id: string) => board.jobs.find((j) => j.id === id)!;
+  assert.deepEqual(of(never.id).outcome, { state: "not_met", text: "Nothing was bought: no purchase was put to you." });
+  assert.equal(of(never.id).said, "I could not get past the sign-in, so nothing was ordered.");
+  assert.deepEqual(of(expired.id).outcome, { state: "not_met", text: "Nothing was bought: it expired before you approved it." });
+  assert.deepEqual(of(bought.id).outcome, { state: "met", text: "Bought: £23.98 on shop.example." });
+  assert.equal(of(asking.id).outcome!.state, "waiting");
+  assert.equal(of(plain.id).outcome!.state, "unconfirmed", "a worker saying it went well is not evidence");
+  assert.deepEqual(of(merged.id).outcome, { state: "met", text: "Reviewed and merged." });
+  assert.deepEqual(of(left.id).outcome, { state: "waiting", text: "Reviewed and left for you: merge it yourself" });
+  assert.deepEqual(of(sentBack.id).outcome, { state: "not_met", text: "The review asked for changes." });
+  assert.equal(of(unreviewed.id).outcome!.state, "unconfirmed");
+  assert.equal(of(failed.id).outcome!.state, "not_met");
+  assert.equal(of(assistant.id).said, undefined, "what the assistant told him is not put on a card");
+  assert.ok(!JSON.stringify(board).includes("someone's email"));
+  const ticks = board.jobs.filter((j) => j.outcome?.state === "met").map((j) => j.title).sort();
+  assert.deepEqual(ticks, ["Merged work", "Order bought", "Review: Left for Paul", "Review: Merged work", "Review: Sent back"], "what is ticked is what the service can confirm: a purchase, a merge, and a review that gave its verdict");
+  assert.deepEqual(of(mergedReview.id).outcome, { state: "met", text: "Reviewed: merged." });
+});
+
 test("the history pages through every finished job", () => {
   const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-history-")));
   const total = APP_HISTORY_PAGE * 2 + 7;
