@@ -135,6 +135,8 @@ const state = {
   historyLoading: false,
   job: undefined,
   jobRaw: "",
+  /** The pull request being reviewed: { id, data, loading, error, open } for one job at a time. */
+  pull: undefined,
   jobMissing: false,
   problem: undefined,
 };
@@ -540,6 +542,108 @@ function jobActions(detail) {
   return out.length ? h("div", { class: "actions" }, out) : null;
 }
 
+/* ---------- A job's pull request: review and merge ---------- */
+
+/** Asks GitHub, through the service, for the job's pull request as it is now. */
+async function loadPull(id) {
+  const before = state.pull?.id === id ? state.pull : undefined;
+  state.pull = { id, data: before?.data, open: before?.open ?? new Set(), loading: true, error: undefined };
+  draw();
+  let data;
+  let error;
+  try {
+    const res = await fetch(`${API}/jobs/${id}/pull`, { headers: { accept: "application/json" }, credentials: "same-origin", cache: "no-store" });
+    if (res.status === 401) return void location.assign(SIGN_IN);
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) data = body;
+    else error = body.error || `The service answered ${res.status}.`;
+  } catch {
+    error = "The service could not be reached.";
+  }
+  if (state.pull?.id !== id) return;
+  state.pull = { id, data: data ?? state.pull.data, open: state.pull.open, loading: false, error };
+  draw();
+}
+
+const CHECK_TAG = { passed: ["ok", "check"], failed: ["bad", "cross"], running: ["run"], skipped: [""] };
+
+/** One file's changes, line by line. Text only: what GitHub sent is never treated as markup. */
+function diffLines(patch) {
+  return patch.split("\n").map((line) => {
+    const kind = line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "";
+    return h("span", { class: `dl ${kind}` }, line || " ");
+  });
+}
+
+function pullFile(p, f) {
+  const open = p.open.has(f.name);
+  return h(
+    "details",
+    { class: "file", open, ontoggle: (e) => { const was = p.open.has(f.name); if (e.target.open) p.open.add(f.name); else p.open.delete(f.name); if (was !== e.target.open) draw(); } },
+    h("summary", {}, h("span", { class: "file-name" }, f.name), f.status !== "modified" ? h("span", { class: "tag" }, f.status) : null, h("span", { class: "num add" }, `+${f.additions}`), h("span", { class: "num del" }, `-${f.deletions}`)),
+    // Only an open file's lines are built, so a long pull request stays light.
+    open ? (f.patch ? h("pre", { class: "diff", tabindex: "0" }, diffLines(f.patch)) : h("p", { class: "muted" }, "No text changes to show here (a binary file, or one too large).")) : null,
+    open && f.cut ? h("p", { class: "muted" }, "Only the first part is shown. GitHub has the rest.") : null,
+  );
+}
+
+function pullPane(detail) {
+  const id = detail.job.id;
+  const p = state.pull?.id === id ? state.pull : undefined;
+  const busy = state.busy !== undefined;
+  const head = (extra) => h("div", { class: "pane-head" }, h("h2", {}, "Pull request"), extra ?? null);
+  if (!p) return h("section", { class: "pane", "aria-label": "Pull request" }, head(), h("div", { class: "links" }, h("button", { class: "btn", type: "button", onclick: () => void loadPull(id) }, "Review it here")));
+  const v = p.data;
+  if (!v) {
+    return h(
+      "section",
+      { class: "pane", "aria-label": "Pull request" },
+      head(),
+      p.loading ? h("p", { class: "muted" }, "Asking GitHub.") : h("div", { class: "banner bad", role: "status" }, p.error),
+      p.loading ? null : h("div", { class: "links" }, h("button", { class: "btn", type: "button", onclick: () => void loadPull(id) }, "Try again")),
+    );
+  }
+  const stateTag = v.state === "merged" ? h("span", { class: "tag ok" }, icon("check", 12), "Merged") : v.state === "closed" ? h("span", { class: "tag bad" }, "Closed") : v.draft ? h("span", { class: "tag" }, "Draft") : h("span", { class: "tag run" }, "Open");
+  const merge =
+    v.state === "open"
+      ? h(
+          "div",
+          { class: "block" },
+          h(
+            "div",
+            { class: "links" },
+            h("button", { class: "btn primary", type: "button", disabled: busy || p.loading || !!v.blocked, onclick: () => void act(`merge:${id}`, `/jobs/${id}/merge`, { sha: v.head }, () => void loadPull(id)) }, "Merge"),
+            h("button", { class: "btn", type: "button", disabled: busy || p.loading, onclick: () => void loadPull(id) }, p.loading ? "Looking" : "Look again"),
+          ),
+          v.blocked ? h("p", { class: "prose" }, v.blocked) : h("p", { class: "prose muted" }, `Merges ${v.branch} into ${v.base} at commit ${v.head.slice(0, 7)}, the one shown here.${v.redeploys ? " Merging redeploys ClearOps once no job is running." : ""}`),
+        )
+      : null;
+  return h(
+    "section",
+    { class: "pane pull", "aria-label": "Pull request" },
+    head(stateTag),
+    h("div", { class: "block" }, h("p", { class: "pull-title" }, `#${v.number} ${v.title}`), h("p", { class: "muted" }, `${v.repository} · ${v.branch} into ${v.base} · by ${v.author} · ${v.commits} ${v.commits === 1 ? "commit" : "commits"}`)),
+    p.error ? h("div", { class: "banner bad", role: "status" }, `Not up to date. ${p.error}`) : null,
+    h(
+      "div",
+      { class: "block" },
+      h("h3", {}, "Checks"),
+      v.checks.length
+        ? h("div", { class: "links" }, v.checks.map((c) => h("span", { class: `tag ${CHECK_TAG[c.state][0]}` }, CHECK_TAG[c.state][1] ? icon(CHECK_TAG[c.state][1], 12) : null, `${c.name}: ${c.state}`)))
+        : h("p", { class: "muted" }, "No checks ran on this commit."),
+    ),
+    merge,
+    v.body ? h("div", { class: "block" }, h("h3", {}, "Description"), h("p", { class: "prose pull-body" }, v.body)) : null,
+    h(
+      "div",
+      { class: "block" },
+      h("h3", {}, "Changes"),
+      h("p", { class: "muted num" }, `${v.changedFiles} ${v.changedFiles === 1 ? "file" : "files"}, `, h("span", { class: "add" }, `+${v.additions}`), " ", h("span", { class: "del" }, `-${v.deletions}`), v.changedFiles > v.files.length ? `. The first ${v.files.length} are here.` : ""),
+      v.files.map((f) => pullFile(p, f)),
+    ),
+  );
+}
+
 function jobPage() {
   if (state.jobMissing) return h("main", { class: "page" }, h("a", { class: "btn", href: "#/" }, icon("back"), "Board"), h("p", { class: "muted" }, "There is no job with that id."));
   const detail = state.job;
@@ -633,6 +737,7 @@ function jobPage() {
     jobActions(detail),
     h("div", { class: "stats" }, cost, model, steps, time),
     h("div", { class: "panes" }, about, trace),
+    detail.actions?.review ? pullPane(detail) : null,
     output,
   );
 }

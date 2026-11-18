@@ -20,7 +20,7 @@ import { RouterMessenger } from "./channels.js";
 import { isAllowed, isOversightSender } from "./config.js";
 import { backfillOnce, OutputsPublisher } from "./publish-outputs.js";
 import { importOffboardRun, OFFBOARD_RUN_ID } from "./offboard-import.js";
-import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoCredentialLine, repoProblemsMessage } from "./bootstrap.js";
+import { bootstrapRepos, githubProblemMessage, githubStatusLine, repoCredential, repoCredentialLine, repoProblemsMessage } from "./bootstrap.js";
 import { githubAuth, startTokenRefresher } from "./github-auth.js";
 import { repoRegistry } from "./repos.js";
 import { REPO_SERVER, repoServer } from "./repo-tools.js";
@@ -51,6 +51,7 @@ import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_ST
 import { appBoard, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
 import { mintAppApproval } from "./app-approver.js";
 import { PrStates } from "./pr-state.js";
+import { AppPulls, PullError } from "./app-pulls.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
@@ -99,6 +100,8 @@ export interface AppDeps {
   appAuth?: AppAuth;
   /** What GitHub says of pull requests (src/pr-state.ts). Tests inject one with a fake GitHub. */
   prStates?: PrStates;
+  /** A job's pull request shown in the app, and merged on Paul's own tap (src/app-pulls.ts). Tests inject one with a fake GitHub. */
+  pulls?: AppPulls;
   /** The web app's chat transcript (src/web-chat.ts). Tests inject one of their own. */
   webChat?: WebChat;
   uptime?: UptimeLog;
@@ -726,6 +729,19 @@ export function buildApp(given: AppDeps) {
   // What GitHub says of each job's pull request (src/pr-state.ts): read-only, asked in the background
   // with the credential the service already uses for that repository, and never waited for.
   const prStates = deps.prStates ?? new PrStates({ token: async (slug) => repoTokens.get({ slug }) ?? (await githubAuth.token().catch(() => undefined)) });
+  // A job's pull request, shown in the app and merged only on Paul's own tap (src/app-pulls.ts): only in
+  // the managed repository the job works on, with the credential the service already holds for it.
+  const managed = (slug: string) => repoRegistry.list().find((r) => r.slug?.toLowerCase() === slug.toLowerCase());
+  const pulls =
+    deps.pulls ??
+    new AppPulls({
+      slugOf: (job) => repoRegistry.find(job.target ?? "product")?.slug,
+      token: async (slug) => {
+        const repo = managed(slug);
+        return repo ? (await repoCredential(repo).catch(() => undefined))?.token || undefined : undefined;
+      },
+      selfSlug: config.repos.self,
+    });
   const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.info(url) });
   /**
    * Whether a request that changes something came from this site's own script: a JSON body, and where
@@ -911,6 +927,34 @@ export function buildApp(given: AppDeps) {
       return void res.status(409).json({ error: err instanceof Error ? err.message : "That could not be done just now." });
     }
     res.status(400).json({ error: "refused" });
+  });
+  // A job's pull request as GitHub holds it now: read-only, and only in the job's own repository.
+  app.get(`${APP_PATH}/api/jobs/:id/pull`, async (req, res) => {
+    appHeaders(res);
+    const id = String(req.params.id ?? "");
+    const job = /^[A-Za-z0-9_-]{1,64}$/.test(id) ? deps.store.getJob(id) : undefined;
+    if (!job) return void res.status(404).json({ error: "There is no job with that id." });
+    try {
+      res.json(await pulls.view(job));
+    } catch (err) {
+      res.status(err instanceof PullError ? err.status : 502).json({ error: err instanceof PullError ? err.message : "GitHub could not be asked just now." });
+    }
+  });
+  // Paul's own tap on Merge, carrying the commit he was shown. The one place the service merges anything.
+  app.post(`${APP_PATH}/api/jobs/:id/merge`, async (req, res) => {
+    appHeaders(res);
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
+    const id = String(req.params.id ?? "");
+    const job = /^[A-Za-z0-9_-]{1,64}$/.test(id) ? deps.store.getJob(id) : undefined;
+    if (!job) return void res.status(404).json({ error: "There is no job with that id." });
+    try {
+      const done = await pulls.merge(job, (req.body as { sha?: unknown } | undefined)?.sha);
+      prStates.forget(done.url);
+      tell(done.text, job.replyTo);
+      res.json({ ok: true, text: done.text });
+    } catch (err) {
+      res.status(err instanceof PullError ? err.status : 502).json({ error: err instanceof PullError ? err.message : "That could not be done just now." });
+    }
   });
   app.get(`${APP_PATH}/api/jobs/:id`, (req, res) => {
     appHeaders(res);

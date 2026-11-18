@@ -437,6 +437,8 @@ export interface AppJobActions {
   retry: boolean;
   /** The models it may be run again on; empty when it may not. */
   rerunModels: string[];
+  /** It has a pull request the app can show and, when nothing blocks it, merge (src/app-pulls.ts). */
+  review: boolean;
 }
 
 function actionsOf(job: Job): AppJobActions {
@@ -448,6 +450,7 @@ function actionsOf(job: Job): AppJobActions {
     front: job.status === "queued" && !!job.waitingFor && job.waitingFor !== job.id,
     retry: job.status === "failed",
     rerunModels: rerunRefusal(job) ? [] : [...PER_JOB_MODELS],
+    review: !!job.pr && PR_URL.test(job.pr),
   };
 }
 

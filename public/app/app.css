@@ -271,3 +271,21 @@ a.card:hover{background:var(--raised);color:var(--text)}
   .spend-fig{flex:1;min-width:0}
   .row-time{display:none}
 }
+
+/* ---------- A job's pull request ---------- */
+.pull-title{font-family:var(--display);font-weight:700;font-size:17px;overflow-wrap:anywhere}
+.pull-body{max-height:260px;overflow:auto}
+.add{color:var(--ok-text)}
+.del{color:var(--bad-text)}
+.file{border:1px solid var(--line);border-radius:12px;background:var(--bg);min-width:0}
+.file summary{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;min-height:44px;list-style-position:inside}
+.file summary::-webkit-details-marker{display:none}
+.file summary::before{content:"";flex:none;width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);margin:0 2px}
+.file[open] summary::before{transform:rotate(45deg)}
+.file-name{flex:1 1 0;min-width:0;font-family:var(--mono);font-size:12.5px;color:var(--text-2);overflow-wrap:anywhere}
+.file>p{padding:0 12px 10px}
+.diff{margin:0;font-variant-ligatures:none;padding:8px 0;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;line-height:1.5;overflow-x:auto;color:var(--text-2);tab-size:2}
+.dl{display:block;padding:0 12px;white-space:pre;min-width:max-content}
+.dl.add{background:var(--ok-soft);color:var(--ok-text)}
+.dl.del{background:var(--bad-soft);color:var(--bad-text)}
+.dl.hunk{color:var(--run-text);background:var(--run-soft)}

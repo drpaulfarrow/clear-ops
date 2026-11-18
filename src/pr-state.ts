@@ -127,6 +127,11 @@ export class PrStates {
     return { state, ...(openedAt ? { openedAt } : {}) };
   }
 
+  /** Drops what is known of a pull request, so the next look asks GitHub again. For when the service itself just changed it. */
+  forget(url: string): void {
+    this.known.delete(url);
+  }
+
   /** Resolves once nothing is queued or in flight. For the tests. */
   async settled(): Promise<void> {
     while (this.flying.size || this.queued.length) await new Promise((r) => setTimeout(r, 5));
