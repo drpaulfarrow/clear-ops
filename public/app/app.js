@@ -205,7 +205,7 @@ function statusTag(job) {
   if (job.status === "failed") return h("span", { class: "tag bad" }, icon("cross", 12), "Failed");
   // A run that ended is not a wish that was met. The tick is kept for what the service can confirm.
   const state = job.outcome?.state;
-  if (state === "met") return h("span", { class: "tag ok" }, icon("check", 12), "Confirmed");
+  if (state === "met") return h("span", { class: "tag ok" }, icon("check", 12), job.outcome.by === "you" ? "Done" : "Confirmed");
   if (state === "waiting") return h("span", { class: "tag wait" }, "Needs you");
   if (state === "not_met") return h("span", { class: "tag bad" }, icon("cross", 12), "Not done");
   return h("span", { class: "tag" }, "Finished");
@@ -495,6 +495,21 @@ function stat(label, value, note, extra) {
   return h("div", { class: "stat" }, h("div", { class: "stat-label" }, label), h("div", { class: "stat-value num" }, value), extra ?? null, note ? h("div", { class: "stat-note" }, note) : null);
 }
 
+/** His own answer, which outranks everything else said about the job. */
+function verdictButtons(detail) {
+  const id = detail.job.id;
+  const yours = detail.actions.yourVerdict;
+  const busy = state.busy !== undefined;
+  const mark = (met) => () => void act(`verdict:${id}`, `/jobs/${id}/action`, { action: "verdict", met });
+  return h(
+    "div",
+    { class: "links" },
+    h("button", { class: `btn${yours === true ? " chosen" : ""}`, type: "button", "aria-pressed": String(yours === true), disabled: busy, onclick: mark(true) }, icon("check", 14), "Yes, it did"),
+    h("button", { class: `btn${yours === false ? " chosen" : ""}`, type: "button", "aria-pressed": String(yours === false), disabled: busy, onclick: mark(false) }, icon("cross", 14), "No, it did not"),
+    yours !== undefined ? h("button", { class: "btn quiet", type: "button", disabled: busy, onclick: mark(null) }, "Clear my answer") : null,
+  );
+}
+
 /** What Paul may do to this job from here. Each is the job runner's own operation. */
 function jobActions(detail) {
   const a = detail.actions;
@@ -557,7 +572,16 @@ function jobPage() {
     "section",
     { class: "pane side", "aria-label": "About this job" },
     h("h2", {}, "About"),
-    job.outcome ? h("div", { class: "block" }, h("h3", {}, "Did it do what you asked?"), h("p", { class: "prose" }, job.outcome.text), job.said ? h("p", { class: "prose muted" }, `It told you: ${job.said}`) : null) : null,
+    job.outcome
+      ? h(
+          "div",
+          { class: "block" },
+          h("h3", {}, "Did it do what you asked?"),
+          h("p", { class: "prose" }, job.outcome.text),
+          job.said ? h("p", { class: "prose muted" }, `It told you: ${job.said}`) : null,
+          detail.actions?.verdict ? verdictButtons(detail) : null,
+        )
+      : null,
     h("div", { class: "block" }, h("p", { class: "prose" }, detail.description ?? "This job's brief is empty or unreadable."), detail.more ? h("p", { class: "prose muted" }, detail.more) : null),
     detail.doneWhen ? h("div", { class: "block" }, h("h3", {}, "Done when"), h("p", { class: "prose" }, detail.doneWhen)) : null,
     detail.produced ? h("div", { class: "block" }, h("h3", {}, "Produced"), h("p", { class: "prose" }, detail.produced)) : null,

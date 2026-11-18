@@ -84,6 +84,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .rerun{display:inline-flex;flex-wrap:wrap;gap:8px;align-items:center}
 .pick{min-height:40px;padding:0 12px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--text);font:inherit}
 .btn:disabled{opacity:.5;cursor:default}
+.btn.chosen{background:var(--line);border-color:var(--faint);font-weight:600}
 .empty{padding:14px;border-radius:14px;border:1px dashed var(--line);color:var(--muted);font-size:13px}
 
 /* ---------- Home: chat, with the board beside it ---------- */

@@ -36,6 +36,7 @@ import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLi
 import { realCost } from "./worker-stats.js";
 import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
+import type { PrState } from "./pr-state.js";
 import type { DnsAction, Job, OutboundAction, PurchaseAction, SignupAction, Store } from "./store.js";
 import type { UptimeReport } from "./uptime.js";
 
@@ -52,6 +53,8 @@ export interface AppSource {
   uptime?: { report: () => UptimeReport };
   probes?: { snapshot: () => ProbeResult[] };
   activeWorkers?: () => number;
+  /** What GitHub says of a pull request, when it has been asked (src/pr-state.ts). Never waits. */
+  prState?: (url: string) => PrState | undefined;
   /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
   gates?: AppGates;
   /** Where traces are read from, for the tests. */
@@ -110,6 +113,8 @@ export interface AppOutcome {
   state: "met" | "not_met" | "waiting" | "unconfirmed";
   /** One plain line saying what the evidence is. */
   text: string;
+  /** Who says so: Paul himself, the service's own records, the worker's own report, or nobody. */
+  by: "you" | "service" | "worker" | "nobody";
 }
 
 export interface AppSpend {
@@ -242,9 +247,29 @@ function askedFor(job: Job): Array<"purchase" | "email" | "dns" | "signup"> {
   return [...(permits.includes("purchase") ? (["purchase"] as const) : []), ...(permits.includes("send") ? (["email"] as const) : []), ...(permits.includes("dns") ? (["dns"] as const) : []), ...(permits.includes("signup") ? (["signup"] as const) : [])];
 }
 
-function outcomeOf(store: Store, job: Job, ev: Evidence): AppOutcome | undefined {
+/**
+ * In order of who is believed: Paul's own answer, then what the service itself did or recorded, then
+ * what the worker's report says. A worker saying "met" earns no tick; a worker saying it did not get
+ * there, or that it needs him, is taken at its word, because that is not a claim anyone inflates.
+ */
+function outcomeOf(store: Store, job: Job, ev: Evidence, prState?: AppSource["prState"]): AppOutcome | undefined {
+  if (job.status !== "done" && job.status !== "failed") return undefined;
+  if (job.verdict) return job.verdict.met ? { state: "met", text: "You marked this as done.", by: "you" } : { state: "not_met", text: "You marked this as not done.", by: "you" };
+  const held = recorded(store, job, ev, prState);
+  if (held.state !== "unconfirmed") return { ...held, by: "service" };
+  const claim = job.claimed;
+  // The words of a job that works over his private things are not put on a card.
+  const quiet = PRIVATE_KINDS.includes(job.kind) || !!job.docSnapshot;
+  const why = claim?.detail && !quiet ? `: ${shortText(redact(claim.detail), 160)}` : ".";
+  if (claim?.state === "not_met") return { state: "not_met", text: `It says it did not get there${why}`, by: "worker" };
+  if (claim?.state === "needs_paul") return { state: "waiting", text: `It says it needs you${why}`, by: "worker" };
+  if (claim?.state === "met") return { state: "unconfirmed", text: "It says it did what you asked. Nothing here confirms that.", by: "worker" };
+  return { ...held, by: "nobody" };
+}
+
+/** What the service's own records say of a finished job, or "unconfirmed" when they say nothing. */
+function recorded(store: Store, job: Job, ev: Evidence, prState?: AppSource["prState"]): Omit<AppOutcome, "by"> {
   if (job.status === "failed") return { state: "not_met", text: `Stopped before it finished: ${failureLabel(job.failure)}.` };
-  if (job.status !== "done") return undefined;
   // A job that was allowed to buy, send, change DNS or sign up: the gate's own record says whether it did.
   for (const what of askedFor(job)) {
     const mine = (ev.acts.get(job.id) ?? []).filter((a) => a.what === what);
@@ -262,8 +287,12 @@ function outcomeOf(store: Store, job: Job, ev: Evidence): AppOutcome | undefined
     if (!verdict) return { state: "unconfirmed", text: "The review finished without a verdict line." };
     return { state: "met", text: verdict.outcome === "merged" ? "Reviewed: merged." : verdict.outcome === "needs_founder" ? "Reviewed: left for you." : "Reviewed: asked for changes." };
   }
-
+  // An engineering job: first what GitHub itself says of its pull request, which settles it either way
+  // and is the only record of a merge Paul made himself; then its review's own verdict line.
   if (PR_KINDS.includes(job.kind)) {
+    const github = job.pr && PR_URL.test(job.pr) ? prState?.(job.pr) : undefined;
+    if (github === "merged") return { state: "met", text: "Its pull request was merged." };
+    if (github === "closed") return { state: "not_met", text: "Its pull request was closed without being merged." };
     const review = ev.reviews.get(job.id);
     const verdict = review ? verdictsOf(store, review).at(-1) : undefined;
     if (verdict?.outcome === "merged") return { state: "met", text: "Reviewed and merged." };
@@ -296,7 +325,7 @@ function modelOf(job: Job): { model?: string; modelPinned?: boolean } {
 function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
   const repository = lockKey(job) ?? job.target ?? "product";
   const cost = realCost(job);
-  const outcome = outcomeOf(source.store, job, ev);
+  const outcome = outcomeOf(source.store, job, ev, source.prState);
   const said = job.status === "done" || job.status === "failed" ? saidOf(job) : undefined;
   const base: AppJob = {
     id: job.id,
@@ -380,6 +409,9 @@ export function rerunRefusal(job: Job): string | undefined {
 
 /** What Paul may do to a job from the app right now. */
 export interface AppJobActions {
+  /** Paul may say whether it did what he asked, and what he has said so far. */
+  verdict: boolean;
+  yourVerdict?: boolean;
   cancel: boolean;
   front: boolean;
   retry: boolean;
@@ -390,6 +422,8 @@ export interface AppJobActions {
 function actionsOf(job: Job): AppJobActions {
   const active = job.status === "running" || job.status === "queued";
   return {
+    verdict: job.status === "done" || job.status === "failed",
+    ...(job.verdict ? { yourVerdict: job.verdict.met } : {}),
     cancel: active,
     front: job.status === "queued" && !!job.waitingFor && job.waitingFor !== job.id,
     retry: job.status === "failed",

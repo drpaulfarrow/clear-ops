@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import type { ClaimedOutcome } from "./messages.js";
 import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 import type { FailureKind } from "./failures.js";
 import type { RetrievalRecord } from "./retrieval.js";
@@ -169,6 +170,16 @@ export interface Job {
    * or upload content, only the decision and what the web returned.
    */
   retrieval?: RetrievalRecord;
+  /**
+   * What the worker's own report said of how the job turned out (its GOAL line, src/messages.ts).
+   * A claim, shown as one: a worker saying it went well is never treated as evidence that it did.
+   */
+  claimed?: ClaimedOutcome;
+  /**
+   * Paul's own answer to "did this do what I asked?", set only by his button in the web app
+   * (docs/APP.md). It outranks everything else said about the job.
+   */
+  verdict?: { met: boolean; at: string };
   error?: string;
   /**
    * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,

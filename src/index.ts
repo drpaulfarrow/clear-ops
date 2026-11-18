@@ -50,6 +50,8 @@ import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
 import { appBoard, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
 import { mintAppApproval } from "./app-approver.js";
+import { PrStates } from "./pr-state.js";
+import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
 import { routeWeb, webChat as serviceWebChat, webRefusal, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
@@ -95,6 +97,8 @@ export interface AppDeps {
   /** The board's heartbeat log. Built from the data directory by default; a test injects one. */
   /** The web app's GitHub sign-in (src/app-auth.ts). Tests inject one with a fake GitHub. */
   appAuth?: AppAuth;
+  /** What GitHub says of pull requests (src/pr-state.ts). Tests inject one with a fake GitHub. */
+  prStates?: PrStates;
   /** The web app's chat transcript (src/web-chat.ts). Tests inject one of their own. */
   webChat?: WebChat;
   uptime?: UptimeLog;
@@ -719,7 +723,10 @@ export function buildApp(given: AppDeps) {
     res.set("X-Content-Type-Options", "nosniff");
     res.set("Referrer-Policy", "no-referrer");
   };
-  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase } });
+  // What GitHub says of each job's pull request (src/pr-state.ts): read-only, asked in the background
+  // with the credential the service already uses for that repository, and never waited for.
+  const prStates = deps.prStates ?? new PrStates({ token: async (slug) => repoTokens.get({ slug }) ?? (await githubAuth.token().catch(() => undefined)) });
+  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.get(url) });
   /**
    * Whether a request that changes something came from this site's own script: a JSON body, and where
    * the browser says where the request came from, from here. A form, or a page on another site, fails
@@ -859,8 +866,8 @@ export function buildApp(given: AppDeps) {
     res.json({ ok: true, text });
   });
   /**
-   * What Paul may do to a job from the app: stop it, move it to the front of its queue, or run it again
-   * on one of the models a job may be pinned to. Each is the job runner's own operation, the one the
+   * What Paul may do to a job from the app: say whether it did what he asked, stop it, move it to the
+   * front of its queue, or run it again on one of the models a job may be pinned to. Each is the job runner's own operation, the one the
    * chief's tools call. A job run again keeps its brief, title and pull request and nothing else: no
    * permit is ever carried over or granted here.
    */
@@ -872,6 +879,14 @@ export function buildApp(given: AppDeps) {
     if (!job) return void res.status(404).json({ error: "There is no job with that id." });
     const b = (req.body ?? {}) as { action?: unknown; model?: unknown };
     try {
+      // His own answer to "did this do what I asked?": kept on the job, and nothing else follows from it.
+      if (b.action === "verdict") {
+        if (job.status !== "done" && job.status !== "failed") return void res.status(409).json({ error: "It has not finished yet." });
+        const met = (b as { met?: unknown }).met;
+        if (met !== true && met !== false && met !== null) return void res.status(400).json({ error: "refused" });
+        deps.store.updateJob(id, { verdict: met === null ? undefined : { met, at: new Date().toISOString() } });
+        return void res.json({ ok: true, text: met === null ? "Cleared your answer." : met ? "Marked as done." : "Marked as not done." });
+      }
       if (b.action === "cancel") {
         const text = await jobs.cancel(id);
         tell(text, job.replyTo);

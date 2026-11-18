@@ -29,6 +29,7 @@ const { DnsGate } = await import("../src/dns-gate.js");
 const { OutboundGate } = await import("../src/outbound.js");
 const { SignupGate } = await import("../src/signup-gate.js");
 const { seenHash } = await import("../src/app-data.js");
+const { PrStates, PR_STATE_CONCURRENCY } = await import("../src/pr-state.js");
 const { appAsset, APP_CSP } = await import("../src/app-pages.js");
 const { workerGithubEnv } = await import("../src/github-auth.js");
 const { tracesDir } = await import("../src/trace.js");
@@ -98,7 +99,8 @@ const session = async () => (signedIn ??= pair(cookieNamed(await signInAs({ logi
 
 function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
   const messenger = { send: async (to: string, text: string) => void elsewhere.push({ to, text }) };
-  const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c });
+  // No test here may reach the real GitHub: the app is given a pull-request reader with no credential.
+  const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c, prStates: new PrStates({ token: () => undefined }) });
   return new Promise<{ server: import("node:http").Server; base: string; scheduler: Scheduler; orchestrator: typeof built.orchestrator }>((resolve) => {
     const srv = built.app.listen(0, () => resolve({ server: srv, base: `http://127.0.0.1:${(srv.address() as import("node:net").AddressInfo).port}`, scheduler: built.scheduler, orchestrator: built.orchestrator }));
   });
@@ -361,22 +363,175 @@ test("a run that ended is not a wish that was met: only the service's own eviden
 
   const board = appBoard({ store: s, queue: quietQueue, now });
   const of = (id: string) => board.jobs.find((j) => j.id === id)!;
-  assert.deepEqual(of(never.id).outcome, { state: "not_met", text: "Nothing was bought: no purchase was put to you." });
+  assert.deepEqual(of(never.id).outcome, { state: "not_met", text: "Nothing was bought: no purchase was put to you.", by: "service" });
   assert.equal(of(never.id).said, "I could not get past the sign-in, so nothing was ordered.");
-  assert.deepEqual(of(expired.id).outcome, { state: "not_met", text: "Nothing was bought: it expired before you approved it." });
-  assert.deepEqual(of(bought.id).outcome, { state: "met", text: "Bought: £23.98 on shop.example." });
+  assert.deepEqual(of(expired.id).outcome, { state: "not_met", text: "Nothing was bought: it expired before you approved it.", by: "service" });
+  assert.deepEqual(of(bought.id).outcome, { state: "met", text: "Bought: £23.98 on shop.example.", by: "service" });
   assert.equal(of(asking.id).outcome!.state, "waiting");
   assert.equal(of(plain.id).outcome!.state, "unconfirmed", "a worker saying it went well is not evidence");
-  assert.deepEqual(of(merged.id).outcome, { state: "met", text: "Reviewed and merged." });
-  assert.deepEqual(of(left.id).outcome, { state: "waiting", text: "Reviewed and left for you: merge it yourself" });
-  assert.deepEqual(of(sentBack.id).outcome, { state: "not_met", text: "The review asked for changes." });
+  assert.deepEqual(of(merged.id).outcome, { state: "met", text: "Reviewed and merged.", by: "service" });
+  assert.deepEqual(of(left.id).outcome, { state: "waiting", text: "Reviewed and left for you: merge it yourself", by: "service" });
+  assert.deepEqual(of(sentBack.id).outcome, { state: "not_met", text: "The review asked for changes.", by: "service" });
   assert.equal(of(unreviewed.id).outcome!.state, "unconfirmed");
   assert.equal(of(failed.id).outcome!.state, "not_met");
   assert.equal(of(assistant.id).said, undefined, "what the assistant told him is not put on a card");
   assert.ok(!JSON.stringify(board).includes("someone's email"));
   const ticks = board.jobs.filter((j) => j.outcome?.state === "met").map((j) => j.title).sort();
   assert.deepEqual(ticks, ["Merged work", "Order bought", "Review: Left for Paul", "Review: Merged work", "Review: Sent back"], "what is ticked is what the service can confirm: a purchase, a merge, and a review that gave its verdict");
-  assert.deepEqual(of(mergedReview.id).outcome, { state: "met", text: "Reviewed: merged." });
+  assert.deepEqual(of(mergedReview.id).outcome, { state: "met", text: "Reviewed: merged.", by: "service" });
+});
+
+test("Paul's own answer comes first, then the service's records, then what the worker says of itself", async () => {
+  const { parseOutcome, splitReport, plainMessage, REPORT_RULE, MESSAGE_OPEN, MESSAGE_CLOSE } = await import("../src/messages.js");
+  // The worker is told to say how it turned out, and what "met" means.
+  assert.match(REPORT_RULE, /"GOAL: met", or "GOAL: not met: <the one reason>", or "GOAL: needs Paul: <the one thing he must do>"/);
+  assert.match(REPORT_RULE, /It is met only if the thing Paul asked for now exists or has happened\./);
+  assert.deepEqual(parseOutcome("All good.\n\nGOAL: met"), { state: "met" });
+  assert.deepEqual(parseOutcome("**GOAL: not met: the checkout asked for a code I could not get**"), { state: "not_met", detail: "the checkout asked for a code I could not get" });
+  assert.deepEqual(parseOutcome("- GOAL: needs Paul: approve the purchase"), { state: "needs_paul", detail: "approve the purchase" });
+  assert.deepEqual(parseOutcome("GOAL: met\nlater\nGOAL: not met: second thoughts"), { state: "not_met", detail: "second thoughts" }, "the last line counts");
+  assert.equal(parseOutcome("The goal: met expectations."), undefined, "a sentence is not the line");
+  assert.equal(parseOutcome("GOAL: metric collected"), undefined);
+  // The line belongs to the report and never reaches chat.
+  const split = splitReport(`The basket is full.\n\nGOAL: not met: no code\n${MESSAGE_OPEN}I filled the basket but could not check out.${MESSAGE_CLOSE}`);
+  assert.match(split.report, /GOAL: not met: no code/);
+  assert.equal(split.message, "I filled the basket but could not check out.");
+  assert.doesNotMatch(plainMessage("I tried.\nGOAL: not met: no code"), /GOAL/);
+
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-claims-")));
+  const done = (kind: string, title: string, patch: Record<string, unknown> = {}) =>
+    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, "product", PAUL, { title } as never).id, { status: "done", startedAt: iso(20), finishedAt: iso(10), ...patch } as never);
+  const saysMet = done("research", "Says met", { claimed: { state: "met" } });
+  const saysNot = done("research", "Says not", { claimed: { state: "not_met", detail: "the site was down" } });
+  const saysNeeds = done("write", "Says needs", { claimed: { state: "needs_paul", detail: "pick a title" } });
+  const silent = done("research", "Says nothing");
+  const privateNot = done("ea", "Private not", { claimed: { state: "not_met", detail: "a private reason about someone" } });
+  const boughtButSaysNot = done("research", "Bought anyway", { permits: ["purchase"], claimed: { state: "not_met", detail: "I am not sure" } });
+  s.putPurchase({ id: "pbought", status: "executed", jobId: boughtButSaysNot.id, host: "shop.example", total: "£5.00", createdAt: iso(15), expiresAt: iso(-5), replyTo: PAUL } as never);
+  const saysMetButDidNot = done("research", "Claims a purchase", { permits: ["purchase"], claimed: { state: "met" } });
+  const overruled = done("research", "Overruled", { claimed: { state: "met" }, verdict: { met: false, at: iso(1) } });
+  const blessed = done("research", "Blessed", { verdict: { met: true, at: iso(1) } });
+
+  const board = appBoard({ store: s, queue: quietQueue, now });
+  const of = (id: string) => board.jobs.find((j) => j.id === id)!.outcome!;
+  assert.deepEqual(of(saysMet.id), { state: "unconfirmed", text: "It says it did what you asked. Nothing here confirms that.", by: "worker" }, "a worker saying met earns no tick");
+  assert.deepEqual(of(saysNot.id), { state: "not_met", text: "It says it did not get there: the site was down", by: "worker" });
+  assert.deepEqual(of(saysNeeds.id), { state: "waiting", text: "It says it needs you: pick a title", by: "worker" });
+  assert.equal(of(silent.id).by, "nobody");
+  assert.deepEqual(of(privateNot.id), { state: "not_met", text: "It says it did not get there.", by: "worker" }, "the assistant's reason is not put on a card");
+  assert.deepEqual(of(boughtButSaysNot.id), { state: "met", text: "Bought: £5.00 on shop.example.", by: "service" }, "the service's own record outranks the worker");
+  assert.deepEqual(of(saysMetButDidNot.id), { state: "not_met", text: "Nothing was bought: no purchase was put to you.", by: "service" }, "and a claim of met does not survive the record");
+  assert.deepEqual(of(overruled.id), { state: "not_met", text: "You marked this as not done.", by: "you" });
+  assert.deepEqual(of(blessed.id), { state: "met", text: "You marked this as done.", by: "you" });
+  assert.ok(!JSON.stringify(board).includes("a private reason"));
+});
+
+test("GitHub is asked what became of a pull request: in the background, read-only, and only as often as it should be", async () => {
+  let clock = 1_000_000;
+  const asked: Array<{ url: string; method: string; auth: string | null }> = [];
+  let flying = 0;
+  let most = 0;
+  let answer: (url: string) => Response = () => new Response("{}", { status: 404 });
+  const fake = (async (url: string | URL, init?: RequestInit) => {
+    asked.push({ url: String(url), method: init?.method ?? "GET", auth: new Headers(init?.headers).get("authorization") });
+    flying += 1;
+    most = Math.max(most, flying);
+    await new Promise((r) => setTimeout(r, 2));
+    flying -= 1;
+    return answer(String(url));
+  }) as typeof fetch;
+  const body = (o: unknown) => new Response(JSON.stringify(o), { status: 200 });
+  const prs = new PrStates({ token: (slug) => (slug === "o/secret" ? undefined : "tok-123"), fetch: fake, now: () => clock });
+  const pr = (n: number, repo = "o/r") => `https://github.com/${repo}/pull/${n}`;
+
+  answer = (url) => (url.endsWith("/1") ? body({ state: "closed", merged: true }) : url.endsWith("/2") ? body({ state: "closed", merged: false }) : url.endsWith("/3") ? body({ state: "open", merged: false }) : new Response("no", { status: 500 }));
+  assert.equal(prs.get(pr(1)), undefined, "the first look never waits: it answers that it does not know yet");
+  for (const n of [2, 3, 4]) prs.get(pr(n));
+  prs.get(pr(1));
+  await prs.settled();
+  assert.deepEqual([prs.get(pr(1)), prs.get(pr(2)), prs.get(pr(3)), prs.get(pr(4))], ["merged", "closed", "open", undefined]);
+  assert.deepEqual(asked.map((a) => a.url).sort(), [1, 2, 3, 4].map((n) => `https://api.github.com/repos/o/r/pulls/${n}`), "one request each, to GitHub's own API");
+  assert.ok(asked.every((a) => a.method === "GET" && a.auth === "Bearer tok-123" && !a.url.includes("tok-123")), "read-only, the credential in a header");
+
+  // Not asked again until it should be: merged never, open after a few minutes, closed after an hour, a failure after ten minutes.
+  asked.length = 0;
+  for (const n of [1, 2, 3, 4]) prs.get(pr(n));
+  await prs.settled();
+  assert.equal(asked.length, 0);
+  clock += 4 * 60_000;
+  answer = () => body({ state: "closed", merged: true });
+  for (const n of [1, 2, 3, 4]) prs.get(pr(n));
+  await prs.settled();
+  assert.deepEqual(asked.map((a) => a.url), ["https://api.github.com/repos/o/r/pulls/3"], "only the open one, now merged");
+  assert.equal(prs.get(pr(3)), "merged");
+  clock += 7 * 60_000;
+  answer = () => new Response("no", { status: 503 });
+  asked.length = 0;
+  for (const n of [1, 2, 3, 4]) prs.get(pr(n));
+  await prs.settled();
+  assert.deepEqual(asked.map((a) => a.url), ["https://api.github.com/repos/o/r/pulls/4"]);
+  clock += 61 * 60_000;
+  prs.get(pr(2));
+  await prs.settled();
+  assert.equal(prs.get(pr(2)), "closed", "a failed look keeps what was known");
+
+  // Nothing but a pull request's own address is ever asked about, and nothing is asked without a credential.
+  asked.length = 0;
+  for (const bad of ["https://github.com/o/r/pull/5/files", "https://evil.example/o/r/pull/5", "https://github.com/o/r/issues/5", "#12", "https://github.com/o/r/pull/5?x=1", "https://github.com/o/../pull/5"]) assert.equal(prs.get(bad), undefined, bad);
+  prs.get(pr(9, "o/secret"));
+  await prs.settled();
+  assert.equal(asked.length, 0);
+
+  // A page full of jobs does not become a flood.
+  answer = () => body({ state: "open" });
+  for (let n = 100; n < 140; n++) prs.get(pr(n));
+  await prs.settled();
+  assert.ok(most <= PR_STATE_CONCURRENCY, `at most ${PR_STATE_CONCURRENCY} at once (saw ${most})`);
+});
+
+test("a pull request Paul merged himself counts as done, and one he closed does not", () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-prs-")));
+  const done = (kind: string, title: string, patch: Record<string, unknown> = {}) =>
+    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, "self", PAUL, { title } as never).id, { status: "done", startedAt: iso(20), finishedAt: iso(10), ...patch } as never);
+  const url = (n: number) => `https://github.com/o/r/pull/${n}`;
+  const merged = done("engineer", "Merged by Paul", { pr: url(1), reviewOnly: true });
+  const closed = done("engineer", "Closed", { pr: url(2), reviewOnly: true });
+  const open = done("engineer", "Still open", { pr: url(3), reviewOnly: true });
+  const unknown = done("engineer", "Not asked yet", { pr: url(4), reviewOnly: true });
+  const sentBackThenMerged = done("engineer", "Sent back then merged", { pr: url(5) });
+  s.writeOutput(done("maintain", "Review: Sent back then merged", { reviewOf: sentBackThenMerged.id }).id, `REVIEW ${url(5)}: changes requested: a test is missing`);
+  const states: Record<string, "merged" | "closed" | "open"> = { [url(1)]: "merged", [url(2)]: "closed", [url(3)]: "open", [url(5)]: "merged" };
+  const board = appBoard({ store: s, queue: quietQueue, now, prState: (u) => states[u] });
+  const of = (id: string) => board.jobs.find((j) => j.id === id)!.outcome!;
+  assert.deepEqual(of(merged.id), { state: "met", text: "Its pull request was merged.", by: "service" });
+  assert.deepEqual(of(closed.id), { state: "not_met", text: "Its pull request was closed without being merged.", by: "service" });
+  assert.deepEqual(of(open.id), { state: "waiting", text: "Its pull request is open for you to review.", by: "service" });
+  assert.equal(of(unknown.id).state, "waiting", "until GitHub has answered, it reads as it did before");
+  assert.equal(of(sentBackThenMerged.id).state, "met", "what GitHub says now outranks an earlier review");
+});
+
+test("only Paul's button sets his answer, on a finished job, and it changes nothing else", async () => {
+  const cookie = await session();
+  const job = store.updateJob(store.createJob("research", "Look into it.", PAUL, "product", PAUL, { title: "Judged" } as never).id, { status: "done", startedAt: iso(9), finishedAt: iso(8), summary: "Found it." });
+  const running = store.updateJob(store.createJob("research", "Still going.", PAUL, "product", PAUL, { title: "Not yet" } as never).id, { status: "queued", capBlocked: true });
+  const mark = (id: string, met: unknown, c: string | undefined = cookie, headers: Record<string, string> = {}) => postApi(`/jobs/${id}/action`, { action: "verdict", met }, c, headers);
+  assert.equal((await mark(job.id, true, "")).status, 401);
+  assert.equal((await mark(job.id, true, cookie, { origin: "https://elsewhere.example" })).status, 403);
+  assert.equal((await mark(job.id, "yes")).status, 400);
+  assert.equal((await mark(running.id, true)).status, 409, "a job that has not finished cannot be judged");
+  assert.equal(store.getJob(job.id)!.verdict, undefined);
+
+  const before = { chat: chat.view().messages.length, elsewhere: elsewhere.length };
+  assert.equal((await mark(job.id, false)).status, 200);
+  assert.equal(store.getJob(job.id)!.verdict!.met, false);
+  const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${job.id}`, cookie))) as { job: { outcome: { state: string; by: string } }; actions: { verdict: boolean; yourVerdict?: boolean } };
+  assert.deepEqual([detail.job.outcome.state, detail.job.outcome.by, detail.actions.verdict, detail.actions.yourVerdict], ["not_met", "you", true, false]);
+  assert.equal((await mark(job.id, true)).status, 200);
+  assert.equal(store.getJob(job.id)!.verdict!.met, true);
+  assert.equal((await mark(job.id, null)).status, 200);
+  assert.equal(store.getJob(job.id)!.verdict, undefined, "cleared");
+  assert.deepEqual([store.getJob(job.id)!.status, store.getJob(job.id)!.summary], ["done", "Found it."], "nothing else about the job changed");
+  assert.deepEqual({ chat: chat.view().messages.length, elsewhere: elsewhere.length }, before, "and it is not announced anywhere");
 });
 
 test("the history pages through every finished job", () => {
@@ -694,7 +849,7 @@ test("a job can be stopped or run again from the app, and nothing it was permitt
   const queued = store.createJob("research", "Wait here.", PAUL, "product", PAUL, { title: "Waiting job" } as never);
 
   const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${original.id}`, cookie))) as { actions: { cancel: boolean; retry: boolean; rerunModels: string[] } };
-  assert.deepEqual(detail.actions, { cancel: false, front: false, retry: true, rerunModels: ["z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro", "anthropic/claude-opus-5.5"] });
+  assert.deepEqual(detail.actions, { verdict: true, cancel: false, front: false, retry: true, rerunModels: ["z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro", "anthropic/claude-opus-5.5"] });
 
   assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" })).status, 401);
   assert.equal((await postApi(`/jobs/${original.id}/action`, { action: "rerun", model: "z-ai/glm-5.3" }, cookie, { "sec-fetch-site": "cross-site" })).status, 403);
