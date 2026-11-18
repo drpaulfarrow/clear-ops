@@ -38,6 +38,7 @@ The app opens on a conversation with the chief, with the board beside it. A swit
 Paul's call on 18 Nov 2026, asked twice: approve from the app, one tap, for everything.
 
 - **Waiting on me** shows each waiting email, calendar change, purchase, DNS change and sign-up in the gate's own words, the same text it sends in chat, with two buttons. One tap decides it. What happened is said in the app's conversation and in the chat where the item was first put to him.
+- **The same cards sit at the foot of the chat**, wherever the item was first put to him, so a decision can be made without leaving the conversation.
 - **A job's page** has buttons to stop it, move it to the front of its queue, try a failed one again, and run it again on one of the three models a job may be pinned to. A job run again keeps its brief, title and pull request, reports in the app, and carries over nothing it was permitted before. Reviews, fix rounds, design-loop jobs, bridge jobs and the assistant cannot be run again from here.
 - **The cap and hold banners** have a button that sends `/resume`.
 - **Typed approval words are still refused** in the app's chat. A button is tied to the exact item shown; a typed word is tied to nothing.
