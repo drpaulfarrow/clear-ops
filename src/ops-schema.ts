@@ -21,12 +21,14 @@ import type { Store } from "./store.js";
  * same pull request, which renames the namespace and so re-registers every resumed session with the
  * current schema. The fail-closed guard below pins the advertised shape per namespace in the store at
  * boot: if the shape changes without the version bump, the service refuses to run rather than serve
- * resumed sessions a stale schema, so the mistake is caught at deploy (the health check keeps the
- * previous version serving) instead of as a silent incident.
+ * resumed sessions a stale schema. That is the last line of defence and an expensive one: with one
+ * machine updated in place there is no previous version left serving, so a refused boot is an outage
+ * (19 Nov 2026). The first line is test/ops-schema-pin.test.ts, which compares the same shapes with
+ * the copy checked in at test/fixtures/ops-schema.json and fails `npm test` when they differ.
  */
 
-/** Schema version of the chief's ops tools. 1 was the unversioned "ops" namespace (before 17 Nov 2026); 2 added the model pin and reviewOnly; 3 added start_job's private source reference (the handle a staged "read doc" hands Paul); 4 added start_job's doneWhen (the engineer's finish-line contract). Two changes each called themselves 3 while on separate branches (the private source reference and doneWhen), so the merged wire shape, which carries both, is 4. */
-export const OPS_SCHEMA_VERSION = 4;
+/** Schema version of the chief's ops tools. 1 was the unversioned "ops" namespace (before 17 Nov 2026); 2 added the model pin and reviewOnly; 3 added start_job's private source reference (the handle a staged "read doc" hands Paul); 4 added start_job's doneWhen (the engineer's finish-line contract). Two changes each called themselves 3 while on separate branches (the private source reference and doneWhen), so the merged wire shape, which carries both, is 4; 5 added the usage_report tool (it merged under 4, and the guard below refused the next boot against the production store: the 19 Nov 2026 outage). test/ops-schema-pin.test.ts now fails `npm test` on that mistake, before a deploy can meet it. */
+export const OPS_SCHEMA_VERSION = 5;
 
 /** The chief's ops MCP namespace: stable for an unchanged schema, new on every schema change. */
 export const OPS_SERVER_NAME = OPS_SCHEMA_VERSION <= 1 ? "ops" : `ops_v${OPS_SCHEMA_VERSION}`;
