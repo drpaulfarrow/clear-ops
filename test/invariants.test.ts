@@ -1261,6 +1261,33 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(src("github-auth.ts"), /const WORKER_STRIPPED = \[[^\]]*"UI_GITHUB_CLIENT_ID", "UI_GITHUB_CLIENT_SECRET"\]/);
 });
 
+test("a picture in the web app's chat is one the service kept there itself, read by name from its own folder for a signed-in browser", () => {
+  const index = src("index.ts");
+  const web = src("web-chat.ts");
+  // The route hands the transcript a name and nothing else; no path is built from the request here.
+  const route = index.slice(index.indexOf("app.get(`${APP_PATH}/api/chat/picture/:name`"), index.indexOf("app.post(`${APP_PATH}/api/chat`, (req, res) => {"));
+  assert.match(route, /const picture = chat\.picture\(String\(req\.params\.name \?\? ""\)\);\s*if \(!picture\) return void res\.status\(404\)/);
+  assert.doesNotMatch(route, /readFileSync|sendFile|path\.join|createReadStream|uploads/);
+  assert.match(route, /res\.set\("Content-Security-Policy", "default-src 'none'; sandbox"\);\s*res\.type\(picture\.type\)\.send\(picture\.bytes\);/, "sent as the kind it was kept as, in a sandbox");
+  // It is under /app and not among the paths open without a session, so the sign-in gate covers it.
+  assert.match(index, /const APP_OPEN = \[APP_SIGN_IN_PATH, `\$\{APP_PATH\}\/auth`, APP_ASSETS_PATH\];/);
+  // The transcript serves only a name of its own shape that a kept message shows.
+  assert.match(web, /const WEB_PICTURE = \/\^\[1-9\]\\d\{0,11\}\\\.\(png\|jpg\)\$\/;/);
+  assert.match(web, /picture\(name: string\)[^\n]*\{\s*if \(!WEB_PICTURE\.test\(name\) \|\| !this\.messages\.some\(\(m\) => m\.picture === name\)\) return undefined;/);
+  // What is kept is a PNG or a JPEG by its bytes, capped, owner-only, and only ever written by sendImage:
+  // the service's own side of the conversation. Nothing Paul's browser sends is kept as a picture, and
+  // nothing is read from the uploads directory, so uploads still live only there.
+  const keep = web.slice(web.indexOf("private keepPicture(file: string)"), web.indexOf("async recent("));
+  assert.match(keep, /if \(fs\.statSync\(file\)\.size > WEB_PICTURE_BYTES\) return undefined;[\s\S]*?const kind = pictureKind\(bytes\);\s*if \(!kind\) return undefined;/);
+  assert.match(keep, /fs\.mkdirSync\(this\.pictures, \{ recursive: true, mode: 0o700 \}\);\s*fs\.writeFileSync\(path\.join\(this\.pictures, name\), bytes, \{ mode: 0o600 \}\);/);
+  assert.equal((web.match(/this\.keepPicture\(/g) ?? []).length, 1, "one caller keeps a picture");
+  assert.match(web, /async sendImage\(to: string, file: string, caption: string\): Promise<void> \{\s*const name = this\.keepPicture\(file\);/);
+  assert.doesNotMatch(web, /uploadsDir/, "the app's chat never reads the uploads directory");
+  assert.match(web, /import type \{ Attachment \} from "\.\/uploads\.js";/, "it knows an upload only as a type");
+  // The menu's list is fixed in the service; the route serves it and takes nothing.
+  assert.match(index, /app\.get\(`\$\{APP_PATH\}\/api\/commands`, \(_req, res\) => \{\s*appHeaders\(res\);\s*res\.json\(\{ commands: WEB_COMMANDS \}\);/);
+});
+
 test("caps and models change at run time only from the web app's own route, and only the seven settings it names", () => {
   const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
   // One module holds the settings and writes them, and one route calls it: no agent, command word,

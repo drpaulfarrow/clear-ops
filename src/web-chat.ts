@@ -74,6 +74,54 @@ export const WEB_FILES_MAX = 5;
 export const WEB_FILES_BYTES = 18 * 1024 * 1024;
 /** The largest request body the app's chat route reads, and then only from a signed-in browser: the files above as base64, with room for the rest. */
 export const WEB_BODY_LIMIT = "26mb";
+/** The largest picture the service's side of the conversation keeps for the app to show. */
+export const WEB_PICTURE_BYTES = 10 * 1024 * 1024;
+/** The only names a kept picture has: the number of the message it came with, and what it is. */
+const WEB_PICTURE = /^[1-9]\d{0,11}\.(png|jpg)$/;
+
+/** PNG or JPEG, told from the bytes themselves and never from a name. Anything else is not a picture here. */
+function pictureKind(bytes: Buffer): "png" | "jpg" | undefined {
+  if (bytes.length > 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "png";
+  if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "jpg";
+  return undefined;
+}
+
+/** One slash command as the app's menu offers it. */
+export interface WebCommand {
+  /** What is put in the box, e.g. "/trace". */
+  command: string;
+  /** What must be typed after it, as a hint, e.g. "<id>". The menu leaves the box ready for it. */
+  needs?: string;
+  /** What may be typed after it. The command is complete without it. */
+  takes?: string;
+  about: string;
+}
+
+/**
+ * The slash commands the app's menu offers: the ones the chief understands (`HELP` in
+ * src/orchestrator.ts) that work when typed here. The owner-only ones `webRefusal` turns away
+ * (/password, /pair, /unpair, /whoami, /google disconnect) are left out, since offering a command
+ * that is then refused helps nobody. The menu only fills the box; the message is still sent, checked
+ * and refused like any other. test/app.test.ts holds this list against HELP in both directions.
+ */
+export const WEB_COMMANDS: readonly WebCommand[] = [
+  { command: "/jobs", about: "Recent jobs" },
+  { command: "/spend", takes: "yesterday or YYYY-MM-DD", about: "What jobs cost today, or on another day" },
+  { command: "/usage", takes: "yesterday, YYYY-MM-DD or job <id>", about: "Tokens and cache hits, for a day or one job" },
+  { command: "/trace", needs: "<id>", about: "What one job's worker did, step by step" },
+  { command: "/pending", about: "What is waiting for your approval" },
+  { command: "/resume", about: "Rerun failed jobs and restart the queue, after a credit or key problem" },
+  { command: "/status", about: "Which GitHub login is active and what it reaches" },
+  { command: "/followups", about: "Who is waiting on you, and what you promised" },
+  { command: "/uploads", about: "Files you have sent" },
+  { command: "/delete upload", needs: "<name or all>", about: "Delete a file you sent" },
+  { command: "/google", about: "Whether Google is connected" },
+  { command: "/booking", takes: "link", about: "Your booking link for scheduling drafts: see it, or set it" },
+  { command: "/board", about: "A link to the read-only jobs board" },
+  { command: "/reports", about: "A link to your saved reports" },
+  { command: "/reset", about: "Start a fresh conversation. Jobs and notes are kept" },
+  { command: "/help", about: "Everything the chief understands" },
+];
 
 /** Why the files on a message were refused, in words for Paul. */
 export class WebFilesError extends Error {}
@@ -157,6 +205,8 @@ export interface WebMessage {
   thread?: string;
   /** The names of the files Paul sent with it. The files themselves are in the uploads directory. */
   files?: string[];
+  /** A picture the service sent with it (a design job's), by the name it is kept under in the app's own pictures folder. */
+  picture?: string;
 }
 
 export interface WebChatOptions {
@@ -172,22 +222,31 @@ export class WebChat {
   /** `threads()` as last worked out, until a message is added or removed. The board asks every few seconds. */
   private notes?: Map<string, { count: number; lastAt: string }>;
   private readonly file?: string;
+  /** Where kept pictures live, beside the transcript. Absent (no data directory): they are held in memory. */
+  private readonly pictures?: string;
+  private readonly held = new Map<string, Buffer>();
+  /** Whether the transcript on disk was read at start, or there was none to read. */
+  private read = false;
   private readonly now: () => number;
 
   constructor(o: WebChatOptions = {}) {
     this.now = o.now ?? Date.now;
     this.file = o.dir ? path.join(o.dir, "app", "chat.json") : undefined;
+    this.pictures = o.dir ? path.join(o.dir, "app", "pictures") : undefined;
     this.load();
+    this.sweep();
   }
 
   private load(): void {
     if (!this.file) return;
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, "utf8")) as { seq?: unknown; messages?: unknown };
-      if (Array.isArray(saved.messages)) this.messages = (saved.messages as WebMessage[]).filter((m) => m && typeof m.id === "string" && typeof m.text === "string" && (m.from === "paul" || m.from === "clearops") && (m.thread === undefined || (typeof m.thread === "string" && WEB_THREAD.test(m.thread))));
+      if (Array.isArray(saved.messages)) this.messages = (saved.messages as WebMessage[]).filter((m) => m && typeof m.id === "string" && typeof m.text === "string" && (m.from === "paul" || m.from === "clearops") && (m.thread === undefined || (typeof m.thread === "string" && WEB_THREAD.test(m.thread))) && (m.picture === undefined || (typeof m.picture === "string" && WEB_PICTURE.test(m.picture))));
       this.seq = typeof saved.seq === "number" ? saved.seq : this.messages.length;
-    } catch {
+      this.read = true;
+    } catch (err) {
       // No transcript yet, or an unreadable one: start empty rather than stop the service.
+      this.read = (err as NodeJS.ErrnoException)?.code === "ENOENT";
     }
   }
 
@@ -213,10 +272,10 @@ export class WebChat {
     return this.messages.filter((m) => m.thread === thread);
   }
 
-  private add(from: WebMessage["from"], text: string, live = false, to: string = WEB_CONVERSATION, files: string[] = []): WebMessage {
+  private add(from: WebMessage["from"], text: string, live = false, to: string = WEB_CONVERSATION, files: string[] = [], picture?: string): WebMessage {
     this.seq += 1;
     const thread = this.threadOf(to);
-    const message: WebMessage = { id: String(this.seq), at: new Date(this.now()).toISOString(), from, text: redact(text), ...(live ? { live: true as const } : {}), ...(thread ? { thread } : {}), ...(files.length ? { files } : {}) };
+    const message: WebMessage = { id: String(this.seq), at: new Date(this.now()).toISOString(), from, text: redact(text), ...(live ? { live: true as const } : {}), ...(thread ? { thread } : {}), ...(files.length ? { files } : {}), ...(picture ? { picture } : {}) };
     this.messages.push(message);
     this.notes = undefined;
     this.trim(thread);
@@ -226,6 +285,7 @@ export class WebChat {
 
   /** Each conversation keeps its newest messages, and only so many threads are kept at all. */
   private trim(thread: string | undefined): void {
+    const before = this.messages;
     const keep = thread ? WEB_THREAD_KEEP : WEB_KEEP;
     const mine = this.in(thread);
     if (mine.length > keep) {
@@ -238,6 +298,45 @@ export class WebChat {
       const gone = new Set([...last].sort((a, b) => a[1] - b[1]).slice(0, last.size - WEB_THREADS_MAX).map(([t]) => t));
       this.messages = this.messages.filter((m) => !m.thread || !gone.has(m.thread));
     }
+    // A picture goes when the message it came with does.
+    if (this.messages !== before) {
+      const kept = new Set(this.messages);
+      for (const m of before) if (m.picture && !kept.has(m)) this.discard(m.picture);
+    }
+  }
+
+  private discard(name: string): void {
+    this.held.delete(name);
+    if (this.pictures) fs.rmSync(path.join(this.pictures, name), { force: true });
+  }
+
+  /** At start: anything in the pictures folder that no kept message shows is removed, so the folder cannot outgrow the transcript. */
+  private sweep(): void {
+    // Only when the transcript was read (or there is none yet): an unreadable one says nothing about what is still shown.
+    if (!this.pictures || !this.read) return;
+    try {
+      const shown = new Set(this.messages.map((m) => m.picture));
+      for (const name of fs.readdirSync(this.pictures)) if (!shown.has(name)) fs.rmSync(path.join(this.pictures, name), { force: true, recursive: false });
+    } catch {
+      // No folder yet, or one that cannot be read: nothing to tidy, and never a reason to stop the service.
+    }
+  }
+
+  /**
+   * One kept picture for the signed-in app: only a name of the one shape these have, and only while a
+   * kept message shows it. Nothing else in the folder, and nothing outside it, can be asked for.
+   */
+  picture(name: string): { bytes: Buffer; type: "image/png" | "image/jpeg" } | undefined {
+    if (!WEB_PICTURE.test(name) || !this.messages.some((m) => m.picture === name)) return undefined;
+    let bytes = this.held.get(name);
+    if (!bytes && this.pictures) {
+      try {
+        bytes = fs.readFileSync(path.join(this.pictures, name));
+      } catch {
+        return undefined;
+      }
+    }
+    return bytes ? { bytes, type: name.endsWith(".png") ? "image/png" : "image/jpeg" } : undefined;
   }
 
   /** Paul's own message, from the app's route. */
@@ -285,16 +384,40 @@ export class WebChat {
     return true;
   }
 
-  /** Pictures are a later slice; until then the caption is kept so nothing a job said is lost. */
-  async sendImage(to: string, _file: string, caption: string): Promise<void> {
-    if (caption) this.add("clearops", caption, false, to);
+  /**
+   * A picture the service shows Paul (a design job's own PNG or JPEG, chosen by src/design.ts). A copy is
+   * kept in the app's own pictures folder, owner-only, under the message's number, and goes when that
+   * message does. What it is is told from its bytes; a file that is not a PNG or JPEG, is too large or
+   * cannot be read is not kept, and its caption still is, so nothing a job said is lost.
+   */
+  async sendImage(to: string, file: string, caption: string): Promise<void> {
+    const name = this.keepPicture(file);
+    if (name || caption) this.add("clearops", caption, false, to, [], name);
+  }
+
+  private keepPicture(file: string): string | undefined {
+    try {
+      if (fs.statSync(file).size > WEB_PICTURE_BYTES) return undefined;
+      const bytes = fs.readFileSync(file);
+      const kind = pictureKind(bytes);
+      if (!kind) return undefined;
+      // The number the message is about to be given (`add` takes the next one).
+      const name = `${this.seq + 1}.${kind}`;
+      if (this.pictures) {
+        fs.mkdirSync(this.pictures, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(this.pictures, name), bytes, { mode: 0o600 });
+      } else this.held.set(name, bytes);
+      return name;
+    } catch {
+      return undefined;
+    }
   }
 
   async recent(to: string, limit: number): Promise<Array<{ author: string; text: string }>> {
     return this.in(this.threadOf(to))
       .filter((m) => !m.live)
       .slice(-limit)
-      .map((m) => ({ author: m.from === "paul" ? "Paul" : "ClearOps", text: m.text }));
+      .map((m) => ({ author: m.from === "paul" ? "Paul" : "ClearOps", text: m.text || (m.picture ? "(a picture)" : "") }));
   }
 }
 

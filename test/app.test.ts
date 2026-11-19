@@ -23,6 +23,8 @@ const { buildApp } = await import("../src/index.js");
 const { AppAuth, APP_PATH, APP_SIGN_IN_PATH, APP_AUTH_START_PATH, APP_AUTH_CALLBACK_PATH, APP_SIGN_OUT_PATH, APP_SESSION_COOKIE, APP_STATE_COOKIE, APP_SESSION_DAYS, APP_SIGN_INS_PER_MINUTE } = await import("../src/app-auth.js");
 const { appBoard, appChat, appHistory, appJob, APP_HISTORY_PAGE } = await import("../src/app-data.js");
 const { webFiles, WebFilesError, WEB_FILES_MAX, WEB_FILES_BYTES } = await import("../src/web-chat.js");
+const { WEB_COMMANDS, WEB_PICTURE_BYTES } = await import("../src/web-chat.js");
+const { HELP } = await import("../src/orchestrator.js");
 const { WebChat, routeWeb, webRefusal, webThread, webTopic, isWebConversation, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_THREAD_KEEP, WEB_THREADS_MAX, WEB_TEXT_MAX } = await import("../src/web-chat.js");
 const { isAllowed } = await import("../src/config.js");
 const { mintAppApproval, spendAppApproval, APP_APPROVER, APP_GRANT_MS } = await import("../src/app-approver.js");
@@ -1210,6 +1212,151 @@ test("only Paul's own tap in the app changes a setting, and it is said in the ch
 });
 
 /* ---------- Threads: talking to the chief about one job or one pull request ---------- */
+
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("not really a picture, but it starts like one")]);
+const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("the same, for a JPEG")]);
+
+test("a picture the service sends is kept for the signed-in app alone, told from its bytes, and shown only while its message is", async () => {
+  const cookie = await session();
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-pictures-"));
+  const file = (name: string, bytes: Buffer | string) => {
+    fs.writeFileSync(path.join(work, name), bytes);
+    return path.join(work, name);
+  };
+  const kept = path.join(process.env.DATA_DIR!, "app", "pictures");
+  const last = () => chat.view().messages.at(-1)!;
+
+  // A design job's PNG: a copy is kept owner-only under the message's own number, with the caption as its words.
+  await chat.sendImage(WEB_CONVERSATION, file("header.png", PNG), "The new header");
+  const shown = last();
+  assert.equal(shown.text, "The new header");
+  assert.equal(shown.picture, `${shown.id}.png`);
+  assert.deepEqual(fs.readFileSync(path.join(kept, shown.picture!)), PNG);
+  assert.equal(fs.statSync(path.join(kept, shown.picture!)).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(kept).mode & 0o777, 0o700);
+  // What it is comes from its bytes, never its name: a JPEG called .png is kept as a JPEG.
+  await chat.sendImage(WEB_CONVERSATION, file("really-a-jpeg.png", JPEG), "");
+  assert.equal(last().picture, `${last().id}.jpg`);
+  assert.equal(last().text, "");
+  const jpeg = last().picture!;
+
+  // The app is told the picture's name and its caption, and reads it from its own route.
+  const view = (await chatView(cookie)) as unknown as { messages: Array<{ picture?: string; caption?: string; html?: string }> };
+  assert.deepEqual([view.messages.at(-2)!.picture, view.messages.at(-2)!.caption], [shown.picture, "The new header"]);
+  assert.match(view.messages.at(-2)!.html!, /The new header/);
+  const res = await get(`${APP_PATH}/api/chat/picture/${shown.picture}`, cookie);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(res.headers.get("cache-control"), "private, max-age=86400");
+  assert.match(res.headers.get("content-security-policy")!, /default-src 'none'; sandbox/);
+  assert.deepEqual(Buffer.from(await res.arrayBuffer()), PNG);
+  assert.equal((await get(`${APP_PATH}/api/chat/picture/${jpeg}`, cookie)).headers.get("content-type"), "image/jpeg");
+  // Not signed in: nothing.
+  assert.equal((await get(`${APP_PATH}/api/chat/picture/${shown.picture}`)).status, 401);
+
+  // Not a picture, too large, or gone: no picture is kept, and the caption still is. With neither, nothing is said.
+  const count = () => chat.view().messages.length;
+  const before = count();
+  await chat.sendImage(WEB_CONVERSATION, file("page.png", "<svg onload=alert(1)>"), "Only words");
+  assert.deepEqual([last().text, last().picture], ["Only words", undefined]);
+  await chat.sendImage(WEB_CONVERSATION, file("huge.png", Buffer.concat([PNG, Buffer.alloc(WEB_PICTURE_BYTES)])), "Too big to keep");
+  assert.deepEqual([last().text, last().picture], ["Too big to keep", undefined]);
+  await chat.sendImage(WEB_CONVERSATION, path.join(work, "missing.png"), "");
+  await chat.sendImage(WEB_CONVERSATION, file("words.jpg", "plain text"), "");
+  assert.equal(count(), before + 2);
+
+  // Only a name of the transcript's own shape, and only one a kept message shows. A file that merely sits
+  // in the folder, the transcript beside it and anything outside are not pictures.
+  fs.writeFileSync(path.join(kept, "999999.png"), PNG);
+  fs.writeFileSync(path.join(kept, "notes.svg"), "<svg/>");
+  for (const name of ["999999.png", "notes.svg", "..%2Fchat.json", "%2e%2e%2f%2e%2e%2fstate.json", `${shown.picture}%00.svg`, `0${shown.picture}`, shown.picture!.replace(".png", ".jpg"), "x"]) {
+    assert.equal((await get(`${APP_PATH}/api/chat/picture/${name}`, cookie)).status, 404, name);
+  }
+  assert.equal(chat.picture("../chat.json"), undefined);
+
+  // A thread's picture belongs to that thread.
+  const thread = webThread({ job: "abc123" })!;
+  await chat.sendImage(thread, file("thread.png", PNG), "In the thread");
+  assert.equal(chat.view(thread).messages.at(-1)!.picture, `${chat.view(thread).messages.at(-1)!.id}.png`);
+  assert.ok(!chat.view().messages.some((m) => m.text === "In the thread"));
+  // What the chief is given as the conversation so far names a picture rather than leaving a blank.
+  assert.ok((await chat.recent(WEB_CONVERSATION, 50)).some((m) => m.text === "(a picture)"));
+});
+
+test("a kept picture goes when its message does, and the folder is tidied at start only when the transcript was read", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-pictures-kept-"));
+  const kept = path.join(dir, "app", "pictures");
+  const png = path.join(dir, "shot.png");
+  fs.writeFileSync(png, PNG);
+  const own = new WebChat({ dir });
+  await own.sendImage(WEB_CONVERSATION, png, "First");
+  const first = own.view().messages.at(-1)!.picture!;
+  await own.sendImage(WEB_CONVERSATION, png, "Second");
+  assert.deepEqual(fs.readdirSync(kept).sort(), [first, own.view().messages.at(-1)!.picture!].sort());
+  // The transcript keeps its newest messages; a picture is dropped with the message it came with.
+  for (let i = 0; i < WEB_KEEP - 1; i++) await own.send(WEB_CONVERSATION, `Later ${i}`);
+  assert.equal(own.picture(first), undefined);
+  assert.ok(!fs.existsSync(path.join(kept, first)));
+  const second = fs.readdirSync(kept);
+  assert.equal(second.length, 1);
+  assert.ok(own.picture(second[0]!));
+
+  // At start: what no kept message shows is removed, and what one shows stays.
+  fs.writeFileSync(path.join(kept, "stray.png"), PNG);
+  const again = new WebChat({ dir });
+  assert.deepEqual(fs.readdirSync(kept), second);
+  assert.deepEqual(again.picture(second[0]!)?.bytes, PNG);
+  // An unreadable transcript says nothing about what is shown, so nothing is removed on its account.
+  fs.writeFileSync(path.join(dir, "app", "chat.json"), "{ not json");
+  new WebChat({ dir });
+  assert.deepEqual(fs.readdirSync(kept), second);
+
+  // With no data directory the picture is held in memory and read the same way.
+  const loose = new WebChat();
+  await loose.sendImage(WEB_CONVERSATION, png, "Held");
+  assert.deepEqual(loose.picture(loose.view().messages.at(-1)!.picture!)?.type, "image/png");
+});
+
+test("the command menu offers what the chief understands, and nothing the app would refuse", async () => {
+  const cookie = await session();
+  assert.equal((await get(`${APP_PATH}/api/commands`)).status, 401);
+  const served = JSON.parse(await text(await get(`${APP_PATH}/api/commands`, cookie))) as { commands: Array<{ command: string; needs?: string; takes?: string; about: string }> };
+  assert.deepEqual(served.commands, WEB_COMMANDS);
+
+  const offered = new Set(WEB_COMMANDS.map((c) => c.command));
+  assert.equal(offered.size, WEB_COMMANDS.length, "no command is offered twice");
+  for (const c of WEB_COMMANDS) {
+    assert.match(c.command, /^\/[a-z]+(?: [a-z]+)?$/, c.command);
+    assert.ok(c.about.length > 8 && c.about.length < 90, `${c.command} is described in a line`);
+    assert.ok(!(c.needs && c.takes), `${c.command} either needs something typed after it or does not`);
+    // Offered means it works when typed here: nothing on the menu is turned away by the app's own refusal.
+    assert.equal(webRefusal(c.command), undefined, c.command);
+    assert.equal(webRefusal(`${c.command} abc123`), undefined, c.command);
+    // And it is a command the chief has: /help is the list itself.
+    assert.ok(c.command === "/help" || new RegExp(`^${c.command.replace("/", "\\/")}\\b`, "m").test(HELP), `${c.command} is in /help`);
+  }
+  // The other way round: every slash command /help lists is on the menu, or is one of the owner-only
+  // ones the app refuses when typed. A command added to the chief shows up here until it is placed.
+  const NOT_IN_THE_APP: Record<string, string> = { "/password": "/password", "/whoami": "/whoami", "/pair": "/pair 123456", "/unpair": "/unpair" };
+  const listed = new Set([...HELP.matchAll(/(?:^|[\s;(])(\/[a-z]+)\b/gm)].map((m) => m[1]!));
+  assert.ok(listed.size >= 15, "the commands were read out of /help");
+  const first = new Set(WEB_COMMANDS.map((c) => c.command.split(" ")[0]));
+  for (const command of listed) assert.ok(first.has(command) || command in NOT_IN_THE_APP, `${command} is in /help but neither on the app's menu nor named as left off it`);
+  for (const [command, typed] of Object.entries(NOT_IN_THE_APP)) {
+    assert.ok(!first.has(command), `${command} is not offered`);
+    assert.equal(webRefusal(typed), WEB_APPROVAL_REFUSAL, `${typed} is refused in the app`);
+  }
+  assert.equal(webRefusal("/google disconnect"), WEB_APPROVAL_REFUSAL);
+  assert.ok(!offered.has("/google disconnect"));
+
+  // The menu lives in the page and only fills the box: it posts nothing and sends nothing itself.
+  const script = appAsset("app.js")!.body.toString();
+  const menu = script.slice(script.indexOf("function commandMenu(textarea) {"), script.indexOf("const fileSize = "));
+  assert.ok(menu.length > 500);
+  assert.doesNotMatch(menu, /fetch\(|postJson|postMessage|\bsend\(|sendThread|\.submit\(|requestSubmit/);
+  assert.match(menu, /textarea\.value = filled\(c\);/);
+});
 
 test("a thread's address names a job or a pull request, and nothing else is a conversation of the app's", () => {
   assert.equal(webThread({ job: "ab12cd" }), "web:job:ab12cd");

@@ -796,6 +796,103 @@ function spendPage() {
 
 /* ---------- Files and voice notes that go with a message ---------- */
 
+/* ---------- The slash-command menu ---------- */
+
+/** The commands the service offers, asked for once, the first time a slash is typed. */
+let commands;
+let commandsAsked = false;
+async function loadCommands() {
+  if (commandsAsked) return;
+  commandsAsked = true;
+  try {
+    const text = await getJson("/commands");
+    commands = text ? JSON.parse(text).commands : [];
+  } catch {
+    commandsAsked = false;
+  }
+}
+
+/**
+ * A menu above one message box that opens when what is typed starts with a slash. Choosing a command
+ * only fills the box: it is sent like anything else Paul types, when he sends it. Arrow keys move,
+ * Enter or Tab chooses, Escape closes; on a phone a tap chooses.
+ */
+function commandMenu(textarea) {
+  const id = `${textarea.id}-commands`;
+  const list = h("div", { class: "cmd-menu", id, role: "listbox", "aria-label": "Commands", hidden: true });
+  let shown = [];
+  let at = 0;
+  let closedFor;
+  const filled = (c) => (c.needs ? `${c.command} ` : c.command);
+  const close = () => {
+    shown = [];
+    list.hidden = true;
+    textarea.setAttribute("aria-expanded", "false");
+    textarea.removeAttribute("aria-activedescendant");
+  };
+  const pick = (c) => {
+    textarea.value = filled(c);
+    textarea.dispatchEvent(new Event("input"));
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  };
+  const draw = () => {
+    list.replaceChildren(
+      ...shown.map((c, i) =>
+        h(
+          "div",
+          // The box keeps the focus, so the keyboard stays up on a phone.
+          { class: "cmd-item", id: `${id}-${i}`, role: "option", "aria-selected": i === at ? "true" : "false", onpointerdown: (e) => e.preventDefault(), onclick: () => pick(c) },
+          h("span", { class: "cmd-name" }, c.command, c.needs || c.takes ? h("span", { class: "muted" }, ` ${c.needs ?? `[${c.takes}]`}`) : null),
+          h("span", { class: "cmd-about" }, c.about),
+        ),
+      ),
+    );
+    list.hidden = false;
+    textarea.setAttribute("aria-expanded", "true");
+    textarea.setAttribute("aria-activedescendant", `${id}-${at}`);
+    list.children[at]?.scrollIntoView({ block: "nearest" });
+  };
+  const update = () => {
+    const typed = textarea.value;
+    if (!typed.startsWith("/") || typed.includes("\n")) return close();
+    // The list is asked for once. Whatever is in the box by the time it arrives is what the menu answers.
+    if (!commands) return void loadCommands().then(() => commands && document.activeElement === textarea && update());
+    const want = typed.toLowerCase();
+    const next = commands.filter((c) => c.command.startsWith(want));
+    // Nothing to offer, he closed it for exactly this text, or the one match is already what is in the box.
+    if (!next.length || closedFor === typed || (next.length === 1 && filled(next[0]) === typed)) return close();
+    closedFor = undefined;
+    if (next.map((c) => c.command).join() !== shown.map((c) => c.command).join()) at = 0;
+    shown = next;
+    draw();
+  };
+  textarea.setAttribute("aria-controls", id);
+  textarea.setAttribute("aria-expanded", "false");
+  textarea.setAttribute("aria-autocomplete", "list");
+  textarea.addEventListener("input", update);
+  textarea.addEventListener("blur", close);
+  textarea.addEventListener("focus", update);
+  // Registered before the box's own Enter-to-send, so a choice is taken here first.
+  textarea.addEventListener("keydown", (e) => {
+    if (list.hidden || e.isComposing) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      at = (at + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length;
+      draw();
+    } else if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+      // A command already typed in full is sent by Enter as usual.
+      if (e.key === "Enter" && filled(shown[at]) === textarea.value) return close();
+      pick(shown[at]);
+    } else if (e.key === "Escape") {
+      closedFor = textarea.value;
+      close();
+    } else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  });
+  return { el: list, close };
+}
+
 const fileSize = (n) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 /** A file's bytes as base64, which is how the app's one message route takes them. */
@@ -812,13 +909,38 @@ const asBase64 = (file) =>
  * and a tray of what is waiting to go. Files are only held here until the message is sent; the service
  * saves them the way it saves a file sent in Discord.
  */
+/**
+ * A small picture of an image waiting in the tray, so the wrong screenshot is caught before it goes.
+ * Drawn in the browser from the file itself and never sent: the service gets the file and nothing else.
+ */
+const thumbs = new WeakMap();
+function thumbOf(file, redraw) {
+  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type) || !window.createImageBitmap) return null;
+  if (thumbs.has(file)) return thumbs.get(file);
+  thumbs.set(file, null);
+  createImageBitmap(file)
+    .then((bitmap) => {
+      const side = 64;
+      const canvas = h("canvas", { class: "file-thumb", width: side, height: side, role: "img", "aria-label": `Preview of ${file.name}` });
+      const scale = Math.max(side / bitmap.width, side / bitmap.height);
+      const w = bitmap.width * scale;
+      const hgt = bitmap.height * scale;
+      canvas.getContext("2d").drawImage(bitmap, (side - w) / 2, (side - hgt) / 2, w, hgt);
+      bitmap.close?.();
+      thumbs.set(file, canvas);
+      redraw();
+    })
+    .catch(() => undefined);
+  return null;
+}
+
 function attachments(textarea) {
   const a = { files: [], note: undefined };
   const tray = h("div", { class: "files", role: "status" });
   const picker = h("input", { type: "file", multiple: true, class: "sr", tabindex: "-1", "aria-hidden": "true" });
   const draw = () => {
     tray.replaceChildren(
-      ...a.files.map((f, i) => h("span", { class: "file-chip" }, h("span", { class: "file-chip-name" }, f.name), h("span", { class: "muted num" }, fileSize(f.size)), h("button", { type: "button", class: "file-chip-x", "aria-label": `Remove ${f.name}`, onclick: () => { a.files.splice(i, 1); a.note = undefined; draw(); } }, icon("cross", 12)))),
+      ...a.files.map((f, i) => h("span", { class: "file-chip" }, thumbOf(f, () => a.files.includes(f) && draw()), h("span", { class: "file-chip-name" }, f.name), h("span", { class: "muted num" }, fileSize(f.size)), h("button", { type: "button", class: "file-chip-x", "aria-label": `Remove ${f.name}`, onclick: () => { a.files.splice(i, 1); a.note = undefined; draw(); } }, icon("cross", 12)))),
       ...(a.note ? [h("span", { class: "file-note" }, a.note)] : []),
     );
     tray.hidden = !a.files.length && !a.note;
@@ -883,6 +1005,18 @@ function attachments(textarea) {
   return a;
 }
 
+/**
+ * What the service said in one message: a picture a design job chose, when there is one, then its words.
+ * The picture comes from the app's own route for the signed-in browser, and opens full size in a new tab.
+ */
+function said(m) {
+  const src = m.picture ? `${API}/chat/picture/${encodeURIComponent(m.picture)}` : undefined;
+  return [
+    src ? h("a", { class: "pic", href: src, target: "_blank", rel: "noopener" }, h("img", { src, alt: m.caption || "A picture from a job", loading: "lazy", decoding: "async" })) : null,
+    m.html ? rendered(m.html, "report said") : null,
+  ];
+}
+
 /** The files a message of Paul's went with, under his words. */
 const sentFiles = (m) => (m.files?.length ? h("div", { class: "sent-files" }, m.files.map((n) => h("span", { class: "file-chip" }, icon("clip", 12), h("span", { class: "file-chip-name" }, n)))) : null);
 const mineBubble = (m) => h("div", { class: "mine" }, h("div", { class: "bubble" }, m.text || null, sentFiles(m)));
@@ -897,12 +1031,14 @@ function threadKeyOf(r) {
 const threadInput = h("textarea", { id: "ask-thread", rows: "1", maxlength: String(TEXT_MAX), autocomplete: "off" });
 const threadSend = h("button", { class: "send", type: "submit", "aria-label": "Send" }, icon("send", 18));
 const threadFiles = attachments(threadInput);
+const threadMenu = commandMenu(threadInput);
 const threadLog = h("div", { class: "thread-log", role: "log", tabindex: "0" });
 const threadEl = h(
   "section",
   { class: "pane thread", "aria-label": `Talk to ${CHIEF} about this` },
   h("div", { class: "pane-head" }, h("h2", {}, `Talk to ${CHIEF} about this`)),
   threadLog,
+  threadMenu.el,
   threadFiles.tray,
   h(
     "form",
@@ -929,7 +1065,7 @@ function threadItems() {
   for (const item of stream) {
     if (item.job) out.push(h("div", { class: "chat-card" }, jobCard(item.job, now)));
     else if (item.message.from === "paul") out.push(mineBubble(item.message));
-    else out.push(h("div", { class: "theirs" }, avatar("chief"), h("div", { class: "theirs-body" }, h("div", { class: "theirs-who" }, h("b", {}, CHIEF), h("span", { class: "muted num" }, clock(item.message.at))), rendered(item.message.html ?? "", "report said"))));
+    else out.push(h("div", { class: "theirs" }, avatar("chief"), h("div", { class: "theirs-body" }, h("div", { class: "theirs-who" }, h("b", {}, CHIEF), h("span", { class: "muted num" }, clock(item.message.at))), said(item.message))));
   }
   if (!stream.length) out.push(h("p", { class: "muted" }, `Nothing said here yet. What you write goes to ${CHIEF} with this attached, so there is no need to say what it is about.`));
   const live = t.view.messages.find((m) => m.live);
@@ -1217,7 +1353,7 @@ function chatItems() {
           "div",
           { class: `theirs${first ? "" : " cont"}` },
           first ? avatar("chief") : h("span", { class: "av-gap", "aria-hidden": "true" }),
-          h("div", { class: "theirs-body" }, first ? h("div", { class: "theirs-who" }, h("b", {}, CHIEF), h("span", { class: "muted num" }, clock(item.message.at))) : null, rendered(item.message.html ?? "", "report said")),
+          h("div", { class: "theirs-body" }, first ? h("div", { class: "theirs-who" }, h("b", {}, CHIEF), h("span", { class: "muted num" }, clock(item.message.at))) : null, said(item.message)),
         ),
       );
       lastFrom = "clearops";
@@ -1241,9 +1377,15 @@ function chatItems() {
   return out;
 }
 
-const input = h("textarea", { id: "ask", rows: "1", maxlength: String(TEXT_MAX), placeholder: `Ask ${CHIEF}, or type / for a command`, autocomplete: "off" });
+const input = h("textarea", { id: "ask", rows: "1", maxlength: String(TEXT_MAX), autocomplete: "off" });
+// One line of prompt, whatever the width: a phone's box has no room for the long one beside the two buttons.
+const tight = window.matchMedia("(max-width: 640px)");
+const prompt = () => input.setAttribute("placeholder", tight.matches ? `Ask ${CHIEF}, or type /` : `Ask ${CHIEF}, or type / for a command`);
+tight.addEventListener("change", prompt);
+prompt();
 const sendButton = h("button", { class: "send", type: "submit", "aria-label": "Send" }, icon("send", 18));
 const mainFiles = attachments(input);
+const mainMenu = commandMenu(input);
 const logEl = h("div", { class: "chat-log", role: "log", "aria-label": `Conversation with ${CHIEF}`, tabindex: "0" });
 const boardEl = h("aside", { class: "beside", "aria-label": "Jobs board" });
 const fullBoardEl = h("div", { class: "full-board" });
@@ -1256,6 +1398,7 @@ const chatEl = h(
     "div",
     { class: "composer-wrap" },
     h("div", { class: "chips" }, chips),
+    mainMenu.el,
     mainFiles.tray,
     h(
       "form",
