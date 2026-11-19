@@ -4,6 +4,7 @@ import { BROWSE_KINDS, SEARCH_KINDS, webToolsFor, type WebTools } from "./web-to
 import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
+import { BEAT_NOTE, BEAT_SERVER, BEAT_TOOLS, beatServer } from "./beats.js";
 import { perJobModelError, provider, runRoute } from "./llm.js";
 import type { OtpRelay } from "./otp.js";
 import { DocReaderError, type DocReader } from "./doc-reader.js";
@@ -1085,6 +1086,12 @@ export class JobRunner {
       // bound to its own browser. Without a browser or the gate it gets nothing.
       const buying = job.permits?.includes("purchase") && web.session && this.purchase ? purchaseServer({ gate: this.purchase, browser: web.session, jobId: id, replyTo: job.replyTo }) : undefined;
       const purchasePermit = buying ? `\n\n${PURCHASE_NOTE}` : "";
+      // A write job can generate an instrumental from Paul's Stable Audio account (src/beats.ts): a
+      // narrow tool on the write kind alone, its free credits only, the track saved into his private
+      // beats folder with his private link in the worker's report. No other kind gets it, and nothing
+      // on the path can buy credits: the account runs out and the job says so.
+      const beats = job.kind === "write" ? beatServer(this.store) : undefined;
+      const beatNote = beats ? `\n\n${BEAT_NOTE}` : "";
       const focus = job.kind !== "engineer" && job.kind !== "maintain" && job.kind !== "create_agent" ? repoFocus(job.target, job.kind) : "";
       const depth = job.kind === "research" && job.depth === "deep" ? `\n\n${DEEP_RESEARCH_NOTE}` : "";
       // Every run is capped on turns; deep research gets more of them.
@@ -1127,18 +1134,18 @@ export class JobRunner {
       }
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {
-        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
+        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${beatNote}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
         cwd: bridged && snapshot ? snapshot : spec.cwd,
         // Only a kind that builds gets the npm development-mode settings: the service runs
         // NODE_ENV=production, which would leave typescript and tsx out of a worker's own install.
         ...(BUILDS(job.kind) ? { env: workerBuildEnv(this.setup.npmCache()) } : {}),
-        allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...web.allowed],
+        allowedTools: [...(createRepo ? [...spec.allowedTools, `mcp__${REPO_SERVER}__*`] : spec.allowedTools), ...(job.permits?.includes("signup") ? SIGNUP_TOOLS : []), ...(buying ? PURCHASE_TOOLS : []), ...(beats ? BEAT_TOOLS : []), ...web.allowed],
         disallowedTools: bridged ? [...(spec.disallowedTools ?? []), ...BRIDGE_READ_DENY] : job.commission ? [...(spec.disallowedTools ?? []), "Task"] : spec.disallowedTools,
         tools: spec.tools,
         agents: spec.agents,
-        mcpServers: ownTools || extraTools || cvTools || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers, ...(buying ? { [PURCHASE_SERVER]: buying } : {}) } : undefined,
+        mcpServers: ownTools || extraTools || cvTools || beats || web.allowed.length ? { ...extraTools, ...ownTools, ...cvTools, ...web.servers, ...(buying ? { [PURCHASE_SERVER]: buying } : {}), ...(beats ? { [BEAT_SERVER]: beats } : {}) } : undefined,
         additionalDirectories: dirs,
         maxTurns: limits.maxTurns,
         // The SDK's own guard (a runaway trip, never the job's cap), or the job's own cap on Anthropic,
