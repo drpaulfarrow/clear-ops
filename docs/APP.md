@@ -20,9 +20,9 @@ The app opens on a conversation with the chief, with the board beside it. A swit
 - **It is its own conversation.** The chief keeps a separate thread of talk for the app, so it does not remember what was said in Discord, and Discord does not see what is said here.
 - **Jobs started here report here**, and each appears in the conversation as a card that updates and opens the job page. They do not also post to Discord yet.
 - **While the chief works** the conversation shows what it is doing, as Discord does.
-- **Slash commands work as typed**: `/jobs`, `/spend`, `/resume`, `/trace <id>` and the rest. There is no menu of them yet.
+- **Slash commands work as typed**: `/jobs`, `/spend`, `/resume`, `/trace <id>` and the rest. Since slice 8 typing a slash opens a menu of them.
 - **Typed approval words do not work here.** `send`, `buy`, `dns apply`, `signup apply`, a one-time code, `act as me`, `read doc`, `yes <id>`, `/password` and device pairing are refused with one plain line, and still work in Discord. Since slice 3 the app approves with buttons instead (below).
-- **Not yet**: attaching files, voice notes, pictures in replies (the caption is kept), a separate conversation per project.
+- **Not yet**: a separate conversation per project. Files and voice notes came in slice 7, pictures in replies in slice 8.
 
 ### How the chat is kept safe (`src/web-chat.ts`, `src/orchestrator.ts`)
 
@@ -121,14 +121,33 @@ Both message boxes (the main chat and a thread) have a paperclip and, where the 
 - **A caption cannot approve.** Approval words are refused before a file is saved, as in the main chat.
 - **The transcript keeps the names, never the contents.**
 
-Not here yet: thumbnails of what was sent, pictures in the chief's replies, and the slash-command menu.
+Pictures in replies, the slash-command menu and a preview of a picture before it goes came in slice 8. A sent message still shows a picture file by its name only.
 
 ### What this changes in the rules
 The app's sender used to pass the orchestrator only with no files. It now carries files its own route received from Paul's signed-in browser. One line of an existing test said the opposite and is changed; the invariant test pins where the bytes come from and who gets the larger body.
 
+## What slice 8 adds: pictures in replies, a command menu, and a look at a picture before it goes
+
+`docs/app/pictures.png` and `docs/app/commands.png` show it with made-up jobs.
+
+- **Pictures in replies** (`sendImage` and `picture` in `src/web-chat.ts`). A design job's chosen pictures now appear in the conversation or thread the job reports to, with the caption under them, where before only the caption was kept. A tap opens the picture full size.
+  - The service keeps its own copy in `DATA_DIR/app/pictures`, owner-only, under the number of the message it came with. It is a PNG or a JPEG by its bytes, never by its name, and at most 10 MB. Anything else is not kept, and its caption still is.
+  - The app reads it from `GET /app/api/chat/picture/<name>`, behind the sign-in like everything under `/app`. The name must be one of the transcript's own (a message number and `png` or `jpg`) that a kept message shows. No path comes from the request.
+  - A picture goes when its message does, and anything in the folder that no kept message shows is removed at start.
+- **The command menu** (`WEB_COMMANDS` in `src/web-chat.ts`, `commandMenu` in `public/app/app.js`). Typing a slash in either message box opens a list of commands with a line on each, narrowed as more is typed. Arrow keys move, Enter or Tab chooses, Escape closes; on a phone a tap chooses.
+  - Choosing only fills the box. Nothing is sent until Paul sends it, and it is then checked and refused like anything typed.
+  - The list is the chief's own commands less the owner-only ones the app refuses when typed (`/password`, `/pair`, `/unpair`, `/whoami`, `/google disconnect`). A test holds it against `/help` in both directions, so a command added to the chief fails the test until it is placed on the menu or named as left off.
+- **A look before it goes.** A picture waiting in the tray shows a small preview, drawn in the browser from the file. Nothing extra is sent.
+
+Not here: a preview on a message after it is sent. The service keeps a sent file only in the uploads directory, which the app does not read. Showing it again would mean either reading uploads back out to the browser or keeping a second copy outside that directory, and both touch the uploads rule, so it waits for Paul's say.
+
+### What this changes in the rules
+
+Nothing is loosened. One read route is added, for pictures the service itself put in the conversation. The invariant test pins that it takes a name and no path, that only `sendImage` keeps a picture, and that the app's chat never reads the uploads directory.
+
 ## Still to come
 
-What it does not do yet: a breakdown of spend by model and a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), live voice with Cleo, pictures in replies, the slash-command menu, push notifications, search. Each is a later slice.
+What it does not do yet: a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), live voice with Cleo, push notifications, search. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

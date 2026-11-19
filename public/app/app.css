@@ -315,3 +315,16 @@ a.spend{text-decoration:none;color:inherit}
 .sent-files{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .bubble .file-chip{background:none;border-color:currentColor;opacity:.85}
 .thread .files{margin-bottom:8px}
+
+/* ---------- Pictures in the conversation, and the command menu ---------- */
+.pic{display:block;align-self:flex-start;width:fit-content;max-width:min(420px,100%);border-radius:12px;overflow:hidden;border:1px solid var(--line);background:var(--bg)}
+.pic img{display:block;width:auto;height:auto;max-width:100%;max-height:360px}
+.file-thumb{flex:none;width:32px;height:32px;border-radius:8px;margin:-2px 0 -2px -4px}
+.cmd-menu{display:flex;flex-direction:column;max-height:min(40vh,300px);overflow-y:auto;padding:6px;border-radius:16px;background:var(--raised);border:1px solid var(--line)}
+.cmd-menu[hidden]{display:none}
+.cmd-item{flex:none;display:flex;align-items:baseline;gap:12px;padding:8px 12px;border-radius:10px;cursor:pointer}
+.cmd-item[aria-selected="true"],.cmd-item:hover{background:var(--over)}
+.cmd-name{flex:none;font-family:var(--mono);font-size:13px;color:var(--text)}
+.cmd-about{flex:1;min-width:0;font-size:13px;color:var(--muted)}
+@media (max-width:640px){.cmd-item{flex-direction:column;align-items:stretch;gap:2px;min-height:44px;padding:10px 12px}.cmd-name{flex:initial}}
+.thread .cmd-menu{margin-bottom:8px}

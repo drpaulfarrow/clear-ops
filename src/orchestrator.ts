@@ -1559,7 +1559,8 @@ export class Orchestrator {
   }
 }
 
-const HELP = `Talk to me normally. I answer quick things myself and delegate the rest.
+/** What /help says. Exported so the app's command menu can be held against it (test/app.test.ts). */
+export const HELP = `Talk to me normally. I answer quick things myself and delegate the rest.
 
 Commands:
 /jobs: recent jobs

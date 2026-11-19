@@ -59,7 +59,7 @@ import { repoLabel } from "./job-descriptions.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
-import { routeWeb, webChat as serviceWebChat, webFiles, WebFilesError, webRefusal, webThread, WEB_BODY_LIMIT, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
+import { routeWeb, webChat as serviceWebChat, webFiles, WebFilesError, webRefusal, webThread, WEB_BODY_LIMIT, WEB_COMMANDS, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
 import { parseCodeCommand } from "./otp.js";
 import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
@@ -874,6 +874,25 @@ export function buildApp(given: AppDeps) {
     const where = appThread(req.query.thread);
     if (!where) return void res.status(404).json({ error: "There is no such thread." });
     res.json(appChat(appSource(), chat, where));
+  });
+  // The slash commands the message boxes offer as a menu (src/web-chat.ts). A fixed list; choosing one only fills the box.
+  app.get(`${APP_PATH}/api/commands`, (_req, res) => {
+    appHeaders(res);
+    res.json({ commands: WEB_COMMANDS });
+  });
+  /**
+   * A picture the service put in one of the app's conversations (a design job's): read from the app's
+   * own pictures folder by the transcript, and only while a kept message shows it. The name is one of
+   * the transcript's own (a message number and png or jpg); no path comes from the request. Sent as the
+   * picture it was found to be when it was kept, never sniffed, and kept by the browser privately.
+   */
+  app.get(`${APP_PATH}/api/chat/picture/:name`, (req, res) => {
+    appHeaders(res);
+    const picture = chat.picture(String(req.params.name ?? ""));
+    if (!picture) return void res.status(404).json({ error: "no such picture" });
+    res.set("Cache-Control", "private, max-age=86400");
+    res.set("Content-Security-Policy", "default-src 'none'; sandbox");
+    res.type(picture.type).send(picture.bytes);
   });
   /**
    * The one route under /app that does anything: Paul's message to the chief. It is behind the gate
