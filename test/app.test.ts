@@ -22,7 +22,7 @@ const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
 const { AppAuth, APP_PATH, APP_SIGN_IN_PATH, APP_AUTH_START_PATH, APP_AUTH_CALLBACK_PATH, APP_SIGN_OUT_PATH, APP_SESSION_COOKIE, APP_STATE_COOKIE, APP_SESSION_DAYS, APP_SIGN_INS_PER_MINUTE } = await import("../src/app-auth.js");
 const { appBoard, appChat, appHistory, appJob, APP_HISTORY_PAGE } = await import("../src/app-data.js");
-const { WebChat, routeWeb, webRefusal, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_TEXT_MAX } = await import("../src/web-chat.js");
+const { WebChat, routeWeb, webRefusal, webThread, webTopic, isWebConversation, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_THREAD_KEEP, WEB_THREADS_MAX, WEB_TEXT_MAX } = await import("../src/web-chat.js");
 const { isAllowed } = await import("../src/config.js");
 const { mintAppApproval, spendAppApproval, APP_APPROVER, APP_GRANT_MS } = await import("../src/app-approver.js");
 const { DnsGate } = await import("../src/dns-gate.js");
@@ -148,7 +148,8 @@ const newPulls = (now: () => number = Date.now) =>
 const SELF_PR = "https://github.com/drpaulfarrow/clear-ops/pull/12";
 
 function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
-  const messenger = { send: async (to: string, text: string) => void elsewhere.push({ to, text }) };
+  // Like the service's own router (src/channels.ts), it can read a conversation back; the app's are read from its transcript.
+  const messenger = { send: async (to: string, text: string) => void elsewhere.push({ to, text }), recent: async () => [] as Array<{ author: string; text: string }> };
   // No test here may reach the real GitHub: the app is given a pull-request reader with no credential.
   const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c, prStates: new PrStates({ token: () => undefined }), pulls: newPulls() });
   return new Promise<{ server: import("node:http").Server; base: string; scheduler: Scheduler; orchestrator: typeof built.orchestrator }>((resolve) => {
@@ -962,6 +963,143 @@ test("a job can be stopped or run again from the app, and nothing it was permitt
   } finally {
     chiefSays = undefined;
   }
+});
+
+/* ---------- Threads: talking to the chief about one job or one pull request ---------- */
+
+test("a thread's address names a job or a pull request, and nothing else is a conversation of the app's", () => {
+  assert.equal(webThread({ job: "ab12cd" }), "web:job:ab12cd");
+  assert.equal(webThread({ pull: { repo: "self", number: 111 } }), "web:pull:self:111");
+  assert.deepEqual(webTopic("web:job:ab12cd"), { job: "ab12cd" });
+  assert.deepEqual(webTopic("web:pull:school-timetable:11"), { pull: { repo: "school-timetable", number: 11 } });
+  for (const bad of [{ job: "" }, { job: "a b" }, { job: "a:b" }, { job: "x".repeat(65) }, { pull: { repo: "a/b", number: 1 } }, { pull: { repo: "self", number: 0 } }, { pull: { repo: "self", number: 1.5 } }, { pull: { repo: "", number: 1 } }]) assert.equal(webThread(bad as never), undefined, JSON.stringify(bad));
+  for (const ok of [WEB_CONVERSATION, "web:job:ab12cd", "web:pull:self:111"]) assert.equal(isWebConversation(ok), true, ok);
+  for (const bad of [WEB_SENDER, "web:", "web:job:", "web:job:a b", "web:pull:self", "web:pull:self:0", "web:pull:self:1:2", "web:main:x", "web:job:ab12cd\n", "tg:99887766", "discord:1", "WEB:MAIN", " web:main"]) {
+    assert.equal(isWebConversation(bad), false, JSON.stringify(bad));
+    assert.equal(webTopic(bad), undefined, JSON.stringify(bad));
+  }
+});
+
+test("each thread keeps its own transcript, apart from the main conversation and from each other", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-threads-"));
+  let clock = Date.UTC(2026, 10, 19, 9, 0, 0);
+  const c = new WebChat({ dir, now: () => (clock += 1000) });
+  const A = "web:job:aaa111";
+  const B = "web:pull:self:111";
+  c.inbound("general question");
+  c.inbound("about job A", A);
+  await c.send(A, "answer about A");
+  await c.send(B, "the conflicts are resolved");
+  await c.send(WEB_CONVERSATION, "general answer");
+  // An address of the app's that is no thread (the sender itself, a malformed one) is the main conversation.
+  await c.send(WEB_SENDER, "to the sender");
+  await c.send("web:job:not a job", "malformed");
+  assert.deepEqual(c.view().messages.map((m) => m.text), ["general question", "general answer", "to the sender", "malformed"]);
+  assert.deepEqual(c.view(A).messages.map((m) => [m.from, m.text]), [["paul", "about job A"], ["clearops", "answer about A"]]);
+  assert.deepEqual(c.view(B).messages.map((m) => m.text), ["the conflicts are resolved"]);
+  assert.deepEqual((await c.recent(A, 10)).map((m) => `${m.author}: ${m.text}`), ["Paul: about job A", "ClearOps: answer about A"], "what the chief is shown of a thread is that thread");
+  assert.deepEqual((await c.recent(WEB_CONVERSATION, 2)).map((m) => m.text), ["to the sender", "malformed"]);
+  // The live status line and the typing signal belong to the conversation they were sent to.
+  await c.typing(A);
+  const handle = await c.sendEditable(A, "Reading the trace");
+  assert.deepEqual([c.view(A).typing, c.view().typing, c.view(B).typing], [true, false, false]);
+  assert.deepEqual([c.view(A).messages.at(-1)!.live, c.view().messages.some((m) => m.live)], [true, false]);
+  await c.remove(A, handle!);
+  // Which threads have anything in them, for the cards: the status line never counts.
+  assert.deepEqual([...c.threads()].map(([t, n]) => [t, n.count]), [[A, 2], [B, 1]]);
+  // It is all kept across a restart, in the one owner-only file.
+  const again = new WebChat({ dir });
+  assert.deepEqual(again.view(A).messages.map((m) => m.text), ["about job A", "answer about A"]);
+  assert.equal(again.view().messages.length, 4);
+  assert.equal(fs.statSync(path.join(dir, "app", "chat.json")).mode & 0o777, 0o600);
+
+  // A busy thread cannot push the main conversation out, nor the other way round, and old threads go first.
+  const big = new WebChat();
+  for (let i = 0; i < WEB_THREAD_KEEP + 30; i++) big.inbound(`t${i}`, A);
+  for (let i = 0; i < 20; i++) big.inbound(`m${i}`);
+  assert.equal(big.view(A).messages.length + 0, Math.min(WEB_THREAD_KEEP, 200));
+  assert.equal(big.view().messages.length, 20);
+  for (let i = 0; i < WEB_KEEP + 10; i++) big.inbound(`more${i}`);
+  assert.equal((await big.recent(WEB_CONVERSATION, 10_000)).length, WEB_KEEP);
+  assert.equal((await big.recent(A, 10_000)).length, WEB_THREAD_KEEP, "the thread is untouched by the main conversation filling up");
+  for (let i = 0; i < WEB_THREADS_MAX + 5; i++) big.inbound("hello", `web:job:j${i}`);
+  assert.equal(big.threads().size, WEB_THREADS_MAX);
+  assert.equal(big.threads().has(A), false, "the thread quiet for longest is the one let go");
+  assert.equal(big.threads().has(`web:job:j${WEB_THREADS_MAX + 4}`), true);
+});
+
+test("a message in a job's thread reaches the chief with that job attached, and stays in that thread", async () => {
+  const cookie = await session();
+  const job = store.updateJob(store.createJob("research", "Find where Epimax is in stock and what it costs.", PAUL, "product", PAUL, { title: "Epimax stock check" } as never).id, { status: "done", finishedAt: iso(5) });
+  const before = (await chatView(cookie)).messages.length;
+  const thread = `job:${job.id}`;
+  const address = `web:job:${job.id}`;
+  const threadView = async () => JSON.parse(await text(await get(`${APP_PATH}/api/chat?thread=${encodeURIComponent(thread)}`, cookie))) as { messages: Array<{ from: string; text?: string; html?: string }>; jobs: unknown[] };
+  assert.deepEqual((await threadView()).messages, []);
+  chiefSays = "Medino has it for the least.";
+  chiefAsked.length = 0;
+  try {
+    assert.equal((await postChat({ text: "Which was cheapest?", thread })).status, 401);
+    assert.equal((await postChat({ text: "Which was cheapest?", thread }, cookie, { origin: "https://evil.example" })).status, 403);
+    assert.equal((await postChat({ text: "Which was cheapest?", thread }, cookie)).status, 202);
+    for (let i = 0; i < 100 && chat.view(address).messages.at(-1)?.from !== "clearops"; i++) await new Promise((r) => setTimeout(r, 10));
+    // The chief is told which job this is by the service, so Paul does not have to say.
+    assert.equal(chiefAsked.length, 1);
+    assert.match(chiefAsked[0]!, new RegExp(`^This message is in the thread of job ${job.id}\\. Job context \\(from the store, not from Paul\\):\\nTitle: Epimax stock check\\nBrief: Find where Epimax is in stock`));
+    assert.match(chiefAsked[0]!, /Paul: Which was cheapest\?[\s\S]*\n\nWhich was cheapest\?$/);
+    const view = await threadView();
+    assert.deepEqual(view.messages.map((m) => m.from), ["paul", "clearops"]);
+    assert.match(view.messages[1]!.html!, /Medino has it for the least/);
+    assert.equal((await chatView(cookie)).messages.length, before, "nothing of it is in the main conversation");
+    assert.equal(store.getSession(address), "chief-session", "the thread is its own conversation with the chief");
+    assert.equal(elsewhere.filter((m) => m.text.includes("Medino")).length, 0);
+    // The job's card says its thread has something in it.
+    const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${job.id}`, cookie))) as { job: { thread?: { count: number } } };
+    assert.equal(detail.job.thread?.count, 2);
+
+    // No approval word works in a thread either, and a one-time code is not written down there.
+    chiefAsked.length = 0;
+    assert.equal((await postChat({ text: "send 9b80e7", thread }, cookie)).status, 202);
+    assert.equal((await postChat({ text: "code 123456", thread }, cookie)).status, 202);
+    await new Promise((r) => setTimeout(r, 50));
+    const after = chat.view(address).messages.slice(-4).map((m) => m.text);
+    assert.deepEqual(after, ["send 9b80e7", WEB_APPROVAL_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_CODE_REFUSAL]);
+    assert.equal(chiefAsked.length, 0, "neither reached the orchestrator");
+  } finally {
+    chiefSays = undefined;
+  }
+
+  // Only a job that exists and a pull request in a managed repository has a thread.
+  for (const bad of ["job:nope", "job:", "pull:nowhere:3", "pull:self:0", "pull:self", "main", "web:main", `web:job:${job.id}`, "tg:99887766", `job:${job.id}/x`]) {
+    assert.equal((await get(`${APP_PATH}/api/chat?thread=${encodeURIComponent(bad)}`, cookie)).status, 404, bad);
+    assert.equal((await postChat({ text: "hello", thread: bad }, cookie)).status, 404, bad);
+  }
+  assert.equal((await postChat({ text: "hello", thread: { job: job.id } }, cookie)).status, 404);
+});
+
+test("a message in a pull request's thread tells the chief which pull request, in which repository", async () => {
+  const cookie = await session();
+  chiefSays = "On it.";
+  chiefAsked.length = 0;
+  try {
+    assert.equal((await postChat({ text: "Please resolve the conflicts.", thread: "pull:self:101" }, cookie)).status, 202);
+    for (let i = 0; i < 100 && chat.view("web:pull:self:101").messages.at(-1)?.from !== "clearops"; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(chiefAsked.length, 1);
+    assert.match(chiefAsked[0]!, /^This message is in the app's thread for pull request #101 in the self repository \(drpaulfarrow\/clear-ops\): https:\/\/github\.com\/drpaulfarrow\/clear-ops\/pull\/101\. That is from the service, not from Paul\.\nA job about it works in that repository, on that same pull request and its branch: it opens no new pull request and merges nothing\.\n\nPlease resolve the conflicts\.$/);
+    assert.deepEqual(chat.view("web:pull:self:101").messages.map((m) => m.from), ["paul", "clearops"]);
+  } finally {
+    chiefSays = undefined;
+  }
+});
+
+test("a pull request that conflicts says so, so the app can offer to have it resolved", async () => {
+  resetPull();
+  assert.equal((await newPulls().view("self", 12)).conflicts, false);
+  pull.pr = { ...pull.pr, mergeable: false };
+  const v = await newPulls().view("self", 12);
+  assert.deepEqual([v.conflicts, v.blocked], [true, "It conflicts with the base branch."]);
+  pull.pr = { ...pull.pr, mergeable: false, state: "closed" };
+  assert.equal((await newPulls().view("self", 12)).conflicts, false, "only an open one");
 });
 
 /* ---------- Pull requests: the list from GitHub, review and merge ---------- */

@@ -56,7 +56,7 @@ import { repoLabel } from "./job-descriptions.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
-import { routeWeb, webChat as serviceWebChat, webRefusal, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
+import { routeWeb, webChat as serviceWebChat, webRefusal, webThread, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
 import { parseCodeCommand } from "./otp.js";
 import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
@@ -740,7 +740,7 @@ export function buildApp(given: AppDeps) {
       token: async (repo) => (await repoCredential(repo).catch(() => undefined))?.token || undefined,
       selfAlias: "self",
     });
-  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.info(url), jobPull: (job) => pulls.forJob(job), openPulls: () => pulls.open() });
+  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.info(url), jobPull: (job) => pulls.forJob(job), openPulls: () => pulls.open(), threads: () => chat.threads() });
   /**
    * Whether a request that changes something came from this site's own script: a JSON body, and where
    * the browser says where the request came from, from here. A form, or a page on another site, fails
@@ -814,9 +814,25 @@ export function buildApp(given: AppDeps) {
     appHeaders(res);
     res.json(appHistory(appSource(), typeof req.query.before === "string" ? req.query.before : undefined));
   });
-  app.get(`${APP_PATH}/api/chat`, (_req, res) => {
+  /**
+   * Which of the app's conversations a request means: the main one when it names none, or the thread of
+   * a job that exists or of a pull request in a repository ClearOps manages ("job:<id>",
+   * "pull:<alias>:<number>"). Anything else is no conversation at all.
+   */
+  const appThread = (raw: unknown): string | undefined => {
+    if (raw === undefined || raw === "") return WEB_CONVERSATION;
+    if (typeof raw !== "string") return undefined;
+    const job = /^job:([A-Za-z0-9_-]{1,64})$/.exec(raw);
+    if (job) return deps.store.getJob(job[1]!) ? webThread({ job: job[1]! }) : undefined;
+    const pull = /^pull:([A-Za-z0-9._-]{1,64}):([1-9]\d{0,8})$/.exec(raw);
+    if (pull) return repoRegistry.list().some((r) => r.alias === pull[1] && r.slug) ? webThread({ pull: { repo: pull[1]!, number: Number(pull[2]) } }) : undefined;
+    return undefined;
+  };
+  app.get(`${APP_PATH}/api/chat`, (req, res) => {
     appHeaders(res);
-    res.json(appChat(appSource(), chat));
+    const where = appThread(req.query.thread);
+    if (!where) return void res.status(404).json({ error: "There is no such thread." });
+    res.json(appChat(appSource(), chat, where));
   });
   /**
    * The one route under /app that does anything: Paul's message to the chief. It is behind the gate
@@ -832,10 +848,13 @@ export function buildApp(given: AppDeps) {
     const text = typeof (req.body as { text?: unknown } | undefined)?.text === "string" ? (req.body as { text: string }).text.trim() : "";
     if (!text) return void res.status(400).json({ error: "empty" });
     if (text.length > WEB_TEXT_MAX) return void res.status(413).json({ error: "too long" });
+    // The main conversation, or the thread of a job or a pull request: only ever one of the app's own.
+    const where = appThread((req.body as { thread?: unknown } | undefined)?.thread);
+    if (!where) return void res.status(404).json({ error: "There is no such thread." });
     const refused = webRefusal(text);
-    chat.inbound(parseCodeCommand(text) ? WEB_CODE_PLACEHOLDER : text);
-    if (refused) void chat.send(WEB_CONVERSATION, refused);
-    else void orchestrator.handle(WEB_SENDER, text, { replyTo: WEB_CONVERSATION, web: true });
+    chat.inbound(parseCodeCommand(text) ? WEB_CODE_PLACEHOLDER : text, where);
+    if (refused) void chat.send(where, refused);
+    else void orchestrator.handle(WEB_SENDER, text, { replyTo: where, web: true });
     res.status(202).json({ ok: true });
   });
   /**

@@ -1184,13 +1184,27 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   // approval word, is never kept when it is a one-time code, and reaches the orchestrator as the app's
   // own sender with the flag no channel listener sets.
   const post = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/chat`"));
-  assert.match(post, /const refused = webRefusal\(text\);\s*chat\.inbound\(parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text\);\s*if \(refused\) void chat\.send\(WEB_CONVERSATION, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: WEB_CONVERSATION, web: true \}\);/);
+  // Since 19 Nov 2026 the conversation is the main one or the thread of a job or a pull request, and it
+  // is only ever one `appThread` made: the main address, or a thread address built by `webThread` for a
+  // job the store holds or a repository ClearOps manages. Nothing in the request is used as an address.
+  assert.match(post, /const where = appThread\(\(req\.body as \{ thread\?: unknown \} \| undefined\)\?\.thread\);\s*if \(!where\) return void res\.status\(404\)[^\n]*\n\s*const refused = webRefusal\(text\);\s*chat\.inbound\(parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text, where\);\s*if \(refused\) void chat\.send\(where, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true \}\);/);
+  const appThread = routes.slice(routes.indexOf("const appThread = (raw: unknown): string | undefined => {"), routes.indexOf("app.get(`${APP_PATH}/api/chat`"));
+  assert.deepEqual([...appThread.matchAll(/return ([^;]+);/g)].map((m) => m[1]), [
+    "WEB_CONVERSATION",
+    "undefined",
+    "deps.store.getJob(job[1]!) ? webThread({ job: job[1]! }) : undefined",
+    "repoRegistry.list().some((r) => r.alias === pull[1] && r.slug) ? webThread({ pull: { repo: pull[1]!, number: Number(pull[2]) } }) : undefined",
+    "undefined",
+  ]);
+  const webChatSrc = src("web-chat.ts");
+  assert.match(webChatSrc, /const WEB_THREAD = \/\^web:\(\?:job:\(\[A-Za-z0-9_-\]\{1,64\}\)\|pull:\(\[A-Za-z0-9\._-\]\{1,64\}\):\(\[1-9\]\\d\{0,8\}\)\)\$\/;/);
+  assert.match(webChatSrc, /export function isWebConversation\(address: string\): boolean \{\s*return address === WEB_CONVERSATION \|\| WEB_THREAD\.test\(address\);\s*\}/);
   assert.equal((index.match(/web: true/g) ?? []).length, 1, "the app's route is the only caller that says a message is from the app");
   for (const listener of ["discord.ts", "telegram.ts", "whatsapp.ts", "voice-bridge.ts", "instinct-chat.ts", "instinct-bridge.ts", "device.ts"]) assert.doesNotMatch(src(listener), /\bweb: true\b|WEB_SENDER/, `${listener} cannot speak as the app`);
-  // In the orchestrator the app's sender passes only as exactly itself, in exactly its own conversation,
-  // with no files, and every approval word is refused before any command is parsed.
+  // In the orchestrator the app's sender passes only as exactly itself, in exactly one of its own
+  // conversations (the main one or a well-formed thread), with no files, and every approval word is refused before any command is parsed.
   const orch = src("orchestrator.ts");
-  assert.match(orch, /const web = viaWeb && sender === WEB_SENDER && from === WEB_CONVERSATION && attachments\.length === 0;\s*if \(!web\) \{\s*if \(!isAllowed\(sender\)\) \{/);
+  assert.match(orch, /const web = viaWeb && sender === WEB_SENDER && isWebConversation\(from\) && attachments\.length === 0;\s*if \(!web\) \{\s*if \(!isAllowed\(sender\)\) \{/);
   const refusedAt = orch.indexOf("const refused = webRefusal(trimmed);");
   assert.ok(refusedAt > 0);
   for (const parser of ["parseDnsCommand(trimmed)", "parseSignupCommand(trimmed)", "parsePurchaseCommand(trimmed)", "parseCodeCommand(trimmed)", "parseActAsMeCommand(trimmed)", "parseDocReadCommand(trimmed)", "parseOutboundCommand(trimmed)", "this.handleApproval("]) assert.ok(orch.indexOf(parser) > refusedAt, `${parser} is reached only after the app's refusal`);

@@ -289,3 +289,7 @@ a.card:hover{background:var(--raised);color:var(--text)}
 .dl.add{background:var(--ok-soft);color:var(--ok-text)}
 .dl.del{background:var(--bad-soft);color:var(--bad-text)}
 .dl.hunk{color:var(--run-text);background:var(--run-soft)}
+
+/* ---------- A thread on a job's or a pull request's page ---------- */
+.thread-log{display:flex;flex-direction:column;gap:12px;max-height:46vh;overflow-y:auto;padding:4px 2px 12px}
+.thread .composer{margin-top:4px}

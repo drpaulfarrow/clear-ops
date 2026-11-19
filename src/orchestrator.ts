@@ -25,7 +25,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
-import { WEB_CONVERSATION, WEB_SENDER, webRefusal } from "./web-chat.js";
+import { isWebConversation, WEB_SENDER, webRefusal, webTopic } from "./web-chat.js";
 import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay } from "./spend.js";
@@ -165,7 +165,7 @@ export class Orchestrator {
     // The web app's chat (src/web-chat.ts) is the one sender not on a channel allowlist: its route sits
     // behind the GitHub sign-in and is the only caller that sets `viaWeb`. It is exactly WEB_SENDER,
     // talking in exactly the app's own conversation, with no files, or it is nobody.
-    const web = viaWeb && sender === WEB_SENDER && from === WEB_CONVERSATION && attachments.length === 0;
+    const web = viaWeb && sender === WEB_SENDER && isWebConversation(from) && attachments.length === 0;
     if (!web) {
       if (!isAllowed(sender)) {
         console.warn(`Ignored message from unlisted sender ${sender}`);
@@ -415,11 +415,23 @@ export class Orchestrator {
    * thread, every turn, whether or not a chief session exists for it. Empty outside job threads.
    */
   private async threadContext(from: string): Promise<string> {
-    if (!threadMention(from)) return "";
-    const job = this.store
-      .allJobs()
-      .filter((j) => j.replyTo === from)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    // The app's own threads (src/web-chat.ts): the address says which job or pull request it is about.
+    const topic = webTopic(from);
+    if (topic && "pull" in topic) {
+      const repo = repoRegistry.list().find((r) => r.alias === topic.pull.repo);
+      if (!repo?.slug) return "";
+      return [
+        `This message is in the app's thread for pull request #${topic.pull.number} in the ${repo.alias} repository (${repo.slug}): https://github.com/${repo.slug}/pull/${topic.pull.number}. That is from the service, not from Paul.`,
+        "A job about it works in that repository, on that same pull request and its branch: it opens no new pull request and merges nothing.",
+      ].join("\n");
+    }
+    if (!topic && !threadMention(from)) return "";
+    const job = topic
+      ? this.store.getJob(topic.job)
+      : this.store
+          .allJobs()
+          .filter((j) => j.replyTo === from)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
     if (!job) return "";
     let history: Array<{ author: string; text: string }> = [];
     try {

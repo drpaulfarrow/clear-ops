@@ -1,6 +1,8 @@
 /**
- * The web app's chat with the chief (docs/APP.md, slice 2): one conversation, kept by the service, that
- * the signed-in app reads and adds to.
+ * The web app's chat with the chief (docs/APP.md, slice 2): conversations kept by the service, that
+ * the signed-in app reads and adds to. There is the main one, and since 19 Nov 2026 one thread for each
+ * job and each pull request Paul talks about from its own page, so the chief knows the topic without
+ * being told (`webThread`). Each is a conversation of its own to the orchestrator, as a Discord thread is.
  *
  * It is a channel like Telegram or Discord as far as the orchestrator is concerned: Paul's message goes
  * to `orchestrator.handle`, and everything addressed to the conversation (the chief's replies, a job's
@@ -40,12 +42,37 @@ import type { Messenger } from "./whatsapp.js";
 export const WEB_PREFIX = "web:";
 /** Who a message from the app is from. In no allowlist, and produced by the app's route alone. */
 export const WEB_SENDER = "web:paul";
-/** The one conversation the app has with the chief, and where its jobs report. */
+/** The app's main conversation with the chief, and where its jobs report. */
 export const WEB_CONVERSATION = "web:main";
+/** A thread about one job or one pull request. Nothing else is a conversation of the app's. */
+const WEB_THREAD = /^web:(?:job:([A-Za-z0-9_-]{1,64})|pull:([A-Za-z0-9._-]{1,64}):([1-9]\d{0,8}))$/;
+/** What a thread is about. */
+export type WebTopic = { job: string } | { pull: { repo: string; number: number } };
+
+/** Whether an address is one of the app's own conversations: the main one, or a well-formed thread. */
+export function isWebConversation(address: string): boolean {
+  return address === WEB_CONVERSATION || WEB_THREAD.test(address);
+}
+
+/** What a thread's address is about, or undefined for the main conversation and anything else. */
+export function webTopic(address: string): WebTopic | undefined {
+  const m = WEB_THREAD.exec(address);
+  if (!m) return undefined;
+  return m[1] ? { job: m[1] } : { pull: { repo: m[2]!, number: Number(m[3]) } };
+}
+
+/** The address of the thread about a job or a pull request, or undefined when it does not name one. */
+export function webThread(topic: WebTopic): string | undefined {
+  const address = "job" in topic ? `web:job:${topic.job}` : `web:pull:${topic.pull.repo}:${topic.pull.number}`;
+  return WEB_THREAD.test(address) ? address : undefined;
+}
 /** The longest message the app accepts. */
 export const WEB_TEXT_MAX = 4000;
-/** How many messages the transcript keeps. */
+/** How many messages the transcript keeps of the main conversation. */
 export const WEB_KEEP = 500;
+/** How many it keeps of each thread, and how many threads; the thread quiet for longest goes first. */
+export const WEB_THREAD_KEEP = 200;
+export const WEB_THREADS_MAX = 200;
 /** How many the app is sent at a time: the newest. */
 export const WEB_SHOWN = 200;
 /** How long a typing signal counts for. */
@@ -88,6 +115,8 @@ export interface WebMessage {
   text: string;
   /** The chief's live status line: edited in place while it works, removed when the reply is ready. */
   live?: true;
+  /** The thread it belongs to, by address. Absent: the main conversation. */
+  thread?: string;
 }
 
 export interface WebChatOptions {
@@ -99,7 +128,9 @@ export interface WebChatOptions {
 export class WebChat {
   private messages: WebMessage[] = [];
   private seq = 0;
-  private typingUntil = 0;
+  private typingUntil = new Map<string, number>();
+  /** `threads()` as last worked out, until a message is added or removed. The board asks every few seconds. */
+  private notes?: Map<string, { count: number; lastAt: string }>;
   private readonly file?: string;
   private readonly now: () => number;
 
@@ -113,7 +144,7 @@ export class WebChat {
     if (!this.file) return;
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, "utf8")) as { seq?: unknown; messages?: unknown };
-      if (Array.isArray(saved.messages)) this.messages = (saved.messages as WebMessage[]).filter((m) => m && typeof m.id === "string" && typeof m.text === "string" && (m.from === "paul" || m.from === "clearops"));
+      if (Array.isArray(saved.messages)) this.messages = (saved.messages as WebMessage[]).filter((m) => m && typeof m.id === "string" && typeof m.text === "string" && (m.from === "paul" || m.from === "clearops") && (m.thread === undefined || (typeof m.thread === "string" && WEB_THREAD.test(m.thread))));
       this.seq = typeof saved.seq === "number" ? saved.seq : this.messages.length;
     } catch {
       // No transcript yet, or an unreadable one: start empty rather than stop the service.
@@ -133,34 +164,70 @@ export class WebChat {
     }
   }
 
-  private add(from: WebMessage["from"], text: string, live = false): WebMessage {
+  /** The thread an address names, or undefined for the main conversation. Anything else of the app's is the main one. */
+  private threadOf(to: string): string | undefined {
+    return WEB_THREAD.test(to) ? to : undefined;
+  }
+
+  private in(thread: string | undefined): WebMessage[] {
+    return this.messages.filter((m) => m.thread === thread);
+  }
+
+  private add(from: WebMessage["from"], text: string, live = false, to: string = WEB_CONVERSATION): WebMessage {
     this.seq += 1;
-    const message: WebMessage = { id: String(this.seq), at: new Date(this.now()).toISOString(), from, text: redact(text), ...(live ? { live: true as const } : {}) };
+    const thread = this.threadOf(to);
+    const message: WebMessage = { id: String(this.seq), at: new Date(this.now()).toISOString(), from, text: redact(text), ...(live ? { live: true as const } : {}), ...(thread ? { thread } : {}) };
     this.messages.push(message);
-    if (this.messages.length > WEB_KEEP) this.messages = this.messages.slice(-WEB_KEEP);
+    this.notes = undefined;
+    this.trim(thread);
     if (!live) this.save();
     return message;
   }
 
-  /** Paul's own message, from the app's route. */
-  inbound(text: string): WebMessage {
-    return this.add("paul", text);
+  /** Each conversation keeps its newest messages, and only so many threads are kept at all. */
+  private trim(thread: string | undefined): void {
+    const keep = thread ? WEB_THREAD_KEEP : WEB_KEEP;
+    const mine = this.in(thread);
+    if (mine.length > keep) {
+      const drop = new Set(mine.slice(0, mine.length - keep));
+      this.messages = this.messages.filter((m) => !drop.has(m));
+    }
+    const last = new Map<string, number>();
+    this.messages.forEach((m, i) => m.thread && last.set(m.thread, i));
+    if (last.size > WEB_THREADS_MAX) {
+      const gone = new Set([...last].sort((a, b) => a[1] - b[1]).slice(0, last.size - WEB_THREADS_MAX).map(([t]) => t));
+      this.messages = this.messages.filter((m) => !m.thread || !gone.has(m.thread));
+    }
   }
 
-  /** What the app shows: the newest messages, and whether the chief is working on a reply. */
-  view(): { messages: WebMessage[]; typing: boolean } {
-    return { messages: this.messages.slice(-WEB_SHOWN), typing: this.typingUntil > this.now() };
+  /** Paul's own message, from the app's route. */
+  inbound(text: string, to: string = WEB_CONVERSATION): WebMessage {
+    return this.add("paul", text, false, to);
+  }
+
+  /** What the app shows of one conversation: the newest messages, and whether the chief is working on a reply. */
+  view(to: string = WEB_CONVERSATION): { messages: WebMessage[]; typing: boolean } {
+    const thread = this.threadOf(to);
+    return { messages: this.in(thread).slice(-WEB_SHOWN), typing: (this.typingUntil.get(thread ?? WEB_CONVERSATION) ?? 0) > this.now() };
+  }
+
+  /** Every thread that has anything in it: how many messages, and when the last was. */
+  threads(): Map<string, { count: number; lastAt: string }> {
+    if (this.notes) return this.notes;
+    const out = new Map<string, { count: number; lastAt: string }>();
+    for (const m of this.messages) if (m.thread && !m.live) out.set(m.thread, { count: (out.get(m.thread)?.count ?? 0) + 1, lastAt: m.at });
+    return (this.notes = out);
   }
 
   /* ---------- The Messenger side: what the service says to the conversation ---------- */
 
-  async send(_to: string, text: string): Promise<void> {
-    this.typingUntil = 0;
-    this.add("clearops", text);
+  async send(to: string, text: string): Promise<void> {
+    this.typingUntil.delete(this.threadOf(to) ?? WEB_CONVERSATION);
+    this.add("clearops", text, false, to);
   }
 
-  async sendEditable(_to: string, text: string): Promise<string | undefined> {
-    return this.add("clearops", text, true).id;
+  async sendEditable(to: string, text: string): Promise<string | undefined> {
+    return this.add("clearops", text, true, to).id;
   }
 
   async edit(_to: string, handle: string, text: string): Promise<void> {
@@ -170,20 +237,21 @@ export class WebChat {
 
   async remove(_to: string, handle: string): Promise<void> {
     this.messages = this.messages.filter((x) => !(x.id === handle && x.live));
+    this.notes = undefined;
   }
 
-  async typing(_to: string): Promise<boolean> {
-    this.typingUntil = this.now() + TYPING_MS;
+  async typing(to: string): Promise<boolean> {
+    this.typingUntil.set(this.threadOf(to) ?? WEB_CONVERSATION, this.now() + TYPING_MS);
     return true;
   }
 
   /** Pictures are a later slice; until then the caption is kept so nothing a job said is lost. */
-  async sendImage(_to: string, _file: string, caption: string): Promise<void> {
-    if (caption) this.add("clearops", caption);
+  async sendImage(to: string, _file: string, caption: string): Promise<void> {
+    if (caption) this.add("clearops", caption, false, to);
   }
 
-  async recent(_to: string, limit: number): Promise<Array<{ author: string; text: string }>> {
-    return this.messages
+  async recent(to: string, limit: number): Promise<Array<{ author: string; text: string }>> {
+    return this.in(this.threadOf(to))
       .filter((m) => !m.live)
       .slice(-limit)
       .map((m) => ({ author: m.from === "paul" ? "Paul" : "ClearOps", text: m.text }));
