@@ -326,6 +326,11 @@ export async function launchChromium(proxy: string): Promise<{ browser: Browser;
       };
       child.stderr?.on("data", onData);
       const tick = setInterval(check, 100);
+    }).catch((err) => {
+      // A Chromium that did not come up is not left running. Left alone it keeps this process alive
+      // for ever (it hung CI's test step twice on 19 Nov 2026) and holds its memory on the machine.
+      child.kill("SIGKILL");
+      throw err;
     });
     return { child, port };
   };
