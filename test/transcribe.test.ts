@@ -193,10 +193,11 @@ const att = (name: string, data: Buffer, mimeType?: string): Attachment & { call
   return a;
 };
 
-function harness() {
+function harness(wrap: (m: InstanceType<typeof ConsoleMessenger>) => InstanceType<typeof ConsoleMessenger> = (m) => m) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-voice-orch-"));
   const store = new Store(dir);
-  const messenger = new ConsoleMessenger();
+  const plain = new ConsoleMessenger();
+  const messenger = wrap(plain);
   const calls: RunOptions[] = [];
   const uploads = new Uploads(path.join(dir, "uploads"), undefined, fixedDate);
   const runner: AgentRunner = async (o) => {
@@ -227,6 +228,66 @@ test("a voice note reaches the chief as a transcript, marked as one, with the fi
   } finally {
     restore();
   }
+});
+
+test("in the app a voice note is shown as what was heard on Paul's own message, with no file receipt", async () => {
+  const { WebChat, routeWeb, WEB_SENDER, WEB_CONVERSATION, WEB_CODE_PLACEHOLDER } = await import("../src/web-chat.js");
+  useTranscribe({ key: KEY });
+  let heardText = "Move the standup to Thursday";
+  const { restore } = stubFetch(() => json({ text: heardText }));
+  try {
+    const chat = new WebChat();
+    const { orch, messenger, calls, uploads } = harness((m) => routeWeb(m, chat));
+    const say = async (files: Attachment[], text = "") => {
+      const mine = chat.inbound(text, WEB_CONVERSATION, files.map((f) => f.name));
+      await orch.handle(WEB_SENDER, text, { replyTo: WEB_CONVERSATION, web: true, attachments: files, messageId: mine.id });
+      return chat.view().messages.find((m) => m.id === mine.id)!;
+    };
+    const mine = await say([att("voice-note-1650.webm", ogg(4), "audio/webm")]);
+    // His message carries what was heard, and nothing was said about a file being saved.
+    assert.equal(mine.heard, "Move the standup to Thursday");
+    assert.deepEqual(chat.view().messages.map((m) => [m.from, m.text]), [["paul", ""], ["clearops", "chief replied"]]);
+    assert.ok(!chat.view().messages.some((m) => /Saved|delete upload/.test(m.text)));
+    // The recording is still kept as an upload, and the chief still gets the transcript as his message.
+    assert.equal(fs.readdirSync(uploads.dir).length, 1);
+    assert.match(calls[0].prompt, /\(transcript\): "Move the standup to Thursday"/);
+    assert.match((await chat.recent(WEB_CONVERSATION, 5))[0]!.text, /Move the standup to Thursday/, "the thread's history reads as what he said");
+    assert.equal((messenger as unknown as { sent: unknown[] }).sent.length, 0, "nothing of it went to another channel");
+
+    // An ordinary file beside it still gets its receipt; the voice note is not in it.
+    const both = await say([att("voice-note-1651.webm", ogg(4), "audio/webm"), att("notes.txt", Buffer.from("hello"), "text/plain")], "And this");
+    assert.equal(both.heard, "Move the standup to Thursday");
+    const receipt = chat.view().messages.find((m) => m.from === "clearops" && m.text.startsWith("Saved"))!;
+    assert.match(receipt.text, /^Saved notes\.txt \(5 B\)\. \/delete upload <name> removes it\.$/);
+
+    // A transcript that reads as a one-time code is not written down, as a typed one is not.
+    heardText = "code 9b80e7 481516";
+    const coded = await say([att("voice-note-1652.webm", ogg(4), "audio/webm")]);
+    assert.equal(coded.heard, WEB_CODE_PLACEHOLDER);
+
+    // What was heard goes only onto a message of Paul's own, in that conversation, that carried files.
+    const theirs = chat.view().messages.find((m) => m.from === "clearops")!;
+    await chat.heard(WEB_CONVERSATION, theirs.id, ["not his"]);
+    await chat.heard("web:job:abc123", mine.id, ["wrong conversation"]);
+    await chat.heard(WEB_CONVERSATION, chat.inbound("typed, no files").id, ["no note here"]);
+    assert.equal(chat.view().messages.find((m) => m.id === theirs.id)!.heard, undefined);
+    assert.equal(chat.view().messages.find((m) => m.id === mine.id)!.heard, "Move the standup to Thursday");
+    assert.equal(chat.view().messages.at(-1)!.heard, undefined);
+  } finally {
+    restore();
+  }
+});
+
+test("in the app a voice note that could not be transcribed is a file after all, and says so", async () => {
+  const { WebChat, routeWeb, WEB_SENDER, WEB_CONVERSATION } = await import("../src/web-chat.js");
+  useTranscribe({ key: "" });
+  const chat = new WebChat();
+  const { orch, calls } = harness((m) => routeWeb(m, chat));
+  const mine = chat.inbound("", WEB_CONVERSATION, ["voice-note-1650.webm"]);
+  await orch.handle(WEB_SENDER, "", { replyTo: WEB_CONVERSATION, web: true, attachments: [att("voice-note-1650.webm", ogg(4), "audio/webm")], messageId: mine.id });
+  assert.equal(chat.view().messages.find((m) => m.id === mine.id)!.heard, "", "marked as not heard, so the app stops saying it is listening");
+  assert.match(chat.view().messages.find((m) => m.from === "clearops")!.text, /^Saved voice-note-1650\.webm \(64 B\)\. \/delete upload <name> removes it\.$/);
+  assert.match(calls[0].prompt, /was not transcribed: no transcription key is set/);
 });
 
 test("with no key the chief is told plainly that it cannot hear the voice note and to ask for the text", async () => {

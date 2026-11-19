@@ -941,13 +941,19 @@ function thumbOf(file, redraw) {
   return null;
 }
 
+/** A recording made here (the name `attachments` gives it), as against any other file. */
+const VOICE_FILE = /^voice-note-\d{3,4}(?:-\d+)?\.(?:webm|m4a|ogg)$/;
+/** How long each recording waiting in a tray runs, in seconds. */
+const spokenFor = new WeakMap();
+const minutes = (seconds) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds) % 60).padStart(2, "0")}`;
+
 function attachments(textarea) {
   const a = { files: [], note: undefined };
   const tray = h("div", { class: "files", role: "status" });
   const picker = h("input", { type: "file", multiple: true, class: "sr", tabindex: "-1", "aria-hidden": "true" });
   const draw = () => {
     tray.replaceChildren(
-      ...a.files.map((f, i) => h("span", { class: "file-chip" }, thumbOf(f, () => a.files.includes(f) && draw()), h("span", { class: "file-chip-name" }, f.name), h("span", { class: "muted num" }, fileSize(f.size)), h("button", { type: "button", class: "file-chip-x", "aria-label": `Remove ${f.name}`, onclick: () => { a.files.splice(i, 1); a.note = undefined; draw(); } }, icon("cross", 12)))),
+      ...a.files.map((f, i) => h("span", { class: "file-chip" }, thumbOf(f, () => a.files.includes(f) && draw()), VOICE_FILE.test(f.name) ? [icon("mic", 14), h("span", { class: "file-chip-name" }, "Voice note")] : h("span", { class: "file-chip-name" }, f.name), h("span", { class: "muted num" }, spokenFor.has(f) ? minutes(spokenFor.get(f)) : fileSize(f.size)), h("button", { type: "button", class: "file-chip-x", "aria-label": `Remove ${f.name}`, onclick: () => { a.files.splice(i, 1); a.note = undefined; draw(); } }, icon("cross", 12)))),
       ...(a.note ? [h("span", { class: "file-note" }, a.note)] : []),
     );
     tray.hidden = !a.files.length && !a.note;
@@ -987,6 +993,7 @@ function attachments(textarea) {
       return void draw();
     }
     const parts = [];
+    const began = Date.now();
     recorder = new MediaRecorder(stream);
     recorder.addEventListener("dataavailable", (e) => e.data.size && parts.push(e.data));
     recorder.addEventListener("stop", () => {
@@ -998,7 +1005,9 @@ function attachments(textarea) {
       mic.replaceChildren(icon("mic", 18));
       mic.setAttribute("aria-label", "Record a voice note");
       const blob = new Blob(parts, { type });
-      a.add([new File([blob], `voice-note-${clockFmt.format(new Date()).replace(":", "")}.${type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm"}`, { type })]);
+      const note = new File([blob], `voice-note-${clockFmt.format(new Date()).replace(":", "")}.${type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm"}`, { type });
+      spokenFor.set(note, Math.max(1, (Date.now() - began) / 1000));
+      a.add([note]);
     });
     recorder.start();
     mic.setAttribute("aria-pressed", "true");
@@ -1025,8 +1034,30 @@ function said(m) {
 }
 
 /** The files a message of Paul's went with, under his words. */
-const sentFiles = (m) => (m.files?.length ? h("div", { class: "sent-files" }, m.files.map((n) => h("span", { class: "file-chip" }, icon("clip", 12), h("span", { class: "file-chip-name" }, n)))) : null);
-const mineBubble = (m) => h("div", { class: "mine" }, h("div", { class: "bubble" }, m.text || null, sentFiles(m)));
+const sentFiles = (names) => (names.length ? h("div", { class: "sent-files" }, names.map((n) => h("span", { class: "file-chip" }, icon("clip", 12), h("span", { class: "file-chip-name" }, n)))) : null);
+
+/**
+ * One of Paul's own messages. A voice note is shown as what the service heard, since that is what the
+ * chief answers and a transcript can mishear: his words once it is transcribed, a line saying so while
+ * it is being, and the plain file if it could not be. The recording itself is kept with his uploads.
+ */
+function mineBubble(m) {
+  const files = m.files ?? [];
+  const spoken = files.filter((n) => VOICE_FILE.test(n));
+  const unheard = m.heard === "";
+  // Only a note just sent is still being listened to; an older one with nothing heard is simply a recording.
+  const listening = m.heard === undefined && spoken.length > 0 && Date.now() - Date.parse(m.at) < 120000;
+  const voice =
+    spoken.length || m.heard
+      ? h(
+          "div",
+          { class: "voice" },
+          h("span", { class: "voice-tag" }, icon("mic", 14), spoken.length ? "Voice note" : "As heard"),
+          m.heard ? h("span", { class: "voice-said" }, m.heard) : listening ? h("span", { class: "voice-wait" }, "Listening to it") : unheard ? h("span", { class: "voice-wait" }, "Could not be transcribed") : null,
+        )
+      : null;
+  return h("div", { class: "mine" }, h("div", { class: "bubble" }, m.text || null, voice, sentFiles(unheard ? files : files.filter((n) => !VOICE_FILE.test(n)))));
+}
 
 /* ---------- Threads: talking to the chief about one job or one pull request ---------- */
 

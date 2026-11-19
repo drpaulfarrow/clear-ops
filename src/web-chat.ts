@@ -233,6 +233,12 @@ export interface WebMessage {
   files?: string[];
   /** A picture the service sent with it (a design job's), by the name it is kept under in the app's own pictures folder. */
   picture?: string;
+  /**
+   * What the service heard in the voice note(s) Paul sent with it, once they have been transcribed, so
+   * the app shows his note as his words. Empty: they could not be transcribed. Absent: no voice note, or
+   * not transcribed yet.
+   */
+  heard?: string;
 }
 
 export interface WebChatOptions {
@@ -270,7 +276,7 @@ export class WebChat {
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, "utf8")) as { seq?: unknown; messages?: unknown; chats?: unknown };
       if (Array.isArray(saved.chats)) this.chats = (saved.chats as OwnChat[]).filter((c) => c && typeof c.id === "string" && WEB_OWN.test(`web:chat:${c.id}`) && typeof c.title === "string" && typeof c.createdAt === "string").slice(-WEB_CHATS_MAX);
-      if (Array.isArray(saved.messages)) this.messages = (saved.messages as WebMessage[]).filter((m) => m && typeof m.id === "string" && typeof m.text === "string" && (m.from === "paul" || m.from === "clearops") && (m.thread === undefined || (typeof m.thread === "string" && WEB_THREAD.test(m.thread))) && (m.picture === undefined || (typeof m.picture === "string" && WEB_PICTURE.test(m.picture))));
+      if (Array.isArray(saved.messages)) this.messages = (saved.messages as WebMessage[]).filter((m) => m && typeof m.id === "string" && typeof m.text === "string" && (m.from === "paul" || m.from === "clearops") && (m.thread === undefined || (typeof m.thread === "string" && WEB_THREAD.test(m.thread))) && (m.picture === undefined || (typeof m.picture === "string" && WEB_PICTURE.test(m.picture))) && (m.heard === undefined || typeof m.heard === "string"));
       // A message in a chat that is no longer kept goes with it.
       this.messages = this.messages.filter((m) => !m.thread || !WEB_OWN.test(m.thread) || this.chats.some((c) => `web:chat:${c.id}` === m.thread));
       this.seq = typeof saved.seq === "number" ? saved.seq : this.messages.length;
@@ -488,29 +494,51 @@ export class WebChat {
     }
   }
 
+  /**
+   * What was heard in the voice note(s) of one of Paul's own messages: kept on that message, so the app
+   * shows the note as what he said rather than as a file. Only a message of his in that conversation
+   * is touched. A transcript that reads as a one-time code is not written down, as a typed one is not.
+   */
+  async heard(to: string, messageId: string | undefined, transcripts: string[]): Promise<void> {
+    const thread = this.threadOf(to);
+    const m = this.messages.find((x) => x.id === messageId && x.from === "paul" && x.thread === thread && !!x.files?.length);
+    if (!m) return;
+    m.heard = transcripts
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .map((t) => (parseCodeCommand(t) ? WEB_CODE_PLACEHOLDER : redact(t)))
+      .join("\n")
+      .slice(0, WEB_TEXT_MAX);
+    this.save();
+  }
+
   async recent(to: string, limit: number): Promise<Array<{ author: string; text: string }>> {
     return this.in(this.threadOf(to))
       .filter((m) => !m.live)
       .slice(-limit)
-      .map((m) => ({ author: m.from === "paul" ? "Paul" : "ClearOps", text: m.text || (m.picture ? "(a picture)" : "") }));
+      .map((m) => ({ author: m.from === "paul" ? "Paul" : "ClearOps", text: m.text || m.heard || (m.picture ? "(a picture)" : "") }));
   }
 }
 
+/** What only the app's chat does. The router offers these whatever it wraps, and they do nothing for any other address. */
+const WEB_ONLY = new Set<string | symbol>(["heard"]);
+
 /**
  * A messenger that delivers every web address to the app's chat and everything else exactly as before.
- * A method the wrapped messenger does not have stays absent, so no other channel behaves differently.
+ * A method the wrapped messenger does not have stays absent, so no other channel behaves differently;
+ * the one exception is what only the app does (`WEB_ONLY`), which reaches the app and nobody else.
  */
 export function routeWeb<M extends Messenger>(messenger: M, chat: WebChat): M {
   return new Proxy(messenger, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
-      if (typeof value !== "function") return value;
+      if (typeof value !== "function" && !WEB_ONLY.has(prop)) return value;
       return (...args: unknown[]) => {
         if (typeof args[0] === "string" && args[0].startsWith(WEB_PREFIX)) {
           const own = (chat as unknown as Record<string | symbol, unknown>)[prop];
           return typeof own === "function" ? (own as (...a: unknown[]) => unknown).apply(chat, args) : Promise.resolve(undefined);
         }
-        return (value as (...a: unknown[]) => unknown).apply(target, args);
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).apply(target, args) : Promise.resolve(undefined);
       };
     },
   });

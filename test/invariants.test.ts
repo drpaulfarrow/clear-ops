@@ -1216,7 +1216,12 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   // `webOwnChat` on the id `chat.open` has just made for a new chat. Nothing in the request is used as
   // an address: it names a chat only by an id the transcript already keeps, or asks for a new one with
   // one fixed word. What is kept of the message, never a one-time code, is what a new chat is named from.
-  assert.match(post, /const asked = \(req\.body as \{ thread\?: unknown \} \| undefined\)\?\.thread;\s*const kept = parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text;\s*const opened = asked === WEB_NEW_CHAT \? chat\.open\(kept \|\| files\[0\]!\.name\) : undefined;\s*const where = opened \? webOwnChat\(opened\.id\) : appThread\(asked\);\s*if \(!where\) return void res\.status\(404\)[^\n]*\n\s*const refused = webRefusal\(text\);\s*chat\.inbound\(kept, where, files\.map\(\(f\) => f\.name\)\);\s*if \(refused\) void chat\.send\(where, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true, \.\.\.\(files\.length \? \{ attachments: files \} : \{\}\) \}\);/);
+  assert.match(post, /const asked = \(req\.body as \{ thread\?: unknown \} \| undefined\)\?\.thread;\s*const kept = parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text;\s*const opened = asked === WEB_NEW_CHAT \? chat\.open\(kept \|\| files\[0\]!\.name\) : undefined;\s*const where = opened \? webOwnChat\(opened\.id\) : appThread\(asked\);\s*if \(!where\) return void res\.status\(404\)[^\n]*\n\s*const refused = webRefusal\(text\);\s*const mine = chat\.inbound\(kept, where, files\.map\(\(f\) => f\.name\)\);\s*if \(refused\) void chat\.send\(where, refused\);\s*(?:\/\/[^\n]*\n\s*)?else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true, \.\.\.\(files\.length \? \{ attachments: files, messageId: mine\.id \} : \{\}\) \}\);/);
+  // With files the message's own number goes along (19 Nov 2026), so what the service hears in a voice
+  // note is shown on that message. It is the transcript's own number, never anything from the request,
+  // and what is heard is kept only on a message of Paul's own, and never when it reads as a one-time code.
+  assert.match(src("web-chat.ts"), /const m = this\.messages\.find\(\(x\) => x\.id === messageId && x\.from === "paul" && x\.thread === thread && !!x\.files\?\.length\);\s*if \(!m\) return;/);
+  assert.match(src("web-chat.ts"), /\.map\(\(t\) => \(parseCodeCommand\(t\) \? WEB_CODE_PLACEHOLDER : redact\(t\)\)\)/);
   // A chat is opened in one place only: that route, after the same-site check and after the message has
   // been read and checked. Reading a conversation never opens one.
   assert.equal((index.match(/chat\.open\(/g) ?? []).length, 1);

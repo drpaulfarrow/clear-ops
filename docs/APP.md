@@ -161,6 +161,19 @@ Not here yet: renaming or deleting a chat, and a marker for a chat with somethin
 
 One invariant is widened, on Paul's ask: which conversations the app's sender may speak in. It was the main one or the thread of a job or a pull request; it is now also a chat of his own. What the invariant protects is unchanged and still pinned by the test: the address is only ever one the service made, a request names a chat only by an id the transcript already keeps or asks for a new one with one fixed word, a chat is opened only by the message route after the same-site check, reading never opens one, and approval words are refused in a chat as everywhere in the app.
 
+## A voice note is shown as what was heard (`heard` in `src/web-chat.ts`)
+
+Paul's point on 19 Nov 2026: a voice note came back as a file chip and a line saying it was saved and how to delete it, which is how a file is treated, not a note. `docs/app/voice.png` shows it now.
+
+- **His message shows his words.** Once the note is transcribed, the transcript appears on his own message under a "Voice note" label. That is what the chief answers, and a transcript can mishear, so he can see what was understood. While it is being transcribed the message says so.
+- **No file receipt for it in the app.** The "Saved ... /delete upload" line is no longer sent for a voice note here. The recording is still kept with his uploads, as before, and `/uploads` lists it.
+- **If it could not be transcribed** it is a file after all: the message says so, shows the file, and the usual receipt follows.
+- **A transcript that reads as a one-time code is not written down**, as a typed one is not.
+- **In the tray** a recording waiting to go reads "Voice note" with how long it runs.
+- **Other channels are unchanged.** Discord, Telegram and WhatsApp still send the saved-file receipt for a voice note.
+
+Not here: playing the recording back in the app. That would mean reading uploads back out to the browser, which is the same open question as thumbnails on sent pictures.
+
 ## Still to come
 
 What it does not do yet: a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), live voice with Cleo, push notifications, search. Each is a later slice.

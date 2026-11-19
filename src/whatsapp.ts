@@ -44,6 +44,11 @@ export interface Messenger {
   deleteInbound?(to: string, messageId: string): Promise<void>;
   /** Channels that carry images (Telegram, Discord) send a PNG or JPEG file with a caption. */
   sendImage?(to: string, file: string, caption: string): Promise<void>;
+  /**
+   * What the service heard in the voice note(s) of one of Paul's own messages, for a channel that can
+   * show it on that message (the web app). An empty list: nothing could be transcribed.
+   */
+  heard?(to: string, messageId: string | undefined, transcripts: string[]): Promise<void>;
   /** Show a typing indicator for a few seconds. Resolves true if the channel supports it. */
   typing?(to: string): Promise<boolean>;
   /** Channels with readable history (Discord) return the last `limit` messages of a conversation, oldest first. */
