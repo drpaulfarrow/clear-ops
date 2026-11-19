@@ -110,7 +110,7 @@ function usageOf(job: Job): UsageLike | undefined {
  * A job's real cost, or undefined. Only the provider's own figure and Anthropic's list price (which
  * is the bill there) count; the SDK's estimate is not a bill and is never returned as one.
  */
-function realCost(job: Job): number | undefined {
+export function realCost(job: Job): number | undefined {
   const usage = usageOf(job);
   if (!usage) return undefined;
   if (usage.costSource !== "provider" && usage.costSource !== "anthropic") return undefined;

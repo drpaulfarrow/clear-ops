@@ -25,6 +25,7 @@ import { parseDnsCommand, type DnsGate } from "./dns-gate.js";
 import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.js";
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
+import { WEB_CONVERSATION, WEB_SENDER, webRefusal } from "./web-chat.js";
 import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay, type RealSpend } from "./spend.js";
@@ -97,6 +98,12 @@ export interface HandleContext {
   attachments?: Attachment[];
   /** True when the channel itself says this is a one-to-one chat with the sender (a Discord DM). */
   direct?: boolean;
+  /**
+   * Set only by the web app's own route (`POST /app/api/chat`, behind the GitHub sign-in): the message
+   * is from the app's chat (src/web-chat.ts). It lets exactly `WEB_SENDER` past the allowlist check and
+   * refuses every approval word; no channel listener sets it.
+   */
+  web?: boolean;
 }
 
 export class Orchestrator {
@@ -147,20 +154,32 @@ export class Orchestrator {
   handle(from: string, text: string, ctx: HandleContext = {}): Promise<void> {
     const replyTo = ctx.replyTo ?? from;
     const prev = this.queues.get(replyTo) ?? Promise.resolve();
-    const next = prev.then(() => this.handleOne(from, text, replyTo, ctx.messageId, ctx.attachments ?? [], ctx.direct === true)).catch(async (err) => {
+    const next = prev.then(() => this.handleOne(from, text, replyTo, ctx.messageId, ctx.attachments ?? [], ctx.direct === true, ctx.web === true)).catch(async (err) => {
       await this.messenger.send(replyTo, `Something went wrong: ${err instanceof Error ? err.message : String(err)}`);
     });
     this.queues.set(replyTo, next);
     return next;
   }
 
-  private async handleOne(sender: string, text: string, from: string, messageId?: string, attachments: Attachment[] = [], direct = false): Promise<void> {
+  private async handleOne(sender: string, text: string, from: string, messageId?: string, attachments: Attachment[] = [], direct = false, viaWeb = false): Promise<void> {
     // `sender` is who wrote; `from` is the conversation address replies and sessions are keyed by.
-    if (!isAllowed(sender)) {
-      console.warn(`Ignored message from unlisted sender ${sender}`);
-      return;
+    // The web app's chat (src/web-chat.ts) is the one sender not on a channel allowlist: its route sits
+    // behind the GitHub sign-in and is the only caller that sets `viaWeb`. It is exactly WEB_SENDER,
+    // talking in exactly the app's own conversation, with no files, or it is nobody.
+    const web = viaWeb && sender === WEB_SENDER && from === WEB_CONVERSATION && attachments.length === 0;
+    if (!web) {
+      if (!isAllowed(sender)) {
+        console.warn(`Ignored message from unlisted sender ${sender}`);
+        return;
+      }
     }
     const trimmed = text.trim();
+    // Nothing that approves, unlocks or selects anything is reachable from the app: refused here,
+    // before any of the commands below is parsed and before any model, as well as in the route.
+    if (web) {
+      const refused = webRefusal(trimmed);
+      if (refused) return this.messenger.send(from, refused);
+    }
 
     // Files: saved only now, after the allowlist check, then handed to the chief with the caption.
     if (attachments.length) return this.handleUploads(sender, from, messageId, trimmed, attachments);

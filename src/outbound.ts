@@ -16,6 +16,7 @@
  */
 import { createHash } from "node:crypto";
 import { config, isAllowed } from "./config.js";
+import { APP_APPROVER, spendAppApproval } from "./app-approver.js";
 import { addresses, attachmentNames, bodyParts, buildRawMessage, EMAIL, header, oneLine } from "./ea.js";
 import { GoogleError, isHold, mintSendGrant, requestDigest, type GoogleApi } from "./google.js";
 import { fmt, londonYmd } from "./london.js";
@@ -295,7 +296,11 @@ export class OutboundGate {
   /* ---------- Cancelling and approving ---------- */
 
   cancel(id: string, by: string): string {
-    if (!isAllowed(by)) return "";
+    if (!isAllowed(by)) {
+      // Not a chat account: then only the signed-in app's own single-use grant (src/app-approver.ts).
+      if (!spendAppApproval(by)) return "";
+      by = APP_APPROVER;
+    }
     const a = this.store.getOutbound(id);
     if (!a) return `No pending send or invitation ${id}.`;
     this.expireOld();
@@ -310,7 +315,11 @@ export class OutboundGate {
    * checked, and this checks again). Returns the one-line confirmation, or why nothing went.
    */
   async approve(id: string, approver: string): Promise<string> {
-    if (!isAllowed(approver)) throw new OutboundError("Refused: only Paul's own chat account can approve.");
+    if (!isAllowed(approver)) {
+      // Not a chat account: then only the signed-in app's own single-use grant (src/app-approver.ts).
+      if (!spendAppApproval(approver)) throw new OutboundError("Refused: only Paul's own chat account can approve.");
+      approver = APP_APPROVER;
+    }
     const a = this.store.getOutbound(id);
     if (!a) return `No pending send or invitation ${id}.`;
     this.expireOld();

@@ -377,6 +377,7 @@ See `.env.example`. The important ones:
 | `TRANSCRIBE_BASE_URL`, `TRANSCRIBE_MODEL` | Any OpenAI-compatible `/audio/transcriptions` endpoint and its model. Defaults `https://openrouter.ai/api/v1` and `openai/whisper-large-v3`. |
 | `TRANSCRIBE_MAX_MB`, `TRANSCRIBE_MAX_SECONDS`, `TRANSCRIBE_TIMEOUT_MS`, `TRANSCRIBE_LANGUAGE` | Voice notes: most megabytes sent (default 12), longest clip in seconds (default 300), how long to wait (default 60000), and the language (`en`; empty auto-detects). |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The OAuth client for the executive assistant (see above). |
+| `UI_GITHUB_CLIENT_ID`, `UI_GITHUB_CLIENT_SECRET`, `UI_GITHUB_LOGIN` | The web app at `/app` (see [docs/APP.md](docs/APP.md)): a GitHub OAuth app's client, and the one GitHub login allowed in (default `drpaulfarrow`). The app is closed until both client values are set. |
 | `GOOGLE_ACCOUNT` | The only Google account that may be connected. |
 | `GOOGLE_TOKEN_KEY` | Encrypts the stored Google refresh token. Without it a key is derived from the client secret. |
 | `GOOGLE_DOC_IDS` | Comma-separated Google Doc IDs Paul identified for `read doc` (the app-level allowlist, separate from the Google permission). Empty by default: no document is readable until the owner lists one. |

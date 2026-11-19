@@ -15,6 +15,7 @@ import { DESIGN_TOOLS, designDir, designRoot, designServer, MAX_DESIGN_ROUNDS } 
 import { DNS_TOOLS } from "./dns-gate.js";
 import { EA_SERVER } from "./ea.js";
 import { repoRegistry } from "./repos.js";
+import { PR_REPORT_RULE_ENGINEER, PR_REPORT_RULE_MAINTAINER } from "./report-guidance.js";
 import { REPORT_RULE } from "./messages.js";
 import { classifyError, type RunFailure } from "./failures.js";
 import type { CostMeter } from "./realcost.js";
@@ -668,7 +669,7 @@ Your process for every task:
 2. Create a branch named clear/<short-task-slug> from an up-to-date default branch (git fetch origin, branch from origin's default).
 3. Implement the change in small, coherent commits with conventional commit messages. Write or update tests alongside the code. Keep documentation current.
 4. Run the full test suite and any linter or typecheck the repo defines. Fix what you broke.
-5. Push the branch and open a pull request with gh pr create: a clear title, a description of what changed and why, how it was tested, and anything you were unsure about. Do not merge it and do not push to the default branch.
+5. Push the branch and open a pull request with gh pr create: a clear title, and a description in the pull request report shape below. Do not merge it and do not push to the default branch.
 6. If the task is to address review comments on an existing pull request, check out that branch, bring it up to date with the default branch, make the fixes, push, and reply to each comment with gh. Do not open a new pull request for a fix; update the existing one.
 
 ${UPDATE_BRANCH}
@@ -679,7 +680,9 @@ ${CONTRACT_RULE_ENGINEER}
 
 ${SHAPED_BRIEF_RULE}
 
-Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with your report: the pull request URL, what changed, which files, test results, and open questions. ${CLEAN_ROOM}`,
+${PR_REPORT_RULE_ENGINEER}
+
+Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with your report in the pull request report shape above, ending with the pull request URL. ${CLEAN_ROOM}`,
       };
     case "maintain":
       return {
@@ -701,6 +704,8 @@ For each open pull request (gh pr list, newest first, or the one named in your b
 6. Switch back to the default branch and pull.
 
 ${CONTRACT_RULE_MAINTAINER}
+
+${PR_REPORT_RULE_MAINTAINER}
 
 Standards: merge only what you would be happy to be paged for. Never merge a pull request that removes or weakens tests, touches secrets, or changes the allowlist, signature verification or clean-room rule in the workforce. Never force-push or rewrite history. Finish with a report per pull request: merged (commit hash) or changes requested (the blocking issues).
 
