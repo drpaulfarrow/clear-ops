@@ -16,6 +16,7 @@ const { Orchestrator, chiefFailureText } = await import("../src/orchestrator.js"
 const { Scheduler } = await import("../src/scheduler.js");
 const { PAUL_STYLE } = await import("../src/messages.js");
 import type { AgentRunner, RunResult } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 const PR = "https://github.com/acme/clear-exchange/pull/12";
@@ -241,11 +242,11 @@ test("the chief is told about failed jobs and a paused queue, and its own credit
   const replies: string[] = [];
   const runner: AgentRunner = async (o) => {
     systemPrompt = o.systemPrompt;
-    const tools = (o.mcpServers?.ops as any).instance._registeredTools;
+    const tools = (o.mcpServers?.[OPS_SERVER_NAME] as any).instance._registeredTools;
     const call = async (name: string, args: unknown) => (await (tools[name].callback ?? tools[name].handler)(args, {})).content[0].text as string;
     replies.push(await call("job_status", { id: a.id }));
     replies.push(await call("job_status", {}));
-    replies.push(await call("start_job", { kind: "engineer", title: "Another fix", brief: "More", target: "product" }));
+    replies.push(await call("start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Another fix", brief: "More", target: "product" }));
     replies.push(await call("resume_jobs", {}));
     return { text: "ok", sessionId: "s1" };
   };

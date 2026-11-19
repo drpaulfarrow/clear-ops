@@ -3,11 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { BANK_SECRETS } from "./bank.js";
+import type { RawTraceEvent } from "./trace.js";
 import { githubAuth, workerGithubEnv } from "./github-auth.js";
 import { repoCredentialLabel } from "./repo-tokens.js";
 import { SEARCH_SECRETS } from "./search.js";
 import { TRANSCRIBE_SECRETS } from "./transcribe.js";
-import { DIRECT_STRIPPED, LLM_STRIPPED, llmEnv, llmManagedSettings, provider, resolveModel } from "./llm.js";
+import { DIRECT_STRIPPED, LLM_STRIPPED, OPENROUTER_KEY_MISSING, llmEnv, llmManagedSettings, openRouterKeyMissing, provider, resolveModel } from "./llm.js";
 import type { JobKind, JobTarget } from "./store.js";
 import { CV_TOOLS, cvDir, cvServer } from "./cv.js";
 import { DECK_TOOLS, deckDir, deckServer } from "./decks.js";
@@ -15,6 +16,7 @@ import { DESIGN_TOOLS, designDir, designRoot, designServer, MAX_DESIGN_ROUNDS } 
 import { DNS_TOOLS } from "./dns-gate.js";
 import { EA_SERVER } from "./ea.js";
 import { repoRegistry } from "./repos.js";
+import { PR_REPORT_RULE_ENGINEER, PR_REPORT_RULE_MAINTAINER } from "./report-guidance.js";
 import { REPORT_RULE } from "./messages.js";
 import { classifyError, type RunFailure } from "./failures.js";
 import type { CostMeter } from "./realcost.js";
@@ -64,6 +66,11 @@ export interface RunOptions {
    * job runner can tell a working job from a stalled one. Must be cheap; it is called often.
    */
   onActivity?: () => void;
+  /**
+   * The durable trace (src/trace.ts): each tool call, each tool result, the agent's own remarks and how
+   * the run ended, as they happen, subagents included. The receiver clips and redacts; must be cheap.
+   */
+  onTrace?: (e: RawTraceEvent) => void;
   /** Called once with the run's session id as soon as the SDK reports it, so an interrupted job can resume the same conversation. */
   onSession?: (sessionId: string) => void;
   /** Aborting it stops the run and its process: a stalled, timed-out or cancelled job. */
@@ -167,6 +174,9 @@ export const sdkRunner: AgentRunner = async (o) => {
   if (direct && !process.env.ANTHROPIC_API_KEY) {
     return { text: "", error: { kind: "auth", detail: "ANTHROPIC_API_KEY is not set, and this agent runs only on Anthropic's API." } };
   }
+  if (!direct && openRouterKeyMissing(o.apiKey ?? config.openrouter.apiKey)) {
+    return { text: "", error: { kind: "auth", detail: OPENROUTER_KEY_MISSING } };
+  }
   try {
     for await (const message of query({
       prompt: o.images?.length ? withImages(o.prompt, o.images) : o.prompt,
@@ -217,6 +227,13 @@ export const sdkRunner: AgentRunner = async (o) => {
           }
         }
       }
+      if (o.onTrace) {
+        try {
+          traceMessage(message, o.onTrace);
+        } catch {
+          // A trace must never break the run.
+        }
+      }
       if (message.type === "assistant" && message.error && !message.parent_tool_use_id) sdkError = message.error;
       if (message.type === "assistant") noteCallCost(message, o.costMeter);
       if (message.type === "assistant" && o.onToolUse && !message.parent_tool_use_id) {
@@ -257,6 +274,30 @@ export const sdkRunner: AgentRunner = async (o) => {
   }
   return { text, sessionId, costUsd, ...(error ? { error } : {}) };
 };
+
+/** Reports one SDK message to the trace: tool calls, tool results, remarks and the end of the run. */
+export function traceMessage(message: unknown, emit: (e: RawTraceEvent) => void): void {
+  const m = message as { type?: string; subtype?: string; parent_tool_use_id?: string | null; num_turns?: number; is_error?: boolean; result?: string; errors?: string[]; message?: { content?: unknown } };
+  const sub = m.parent_tool_use_id ? { sub: true } : {};
+  const blocks = Array.isArray(m.message?.content) ? (m.message?.content as Array<Record<string, unknown>>) : [];
+  if (m.type === "assistant") {
+    for (const b of blocks) {
+      if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") emit({ type: "tool", id: b.id, name: b.name, input: (b.input ?? {}) as Record<string, unknown>, ...sub });
+      else if (b.type === "text" && typeof b.text === "string" && b.text.trim()) emit({ type: "text", text: b.text, ...sub });
+    }
+  } else if (m.type === "user") {
+    for (const b of blocks) {
+      if (b.type !== "tool_result" || typeof b.tool_use_id !== "string") continue;
+      const c = b.content;
+      const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: Record<string, unknown>) => (x?.type === "text" && typeof x.text === "string" ? x.text : "")).join("\n") : "";
+      emit({ type: "tool_result", id: b.tool_use_id, isError: b.is_error === true, text, ...sub });
+    }
+  } else if (m.type === "result") {
+    const failed = m.subtype !== "success" || m.is_error === true;
+    const outcome = m.subtype === "success" ? (m.is_error ? `API error: ${m.result ?? ""}` : "finished") : `${m.subtype}${m.errors?.length ? `: ${m.errors.join("; ")}` : ""}`;
+    emit({ type: "end", outcome, turns: m.num_turns, isError: failed });
+  }
+}
 
 /**
  * One user turn carrying images as well as text, so the model can actually see a screenshot.
@@ -361,6 +402,26 @@ const BUILD_TEST_DISCIPLINE = `Machine and time: the dependencies this repositor
  * The machine-readable last lines of every maintainer report. The job runner reads them to close the
  * review loop: "changes requested" starts an engineer fix round, "needs Paul" messages the founder.
  */
+/**
+ * The contract (17 Nov 2026): an engineering brief can end with a "Done when:" section, the finish line
+ * the chief wrote before the work started (src/jobs.ts `withContract`). The engineer works to it and
+ * proves a fix with a test that failed first; the maintainer checks each line. A report of "done" is a
+ * self-report; a test that failed before the change and passes after it is evidence.
+ */
+export const CONTRACT_HEADING = "Done when:";
+
+export const CONTRACT_RULE_ENGINEER = `The finish line: if your brief has a "${CONTRACT_HEADING}" section, the task is finished only when every line of it is true, and not before. For a bug fix or a change in behaviour, write the test first: a test that fails on the current code for the reason the brief describes, run it and see it fail, then make the change and see the same test pass. In your report, name that test and say that you saw it fail before the change. If a line cannot be met, say which line and why; never report an easier version of the task as done. When the contract's lines carry acceptance IDs ("A1:", "A2:"), each line is a separately identified acceptance: work to each one, and end your report with one line per acceptance, exactly "ACCEPT A1: met" or "ACCEPT A2: not met: <one short reason>". These lines are review evidence: say met only for an acceptance you have evidence for, and know the maintainer checks each acceptance by its ID during review. Never report an easier version of a line as met.`;
+
+export const CONTRACT_RULE_MAINTAINER = `The finish line: if the original task has a "${CONTRACT_HEADING}" section, check every line of it against the diff and the test run, and say in your report which lines are met. A line that is not met is a blocking issue. So is a bug fix or a change in behaviour with no test that would have failed before it: check by reading the test, and where it is cheap, by running that test against the default branch. Request changes naming the line; do not merge. When the contract's lines carry acceptance IDs ("A1:", "A2:"), check each acceptance by its ID and say in your report which IDs are met; an unmet acceptance is a blocking issue that names its ID.`;
+
+/**
+ * How an engineer reads a shaped brief (src/brief.ts): the requester's own words kept verbatim, the
+ * confirmed intent kept separate from what the chief inferred and from what remains open, and the
+ * evidence and risks the chief drew out. The engineer works to the confirmed intent; an assumption
+ * is a proposal to verify, an unknown is a question to resolve, and neither is ever settled.
+ */
+export const SHAPED_BRIEF_RULE = `A shaped brief quotes the requester's own words under "Request (verbatim):" and keeps what the request actually says ("Confirmed intent:") visibly separate from what the chief inferred ("Assumptions (inferred, not confirmed):") and what remains open ("Unknowns (open questions):"). Work to the confirmed intent; treat each assumption as a proposal to verify rather than a settled requirement, and say in your report where one proved wrong; resolve what you can of the unknowns from the repository and flag what you cannot. Its "Evidence expected:" says what proof the outcome needs: provide exactly that evidence in your report. Its "Risks and recovery:" says what could go wrong and how the change is undone: work so that recovery stays possible, and say in your report if a risk actually bit. When the brief holds a destructive action for Paul's own approval, that hold is the boundary: prepare and prove the change and delete nothing; the action itself waits for his approval, which you neither give nor imply. Never present an assumption or an unknown as settled, and never widen the work past the non-scope.`;
+
 export const REVIEW_VERDICT_RULES = `End your report with one line per pull request you reviewed, in exactly one of these forms, with the pull request's full URL:
 REVIEW <url>: merged
 REVIEW <url>: changes requested
@@ -541,14 +602,20 @@ Your process for every task:
 2. Create a branch named clear/<short-task-slug> from an up-to-date default branch (git fetch origin, branch from origin's default).
 3. Implement the change in small, coherent commits with conventional commit messages. Write or update tests alongside the code. Keep documentation current.
 4. Run the full test suite and any linter or typecheck the repo defines. Fix what you broke.
-5. Push the branch and open a pull request with gh pr create: a clear title, a description of what changed and why, how it was tested, and anything you were unsure about. Do not merge it and do not push to the default branch.
+5. Push the branch and open a pull request with gh pr create: a clear title, and a description in the pull request report shape below. Do not merge it and do not push to the default branch.
 6. If the task is to address review comments on an existing pull request, check out that branch, bring it up to date with the default branch, make the fixes, push, and reply to each comment with gh. Do not open a new pull request for a fix; update the existing one.
 
 ${UPDATE_BRANCH}
 
 ${BUILD_TEST_DISCIPLINE}
 
-Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with your report: the pull request URL, what changed, which files, test results, and open questions. ${CLEAN_ROOM}`,
+${CONTRACT_RULE_ENGINEER}
+
+${SHAPED_BRIEF_RULE}
+
+${PR_REPORT_RULE_ENGINEER}
+
+Rules: never force-push, never rewrite shared history, never commit secrets or .env files, never disable or delete failing tests to make them pass, never widen scope beyond the task. Finish with your report in the pull request report shape above, ending with the pull request URL. ${CLEAN_ROOM}`,
       };
     case "maintain":
       return {
@@ -568,6 +635,10 @@ For each open pull request (gh pr list, newest first, or the one named in your b
 4. If the only thing in the way is that the branch is behind the default branch and it merges cleanly, update it yourself with gh pr update-branch <number> (a merge, never --rebase), wait for CI to go green, then carry on. Nobody should have to click "Update branch".
 5. If it is mergeable: gh pr merge <number> --merge --delete-branch. If not: gh pr review <number> --request-changes with your comments, and do not merge. Your review is sent to an engineer automatically, who fixes it on the same branch, and you will review it again; so make each blocking comment specific enough to act on without asking.
 6. Switch back to the default branch and pull.
+
+${CONTRACT_RULE_MAINTAINER}
+
+${PR_REPORT_RULE_MAINTAINER}
 
 Standards: merge only what you would be happy to be paged for. Never merge a pull request that removes or weakens tests, touches secrets, or changes the allowlist, signature verification or clean-room rule in the workforce. Never force-push or rewrite history. Finish with a report per pull request: merged (commit hash) or changes requested (the blocking issues).
 

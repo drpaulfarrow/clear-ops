@@ -15,12 +15,13 @@ const { Store } = await import("../src/store.js");
 const { ConsoleMessenger, chunk, parseInbound, verifySignature } = await import("../src/whatsapp.js");
 const { createHmac } = await import("node:crypto");
 import type { AgentRunner, RunOptions } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const calls: RunOptions[] = [];
 /** Fake runner: records the call, exercises the chief's tools when asked, returns canned text. */
 const fakeRunner: AgentRunner = async (o) => {
   calls.push(o);
-  const ops = o.mcpServers?.ops as { instance?: unknown } | undefined;
+  const ops = o.mcpServers?.[OPS_SERVER_NAME] as { instance?: unknown } | undefined;
   if (ops) {
     assert.ok(o.systemPrompt.includes("chief of staff"), "only the chief gets the ops tool server");
     if (o.prompt.startsWith("delegate:")) {
@@ -61,7 +62,7 @@ const fakeRunner: AgentRunner = async (o) => {
     if (o.prompt.startsWith("review only:")) {
       const server = (ops as any).instance;
       const handler = server?._registeredTools?.start_job?.callback ?? server?._registeredTools?.start_job?.handler;
-      const r = await handler({ kind: "engineer", title: "Held change", brief: o.prompt.slice(12).trim(), target: "self", reviewOnly: true }, {});
+      const r = await handler({ kind: "engineer", doneWhen: "npm test passes", title: "Held change", brief: o.prompt.slice(12).trim(), target: "self", reviewOnly: true }, {});
       return { text: `Delegated. ${r.content[0].text}`, sessionId: "sess-1" };
     }
     if (o.prompt.startsWith("bad model:")) {
@@ -117,7 +118,7 @@ test("a plain message goes to the chief and the reply comes back, session is sto
   const last = calls.at(-1)!;
   assert.equal(last.model, config.models.chief);
   assert.ok(config.models.chief.length > 0);
-  assert.deepEqual(last.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", "mcp__ops__*"]);
+  assert.deepEqual(last.allowedTools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep", `mcp__${OPS_SERVER_NAME}__*`]);
 });
 
 test("a second message resumes the stored session", async () => {

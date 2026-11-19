@@ -18,6 +18,7 @@ const { Orchestrator } = await import("../src/orchestrator.js");
 const { Scheduler } = await import("../src/scheduler.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 import type { AgentRunner } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 const PR = "https://github.com/acme/clear-exchange/pull/9";
@@ -211,7 +212,7 @@ test("threadMention links Discord channels and threads only", () => {
 function chiefCalling(calls: Array<[string, Record<string, unknown>]>, worker: AgentRunner) {
   const results: Array<{ text: string; isError?: boolean }> = [];
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (!ops) return worker(o);
     const tools = ops.instance?._registeredTools;
     for (const [name, args] of calls) {
@@ -251,8 +252,8 @@ test("a batch from one chat message: every job gets its own thread, a failure is
     [
       ["start_job", { kind: "research", brief: "What did TollBit launch?", title: "TollBit research" }],
       ["start_job", { kind: "write", brief: "Draft the pitch deck.", title: "Pitch deck" }],
-      ["start_job", { kind: "engineer", brief: "Add a docs site.", title: "Docs site" }],
-      ["start_job", { kind: "engineer", brief: "Deploy to Fly.", title: "Fly deploy" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", brief: "Add a docs site.", title: "Docs site" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", brief: "Deploy to Fly.", title: "Fly deploy" }],
     ],
     worker,
   );

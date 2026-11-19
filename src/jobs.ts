@@ -6,6 +6,7 @@ import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { perJobModelError, provider, runRoute } from "./llm.js";
 import type { OtpRelay } from "./otp.js";
+import { DocReaderError, type DocReader } from "./doc-reader.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -17,16 +18,17 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentRunner, RunResult } from "./agents.js";
 import { describeWorkerTool, JobProgress, type JobProgressOptions } from "./status.js";
 import { nextCheckAt, type Canary, type CanaryProvider } from "./auto-resume.js";
-import { BRIDGE_READ_DENY, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
+import { BRIDGE_READ_DENY, CONTRACT_HEADING, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
-import { addToReport, shortText, splitReport } from "./messages.js";
+import { addToReport, parseOutcome, shortText, splitReport } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type BudgetStop, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { RealCostMeter, usdAmount, type JobCostWatch } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
+import { JobTrace, tracesDir, type RawTraceEvent } from "./trace.js";
 import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { gitEnv, jobCredentialNote } from "./bootstrap.js";
 import { withoutBankSecrets } from "./bank.js";
@@ -197,6 +199,64 @@ interface RunCap {
   isGuard: boolean;
 }
 
+/** The longest contract kept on a job. */
+export const DONE_WHEN_MAX = 1200;
+
+/** The brief with its contract as the last section; a brief that already ends with this contract is left alone. */
+export function withContract(brief: string, doneWhen: string): string {
+  const section = `${CONTRACT_HEADING}\n${doneWhen.trim()}`;
+  return brief.includes(section) ? brief : `${brief.trimEnd()}\n\n${section}`;
+}
+
+/**
+ * A fix round's brief quotes the task it is fixing. From the second round on that task is itself a fix
+ * brief, so the quote would nest (and grow) every round: take the innermost original task instead.
+ */
+export function originalTask(brief: string): string {
+  const marker = "\n\nOriginal task:\n";
+  const at = brief.indexOf(marker);
+  if (at < 0) return brief;
+  const rest = brief.slice(at + marker.length);
+  const end = rest.indexOf("\n\nMaintainer's review (job ");
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/** The words of a review that carry its substance: lower case, no numbers, hashes, links or short words. */
+function reviewWords(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/https?:\/\/\S+/g, " ")
+      .replace(/\b[0-9a-f]{7,40}\b/g, " ")
+      .split(/[^a-z_./-]+/)
+      .filter((w) => w.length >= 5),
+  );
+}
+
+/** How alike two reviews must be to count as raising the same blockers (share of words in common). */
+export const SAME_BLOCKERS = 0.7;
+
+/**
+ * Whether two reviews of the same pull request raise the same blocking issues: most of their words are
+ * shared. Deliberately blunt and deterministic. A false alarm costs one message to Paul, who can say
+ * "one more fix round"; a miss costs one more round, bounded by MAX_FIX_ROUNDS as before.
+ */
+export function sameBlockers(a: string, b: string): boolean {
+  const x = reviewWords(a);
+  const y = reviewWords(b);
+  if (x.size < 12 || y.size < 12) return false;
+  let both = 0;
+  for (const w of x) if (y.has(w)) both++;
+  return both / (x.size + y.size - both) >= SAME_BLOCKERS;
+}
+
+/** What the fix-round engineer is told about earlier rounds: the last two reviews, clipped. */
+export function deadEnds(earlier: Array<{ id: string; text: string }>): string {
+  if (!earlier.length) return "";
+  const shown = earlier.slice(-2).map((r) => `Earlier review (job ${r.id}):\n${r.text.length > 1500 ? `${r.text.slice(0, 1500)}\n[cut]` : r.text}`);
+  return `\n\nAlready tried: this pull request has been through ${earlier.length} earlier review${earlier.length === 1 ? "" : "s"}. Anything below that the latest review raises again was not fixed by the last round, so the approach taken then is a dead end: read what was done (git log on the branch) and take a different one, and say in your report what you did differently.\n\n${shown.join("\n\n")}`;
+}
+
 export class JobRunner {
   private running = new Set<string>();
   /** The workers this process is running, with their heartbeats. */
@@ -230,6 +290,13 @@ export class JobRunner {
    * service, which reads the site's email or asks Paul in chat, and never from the worker.
    */
   private readonly otp?: OtpRelay;
+  /**
+   * The private Google Docs reader (src/doc-reader.ts). A snapshot is bound to one job only when
+   * Paul starts that job with the private source handle a staged read handed him (never through a
+   * chat command, which is refused before any fetch), and snapshotBlock hands its text to that job
+   * alone.
+   */
+  private readonly docs?: DocReader;
   /**
    * Where the spend figure comes from (src/spend.ts): the provider's own usage where it can be read,
    * and the SDK's estimate only as the internal stand-in the daily cap falls back to. Only the
@@ -266,6 +333,7 @@ export class JobRunner {
       liveness?: LivenessOptions;
       purchase?: PurchaseGate;
       otp?: OtpRelay;
+      docs?: DocReader;
       slots?: number;
       /** Engineering jobs at once across all repositories; defaults to config.engineerTotal. */
       total?: number;
@@ -284,6 +352,7 @@ export class JobRunner {
     this.onOutput = opts.onOutput;
     this.purchase = opts.purchase;
     this.otp = opts.otp;
+    this.docs = opts.docs;
     this.spend = opts.spend ?? storeMeter(store);
     this.setup = opts.setup ?? preparedCopies;
     this.slots = Math.max(1, opts.slots ?? config.engineerSlots);
@@ -298,7 +367,7 @@ export class JobRunner {
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly"> = {}): Job {
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly" | "doneWhen"> = {}, launch: { source?: string } = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
@@ -313,6 +382,7 @@ export class JobRunner {
       // so a bridge job never carries either, whatever a caller passed here.
       delete extra.model;
       delete extra.reviewOnly;
+      delete extra.doneWhen;
     } else delete extra.origin;
     if (kind === "ea") extra.permits = extra.permits ? [...new Set(extra.permits)].filter((p) => p === "drafts" || p === "holds" || p === "send") : extra.permits;
     else if (kind === "dns") extra.permits = extra.permits?.includes("dns") ? ["dns"] : undefined;
@@ -338,7 +408,41 @@ export class JobRunner {
       if (!PR_KINDS.includes(kind)) throw new Error(`A ${kind} job cannot be review only: only ${PR_KINDS.join(" and ")} open a pull request for Paul to review.`);
       if (extra.reviewOnly !== true) delete extra.reviewOnly;
     }
+    // A shaped brief (src/brief.ts) is shaped in the prompt, never gated here: whether its contract
+    // carries acceptance IDs ("A1:", "A2:") is the chief's shaping guidance to follow, not a rule
+    // the runner enforces. The IDs are review evidence: the engineer reports against them and the
+    // maintainer checks each by ID during review, in the review loop exactly as it is. This funnel
+    // never refuses a brief over them and never inspects a report for them.
+    // The contract: only an engineer job has one, and it rides at the end of the brief, so the review
+    // and every fix round (which quote the brief) carry it with no further plumbing.
+    if (kind !== "engineer" || !extra.doneWhen?.trim()) delete extra.doneWhen;
+    else {
+      extra.doneWhen = extra.doneWhen.trim().slice(0, DONE_WHEN_MAX);
+      brief = withContract(brief, extra.doneWhen);
+    }
+    // Explicit owner-selected prelaunch binding of a private source (src/doc-reader.ts): the one
+    // staged snapshot behind the private handle passed with the start is bound to this job between
+    // creating it and dispatching it, so the worker receives exactly that explicitly selected
+    // source in its first prompt. There is no ambient next-job binding: without a handle nothing
+    // is ever bound. Every refusal of the handle (not one of ours, lapsed, another owner's, a
+    // kind that cannot work from a source, no reader wired) happens in checkSource, before the
+    // job is created, so a refusal starts nothing. A job marked for a source never runs
+    // source-free: a bind that could not happen fails the job closed.
+    if (launch.source !== undefined) {
+      const docs = this.docs;
+      if (!docs) throw new DocReaderError("A private source was requested, but the document reader is not available, so nothing was started.");
+      docs.checkSource(launch.source, { kind, requestedBy });
+    }
     const job = this.store.createJob(kind, brief, requestedBy, target, replyTo, extra);
+    if (launch.source !== undefined) {
+      const docs = this.docs!;
+      const bound = docs.bindSource(launch.source, job.id);
+      if (!bound) {
+        this.store.updateJob(job.id, { status: "failed", finishedAt: new Date().toISOString(), error: "The private source could not be bound to this job, so it was not started.", failure: "error" });
+        throw new DocReaderError("The private source could not be bound to this job, so it was not started.");
+      }
+      this.store.updateJob(job.id, { docSnapshot: true });
+    }
     return this.dispatch(job);
   }
 
@@ -950,6 +1054,20 @@ export class JobRunner {
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
       const carryOn = job.savedWork ? `\n\n${savedWorkNote(job.savedWork)}` : "";
+      // The private source bound to this job, if any (src/doc-reader.ts): its text is handed to
+      // this job's worker alone, fenced as untrusted data with its provenance, after the snapshot
+      // is verified against the fingerprint recorded when it was read. A job marked as carrying a
+      // bound source fails closed here if the source is absent, corrupt, modified, or the reader
+      // itself is missing: it never runs source-free by accident, and no path, token or source
+      // detail is ever mentioned in the failure.
+      const marked = this.store.getJob(id)?.docSnapshot ?? job.docSnapshot;
+      if (marked && !this.docs) throw new DocReaderError(`The private source bound to job ${id} cannot be checked because the document reader is not available, so the job refuses to run without it.`);
+      let docNote = "";
+      if (this.docs) {
+        const block = marked ? this.docs.requireBound(id) : this.docs.snapshotBlock(id);
+        if (marked && !block) throw new DocReaderError(`The private source bound to job ${id} produced no text, so the job refuses to run without it.`);
+        docNote = block ? `\n\n${block}` : "";
+      }
       const link = job.kind === "ea" ? bookingLink(this.store) : undefined;
       const permits =
         job.kind === "ea"
@@ -985,6 +1103,12 @@ export class JobRunner {
         ? { sdkUsd: limits.realBudgetUsd ?? limits.maxBudgetUsd, onAnthropic, isGuard: limits.realBudgetUsd === undefined }
         : { sdkUsd: limits.maxBudgetUsd, onAnthropic, isGuard: true };
       costMeter = this.costWatch(cap.onAnthropic ? undefined : limits.realBudgetUsd, () => live.abort.abort());
+      // A job whose worker was handed a bound private source (docNote above, src/doc-reader.ts) traces
+      // names and outcomes only, whatever its kind (src/trace.ts): `redact` knows token shapes, not a
+      // document's own words, so a clipped command, tail or remark kept here could carry the source's
+      // path and quotes past the one job the source is bound to. An unbound job keeps the detailed trace.
+      const trace = new JobTrace(id, job.kind, tracesDir(), docNote !== "");
+      trace.note(`${job.kind} on ${job.target ?? "product"}, model ${route.model}${job.resumed ? `, resumed (${job.resumed})` : ""}${job.fixRound ? `, fix round ${job.fixRound}` : ""}`);
       progress = new JobProgress(this.messenger, job.replyTo ?? job.requestedBy, this.progressOpts).start();
       const shown = progress;
       // Retrieval as a harness decision (src/retrieval.ts): before a search-carrying worker composes its
@@ -998,7 +1122,7 @@ export class JobRunner {
       }
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {
-        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}`,
+        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
         cwd: bridged && snapshot ? snapshot : spec.cwd,
@@ -1018,6 +1142,7 @@ export class JobRunner {
         costMeter,
         abortController: live.abort,
         onActivity: () => this.touch(id, live),
+        onTrace: (e: RawTraceEvent) => trace.event(e),
         onToolUse: (name: string, input: Record<string, unknown>) => {
           const step = describeWorkerTool(name, input);
           live.step = step;
@@ -1074,12 +1199,19 @@ export class JobRunner {
       // GH_TOKEN adds nothing (src/bootstrap.ts jobCredentialNote).
       if (BUILDS(job.kind)) result.text = addToReport(result.text, jobCredentialNote(job.target));
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
+      // The report's per-acceptance lines ("ACCEPT A1: met", src/agents.ts) are review evidence the
+      // maintainer reads: the runner never inspects the report for them, never marks a job failed
+      // over one and never short-circuits the review flow (src/brief.ts).
       const { report, message } = splitReport(result.text);
       const outputPath = this.store.writeOutput(id, report);
+      // What the worker itself says came of it (its GOAL line). Kept as a claim and shown as one:
+      // nothing here acts on it, and no job is failed, retried or reviewed differently because of it.
+      const claimed = parseOutcome(report);
       this.store.updateJob(id, {
         status: "done",
         finishedAt: new Date().toISOString(),
         summary: message,
+        ...(claimed ? { claimed } : {}),
         outputPath,
         costUsd: result.costUsd,
       });
@@ -1226,6 +1358,17 @@ export class JobRunner {
     return true;
   }
 
+  /**
+   * A job's trace for a line the service writes outside the run itself (a stop or a failure, from
+   * `recordStop` or `recordFailure`). Whether the job carries a bound private source is read from
+   * the current store record (`docSnapshot`), never from the closure copy the caller was handed,
+   * so a line written after a restart, or outside the live run (an orphan's cancel, a resumed
+   * job's failure), is shaped exactly like the run's own events (src/trace.ts).
+   */
+  private jobTrace(job: Job): JobTrace {
+    return new JobTrace(job.id, job.kind, tracesDir(), (this.store.getJob(job.id) ?? job).docSnapshot === true);
+  }
+
   /** Records a stopped job: its work kept, failed with the reason, its loop paused, Paul told in one sentence. */
   private async recordStop(job: Job, live: LiveRun): Promise<void> {
     const reason = live.stop;
@@ -1239,6 +1382,7 @@ export class JobRunner {
       });
     }
     const failure = { kind: reason.kind, detail: reason.detail };
+    this.jobTrace(job).noteEnd(true, failureLabel(reason.kind), reason.detail);
     const kept = saved ? `\n\n${savedWorkNote(saved)}` : "";
     const outputPath = this.store.writeOutput(job.id, `This job was stopped and did not finish, because ${failureReason(failure)}.\n\n${reason.detail}${kept}\n`);
     this.store.updateJob(job.id, {
@@ -1454,6 +1598,7 @@ export class JobRunner {
   private async recordFailure(job: Job, failure: RunFailure): Promise<void> {
     const finishedAt = new Date().toISOString();
     const reason = failureReason(failure);
+    this.jobTrace(job).noteEnd(false, failureLabel(failure.kind), failure.detail);
     const outputPath = this.store.writeOutput(job.id, `This job failed and did no work, because ${reason}.\n\nError: ${failure.detail}\n`);
     this.store.updateJob(job.id, { status: "failed", finishedAt, error: failure.detail, failure: failure.kind, outputPath, summary: `Failed (${failureLabel(failure.kind)}): ${shortText(failure.detail, 200)}` });
     // A failed round leaves its loop waiting for Paul rather than stalled for good.
@@ -1498,6 +1643,18 @@ export class JobRunner {
       };
     }
     const round = (reviewed.kind === "engineer" ? reviewed.fixRound ?? 0 : 0) + 1;
+    // Dead ends: the earlier reviews of this same pull request. If this review raises what the last one
+    // raised, the fix round between them changed nothing the reviewer could see, and another round on
+    // the same instructions is a retry, not a repair: stop and put it to Paul with what is stuck.
+    const earlier = this.earlierReviews(review, url);
+    const last = earlier[earlier.length - 1];
+    if (round > 1 && round <= MAX_FIX_ROUNDS && last && sameBlockers(last.text, text)) {
+      this.pauseLoop(reviewed.designLoop);
+      return {
+        chained: "",
+        escalation: `${url} is stuck: the last two reviews raised the same blocking issues, so fix round ${round - 1} did not move it and I have stopped rather than try the same thing again. Both reviews are saved (show job ${last.id} and show job ${review.id}). Give me a steer on the approach, reply "one more fix round on ${url}" to try again anyway, or close the pull request.`,
+      };
+    }
     if (round > MAX_FIX_ROUNDS) {
       this.pauseLoop(reviewed.designLoop);
       return {
@@ -1507,13 +1664,23 @@ export class JobRunner {
     }
     const fix = this.start(
       "engineer",
-      `Address the maintainer's review on the existing pull request ${url} (automatic fix round ${round} of ${MAX_FIX_ROUNDS}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${reviewed.brief}\n\nMaintainer's review (job ${review.id}):\n${text}`,
+      `Address the maintainer's review on the existing pull request ${url} (automatic fix round ${round} of ${MAX_FIX_ROUNDS}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${originalTask(reviewed.brief)}\n\nMaintainer's review (job ${review.id}):\n${text}${deadEnds(earlier)}`,
       reviewed.requestedBy,
       target,
       reviewed.replyTo,
       { title: fixTitle(jobTitle(reviewed), round), pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
     );
     return { chained: `Changes requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
+  }
+
+  /** The finished maintainer reviews of this pull request before this one, oldest first, with their saved reports. */
+  private earlierReviews(review: Job, url: string): Array<{ id: string; text: string }> {
+    return this.store
+      .allJobs()
+      .filter((j) => j.kind === "maintain" && j.id !== review.id && j.status === "done" && j.pr && samePr(j.pr, url) && (j.finishedAt ?? "") <= (review.finishedAt ?? new Date().toISOString()))
+      .sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""))
+      .map((j) => ({ id: j.id, text: this.store.readOutput(j.id) ?? "" }))
+      .filter((r) => r.text.trim());
   }
 
   /**

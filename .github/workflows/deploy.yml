@@ -114,6 +114,9 @@ jobs:
             ALLOWED_DISCORD_IDS="${{ secrets.ALLOWED_DISCORD_IDS }}" \
             CHANNELS="${{ vars.CHANNELS || 'telegram,discord' }}" \
             PRODUCT_REPO="${{ secrets.PRODUCT_REPO }}" \
+            UI_GITHUB_CLIENT_ID="${{ secrets.UI_GITHUB_CLIENT_ID }}" \
+            UI_GITHUB_CLIENT_SECRET="${{ secrets.UI_GITHUB_CLIENT_SECRET }}" \
+            UI_GITHUB_LOGIN="${{ vars.UI_GITHUB_LOGIN }}" \
             GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
             GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
             GOOGLE_ACCOUNT="${{ secrets.GOOGLE_ACCOUNT }}" \

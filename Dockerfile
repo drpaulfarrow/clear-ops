@@ -19,6 +19,8 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
+# The web app's own files (docs/APP.md): one stylesheet and one script, served as they are.
+COPY public ./public
 RUN npm run build && npm prune --omit=dev
 
 ENV NODE_ENV=production

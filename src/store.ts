@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import type { ClaimedOutcome } from "./messages.js";
 import { derivedJobTitle, legacyScheduleTitle } from "./titles.js";
 import type { FailureKind } from "./failures.js";
 import type { RetrievalRecord } from "./retrieval.js";
+import type { OpsToolShape } from "./ops-schema.js";
 
 /** How many of the chief's own retrieval decisions are kept, newest last (src/retrieval.ts). */
 export const RETRIEVAL_TURNS_KEPT = 20;
@@ -73,6 +75,8 @@ export interface Job {
   queuePos?: number;
   /** The pull request this job opened or is fixing (engineering kinds), as a URL or "#<number>". */
   pr?: string;
+  /** The finish line the chief set for an engineer job before it started; also the last section of its brief. */
+  doneWhen?: string;
   /** Engineer jobs started automatically to address a review: 1 for the first round, and so on. */
   fixRound?: number;
   /** Maintainer jobs started automatically after an engineering job: the id of that job. */
@@ -115,6 +119,13 @@ export interface Job {
    * it from Paul's own start_job only; the bridge never carries it.
    */
   reviewOnly?: boolean;
+  /**
+   * Set by the service only, prelaunch, when Paul starts this job with the private source handle a
+   * staged "read doc" gave him (src/doc-reader.ts; the legacy "for job <id>" chat binding is
+   * refused before any fetch): the worker of this job alone receives the snapshot, and the job's
+   * output is kept out of the outputs repository. Never set by a model.
+   */
+  docSnapshot?: true;
   /**
    * Set by the service only (src/offboard-import.ts): this record is a one-use honest import of an
    * already completed offboard run, not a run this service made. It holds the offboard run's own id,
@@ -159,6 +170,16 @@ export interface Job {
    * or upload content, only the decision and what the web returned.
    */
   retrieval?: RetrievalRecord;
+  /**
+   * What the worker's own report said of how the job turned out (its GOAL line, src/messages.ts).
+   * A claim, shown as one: a worker saying it went well is never treated as evidence that it did.
+   */
+  claimed?: ClaimedOutcome;
+  /**
+   * Paul's own answer to "did this do what I asked?", set only by his button in the web app
+   * (docs/APP.md). It outranks everything else said about the job.
+   */
+  verdict?: { met: boolean; at: string };
   error?: string;
   /**
    * Failed jobs: why, when the run ended in an API or SDK error (no credit, a rejected key, rate limits,
@@ -429,6 +450,16 @@ export interface Settings {
    */
   pageSessionKey?: string;
   /**
+   * The web app's own key for signing its session cookie (src/app-auth.ts), minted on first use and
+   * kept here so a restart does not sign Paul out. Never printed, never logged, never handed to a model.
+   */
+  appSessionKey?: string;
+  /**
+   * The GitHub account the web app first signed in (src/app-auth.ts): the allowed login and GitHub's
+   * own numeric id for it, so a login that is later renamed and taken by someone else is refused.
+   */
+  appGithubUser?: { login: string; id: number };
+  /**
    * The reports view's long-lived token (src/reports.ts), minted on first use and printed in chat by
    * /reports. It is its own token, not the board's, because it opens saved outputs rather than job
    * metadata; the same rules apply (compared in constant time, never logged, read-only pages only).
@@ -463,6 +494,8 @@ interface State {
   usageStart?: { ymd: string; usd: number; at: string };
   /** The chief's own retrieval decisions, newest last, bounded (src/retrieval.ts). Never mail or uploads. */
   retrievalTurns?: RetrievalRecord[];
+  /** The ops tool shape pinned per chief MCP namespace, for the fail-closed schema guard (src/ops-schema.ts). */
+  opsSchemas?: Record<string, OpsToolShape[]>;
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -520,6 +553,17 @@ export class Store {
   // Sessions
   getSession(number: string): string | undefined {
     return this.state.sessions[number];
+  }
+
+  // The ops schema guard (src/ops-schema.ts): the shape a chief MCP namespace advertised when it was
+  // first pinned, one entry per schema version. Old namespaces keep their entries: they are tiny, and
+  // they are the record of what each version advertised.
+  opsSchema(namespace: string): OpsToolShape[] | undefined {
+    return this.state.opsSchemas?.[namespace];
+  }
+  pinOpsSchema(namespace: string, shapes: OpsToolShape[]): void {
+    (this.state.opsSchemas ??= {})[namespace] = shapes;
+    this.save();
   }
   setSession(number: string, sessionId: string): void {
     this.state.sessions[number] = sessionId;

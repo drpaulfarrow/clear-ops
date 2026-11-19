@@ -113,6 +113,13 @@ export const config = {
    * (src/llm.ts). The aliases the roles use map to OPENROUTER_HAIKU_MODEL, _SONNET_, _OPUS_ and
    * _FABLE_ (defaults in src/llm.ts); OPENROUTER_PRICES (JSON) prices models the defaults do not cover.
    */
+  /**
+   * Which provider the agents are meant to run on: "openrouter", "anthropic", or unset (inferred: OpenRouter
+   * when OPENROUTER_API_KEY is set, else Anthropic). Set it (16 Nov 2026) so that a missing OpenRouter key
+   * stops the runs with a plain failure instead of quietly sending every agent to Claude on the Anthropic
+   * key. The executive assistant runs on Anthropic whatever this says.
+   */
+  llmProvider: ((v) => (v === "openrouter" || v === "anthropic" ? v : ""))((process.env.LLM_PROVIDER ?? "").trim().toLowerCase()) as "openrouter" | "anthropic" | "",
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     models: {
@@ -282,6 +289,15 @@ export const config = {
    */
   publicUrl: (process.env.PUBLIC_URL || (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : `http://localhost:${process.env.PORT ?? 8080}`)).replace(/\/+$/, ""),
   /**
+   * The signed-in web app (src/app-auth.ts, docs/APP.md): a GitHub OAuth client, and the one GitHub
+   * login that may sign in. Off, with every page under /app refused, until both client values are set.
+   */
+  app: {
+    githubClientId: process.env.UI_GITHUB_CLIENT_ID ?? "",
+    githubClientSecret: process.env.UI_GITHUB_CLIENT_SECRET ?? "",
+    githubLogin: (process.env.UI_GITHUB_LOGIN || "drpaulfarrow").trim().toLowerCase(),
+  },
+  /**
    * Paul's Google Workspace, for the executive assistant: an OAuth client for his own user account
    * (no service account, no domain-wide delegation). GOOGLE_ACCOUNT, when set, is the only account
    * that may be connected. GOOGLE_TOKEN_KEY encrypts the stored refresh token; without it the key is
@@ -292,6 +308,19 @@ export const config = {
     clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
     account: (process.env.GOOGLE_ACCOUNT ?? "").trim().toLowerCase(),
     tokenKey: process.env.GOOGLE_TOKEN_KEY ?? "",
+  },
+  /**
+   * The Google Docs Paul has identified for ClearOps to read at his request (src/doc-reader.ts). This
+   * is the service's own app-level list of document IDs: separate from, and in addition to, the Google
+   * permission itself, and a document on it is still read only after his own typed command and only if
+   * the connected Google grant carries the read-only Docs permission. GOOGLE_DOC_IDS replaces the list
+   * (comma-separated); the default is empty and denies all documents.
+   */
+  googleDocs: {
+    allow: (process.env.GOOGLE_DOC_IDS ?? "")
+      .split(",")
+      .map((d) => d.trim())
+      .filter(Boolean),
   },
   /**
    * Paul's appointment-schedule booking link, offered in scheduling drafts. Not a secret, but kept out

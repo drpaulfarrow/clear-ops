@@ -24,6 +24,7 @@ const { Scheduler } = await import("../src/scheduler.js");
 const { bootstrapRepos, repoProblemsMessage } = await import("../src/bootstrap.js");
 const { jobLabel } = await import("../src/titles.js");
 import type { AgentRunner, RunResult } from "../src/agents.js";
+import { OPS_SERVER_NAME } from "../src/ops-schema.js";
 
 const FOUNDER = "tg:99887766";
 const waitFor = async (pred: () => boolean, ms = 5000) => {
@@ -301,7 +302,7 @@ function chief(calls: Array<[string, Record<string, unknown>]>, worker: AgentRun
   const results: Array<{ text: string; isError?: boolean }> = [];
   let systemPrompt = "";
   const runner: AgentRunner = async (o) => {
-    const ops = o.mcpServers?.ops as any;
+    const ops = o.mcpServers?.[OPS_SERVER_NAME] as any;
     if (!ops) return worker(o);
     systemPrompt = o.systemPrompt;
     const tools = ops.instance?._registeredTools;
@@ -324,21 +325,21 @@ test("start_job takes a repo by alias, owner/name or his name for it, defaults t
   const g = gatedRunner();
   const c = chief(
     [
-      ["start_job", { kind: "engineer", title: "Site footer", brief: "Fix the footer", repo: "site" }],
-      ["start_job", { kind: "engineer", title: "Site header", brief: "Fix the header", repo: "drpaulfarrow/drpaulfarrowcom" }],
-      ["start_job", { kind: "engineer", title: "Product thing", brief: "Product change" }],
-      ["start_job", { kind: "engineer", title: "Old style", brief: "Self change", target: "self" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Site footer", brief: "Fix the footer", repo: "site" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Site header", brief: "Fix the header", repo: "drpaulfarrow/drpaulfarrowcom" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Product thing", brief: "Product change" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Old style", brief: "Self change", target: "self" }],
       ["start_job", { kind: "research", title: "Site audit", brief: "Audit my site copy", repo: "drpaulfarrow.com" }],
-      ["start_job", { kind: "engineer", title: "Nope", brief: "Nothing", repo: "mystery" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Nope", brief: "Nothing", repo: "mystery" }],
       ["start_job", { kind: "create_agent", title: "An agent", brief: "Agent please", repo: "site" }],
-      ["start_job", { kind: "engineer", title: "Small fix", brief: "Small doubleshift fix", repo: "shftd2-pre/app-doubleshift" }],
-      ["start_job", { kind: "engineer", title: "Test copy fix", brief: "Fix the test copy", repo: "doubleshift-test" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Small fix", brief: "Small doubleshift fix", repo: "shftd2-pre/app-doubleshift" }],
+      ["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Test copy fix", brief: "Fix the test copy", repo: "doubleshift-test" }],
     ],
     g.runner,
   );
   await c.orch.handle(FOUNDER, "do things");
   const [footer, header, product, old, audit, nope, agent, doubleshift, testCopy] = c.results;
-  const job = (brief: string) => c.store.allJobs().find((j) => j.brief === brief)!;
+  const job = (brief: string) => c.store.allJobs().find((j) => j.brief === brief || j.brief.startsWith(`${brief}\n\nDone when:`))!;
   assert.equal(job("Fix the footer").target, "site");
   assert.match(footer.text, /^Started: Site footer · engineer, site · /);
   assert.equal(job("Fix the header").target, "site");
@@ -367,7 +368,7 @@ test("start_job takes a repo by alias, owner/name or his name for it, defaults t
 test("an engineer or maintainer job on a repo that is not on disk is refused with what Paul must change", async () => {
   const gone = repoRegistry.add({ alias: "ghost", slug: "drpaulfarrow/ghost" });
   assert.ok(!fs.existsSync(gone.dir));
-  const c = chief([["start_job", { kind: "engineer", title: "Ghost work", brief: "Work on ghost", repo: "ghost" }]], async () => ({ text: "x" }));
+  const c = chief([["start_job", { kind: "engineer", doneWhen: "npm test passes", title: "Ghost work", brief: "Work on ghost", repo: "ghost" }]], async () => ({ text: "x" }));
   await c.orch.handle(FOUNDER, "go");
   assert.equal(c.results[0].isError, true);
   assert.match(c.results[0].text, /not on disk yet.*drpaulfarrow\/ghost.*Repository access/s);

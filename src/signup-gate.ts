@@ -22,6 +22,7 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { config, isAllowed } from "./config.js";
+import { APP_APPROVER, spendAppApproval } from "./app-approver.js";
 import { fmt, londonYmd } from "./london.js";
 import { blockers, canonicalPlan, digest, generatedPassword, logSignup, prepareCheck, resolveUsername, SignupError, type SignupPlan, type SignupStep, type SignupSubmitter } from "./signup.js";
 import { shortId, type SignupAction, type Store } from "./store.js";
@@ -163,7 +164,11 @@ export class SignupGate {
   }
 
   cancel(id: string, by: string): string {
-    if (!isAllowed(by)) return "";
+    if (!isAllowed(by)) {
+      // Not a chat account: then only the signed-in app's own single-use grant (src/app-approver.ts).
+      if (!spendAppApproval(by)) return "";
+      by = APP_APPROVER;
+    }
     if (!this.store.getSignup(id)) return `No sign-up ${id}.`;
     this.expireOld();
     const cur = this.store.getSignup(id)!;
@@ -178,7 +183,11 @@ export class SignupGate {
    * checked, and this checks again). Returns what happened, or why nothing did.
    */
   async approve(id: string, approver: string): Promise<string> {
-    if (!isAllowed(approver)) throw new SignupError("Refused: only Paul's own chat account can approve.");
+    if (!isAllowed(approver)) {
+      // Not a chat account: then only the signed-in app's own single-use grant (src/app-approver.ts).
+      if (!spendAppApproval(approver)) throw new SignupError("Refused: only Paul's own chat account can approve.");
+      approver = APP_APPROVER;
+    }
     if (!this.store.getSignup(id)) return `No sign-up ${id}.`;
     this.expireOld();
     const cur = this.store.getSignup(id)!;
