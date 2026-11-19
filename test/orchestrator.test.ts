@@ -337,6 +337,31 @@ test("a review-only engineer job is flagged in the reply, and no maintainer foll
   assert.ok(!store.listJobs(50).some((j) => j.kind === "maintain" && j.brief.includes("change the sign-in copy")), "no maintainer follows a review-only engineer");
 });
 
+test("the chief speaks in its own voice inside Paul's limits, and character never changes what is true", async () => {
+  const { CHIEF_VOICE, PAUL_STYLE, AGENT_NAMES } = await import("../src/messages.js");
+  const { workerSpec, JOB_KINDS } = await import("../src/agents.js");
+  await post(inbound("447700900123", "how are you getting on"));
+  await waitFor(() => calls.some((c) => c.prompt.startsWith("how are you getting on")));
+  const chief = calls.find((c) => c.prompt.startsWith("how are you getting on"))!.systemPrompt;
+  // Both are in its prompt: the limits everyone writes to, and the voice that is the chief's alone.
+  assert.ok(chief.includes(PAUL_STYLE) && chief.includes(CHIEF_VOICE));
+  assert.match(chief, /Those limits hold for your own replies too: never more than four sentences, direct and honest, no flattery/);
+  for (const kind of JOB_KINDS) assert.ok(!workerSpec(kind, "product").prompt.includes(CHIEF_VOICE), `${kind} reports plainly: the voice is not a worker's`);
+  // Conversational, not a status page: contractions, the answer first, short when the question is.
+  assert.match(CHIEF_VOICE, /sound like someone Paul works with and likes, not like a status page/);
+  assert.match(CHIEF_VOICE, /a quick question gets one line, and four sentences is a ceiling, not a target/);
+  assert.match(CHIEF_VOICE, /at most once a message and never forced/);
+  // The part that must not move: nothing friendly is worth a softened failure or an invented fact.
+  assert.match(CHIEF_VOICE, /Character never bends the facts: bad news, a failed job, a cost, a limit you hit or anything waiting on his decision comes first and plainly, with no flattery, no softening and nothing made up to sound friendly\. If you do not know, say so\.$/);
+  // Paul's own rules for anything written to him hold for the rule itself.
+  assert.ok(!CHIEF_VOICE.includes("\u2014") && !/\n\s*[-*]\s/.test(CHIEF_VOICE));
+  // It calls the workers what the app calls them.
+  const script = fs.readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
+  const shown = JSON.parse(/const NAMES = (\{[^}]+\});/.exec(script)![1]!.replace(/(\w+):/g, '"$1":')) as Record<string, string>;
+  assert.deepEqual({ chief: /const CHIEF = "([^"]+)";/.exec(script)![1], ...shown }, AGENT_NAMES);
+  for (const name of Object.values(AGENT_NAMES)) assert.ok(CHIEF_VOICE.includes(name), `${name} is named in the voice`);
+});
+
 test("the chief knows the design worker and can start the design loop with start_job", async () => {
   await post(inbound("447700900123", "design loop: make the site something I can show customers"));
   await waitFor(() => messenger.sent.some((m) => /Design loop Customer-ready site \([a-f0-9]{6}\) started: Customer-ready site · design · [a-f0-9]{6}\./.test(m.text)));
