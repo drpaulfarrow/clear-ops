@@ -16,6 +16,8 @@ const DONE_SHOWN_BESIDE = 5;
 const CHAT_BUSY_EVERY_MS = 1500;
 const CHAT_QUIET_EVERY_MS = 5000;
 const TEXT_MAX = 4000;
+const FILES_MAX = 5;
+const FILES_BYTES = 18 * 1024 * 1024;
 
 const root = document.getElementById("app");
 
@@ -45,6 +47,9 @@ const ICONS = {
   out: ["M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l4-4-4-4M14 12H4"],
   link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
   send: ["M5 12h14M13 6l6 6-6 6"],
+  clip: ["M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8L10 17a1.8 1.8 0 0 1-2.6-2.6l7.2-7.2"],
+  mic: ["M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z", "M5 11a7 7 0 0 0 14 0M12 18v3"],
+  stop: ["M7 7h10v10H7z"],
 };
 function icon(name, size = 16, label) {
   const svg = document.createElementNS(SVG_NS, "svg");
@@ -782,6 +787,99 @@ function spendPage() {
   return h("main", { class: "page" }, back, noticeBar(), today, went, caps, models);
 }
 
+/* ---------- Files and voice notes that go with a message ---------- */
+
+const fileSize = (n) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+/** A file's bytes as base64, which is how the app's one message route takes them. */
+const asBase64 = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(",") + 1));
+    reader.onerror = () => reject(new Error(`${file.name} could not be read.`));
+    reader.readAsDataURL(file);
+  });
+
+/**
+ * What one message box needs to carry files: a paperclip, a microphone where the browser can record,
+ * and a tray of what is waiting to go. Files are only held here until the message is sent; the service
+ * saves them the way it saves a file sent in Discord.
+ */
+function attachments(textarea) {
+  const a = { files: [], note: undefined };
+  const tray = h("div", { class: "files", role: "status" });
+  const picker = h("input", { type: "file", multiple: true, class: "sr", tabindex: "-1", "aria-hidden": "true" });
+  const draw = () => {
+    tray.replaceChildren(
+      ...a.files.map((f, i) => h("span", { class: "file-chip" }, h("span", { class: "file-chip-name" }, f.name), h("span", { class: "muted num" }, fileSize(f.size)), h("button", { type: "button", class: "file-chip-x", "aria-label": `Remove ${f.name}`, onclick: () => { a.files.splice(i, 1); a.note = undefined; draw(); } }, icon("cross", 12)))),
+      ...(a.note ? [h("span", { class: "file-note" }, a.note)] : []),
+    );
+    tray.hidden = !a.files.length && !a.note;
+  };
+  a.add = (list) => {
+    a.note = undefined;
+    for (const f of list) {
+      if (a.files.length >= FILES_MAX) { a.note = `At most ${FILES_MAX} files go with one message.`; break; }
+      if (!f.size) { a.note = `${f.name} is empty.`; continue; }
+      if (a.files.reduce((n, x) => n + x.size, 0) + f.size > FILES_BYTES) { a.note = `Together the files are too large. The most one message can carry is ${fileSize(FILES_BYTES)}.`; continue; }
+      a.files.push(f);
+    }
+    draw();
+  };
+  a.clear = () => { a.files = []; a.note = undefined; draw(); };
+  a.payload = () => Promise.all(a.files.map(async (f) => ({ name: f.name, type: f.type || undefined, data: await asBase64(f) })));
+  picker.addEventListener("change", () => { a.add([...picker.files]); picker.value = ""; });
+  // A screenshot pasted into the box goes with the message.
+  textarea.addEventListener("paste", (e) => {
+    const pasted = [...(e.clipboardData?.files ?? [])];
+    if (!pasted.length) return;
+    e.preventDefault();
+    a.add(pasted.map((f, i) => (f.name && f.name !== "image.png" ? f : new File([f], `pasted-${clockFmt.format(new Date()).replace(":", "")}${pasted.length > 1 ? `-${i + 1}` : ""}.${(f.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: f.type }))));
+  });
+  const attach = h("button", { class: "tool", type: "button", "aria-label": "Attach files", onclick: () => picker.click() }, icon("clip", 18));
+  // A voice note: tap to start, tap to stop. It waits in the tray like any file and goes when the message is sent.
+  let recorder;
+  const canRecord = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+  const mic = h("button", { class: "tool", type: "button", "aria-label": "Record a voice note", "aria-pressed": "false" }, icon("mic", 18));
+  mic.addEventListener("click", async () => {
+    if (recorder) return void recorder.stop();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      a.note = "The microphone could not be used. Check the browser's permission for this site.";
+      return void draw();
+    }
+    const parts = [];
+    recorder = new MediaRecorder(stream);
+    recorder.addEventListener("dataavailable", (e) => e.data.size && parts.push(e.data));
+    recorder.addEventListener("stop", () => {
+      for (const track of stream.getTracks()) track.stop();
+      const type = (recorder.mimeType || "audio/webm").split(";")[0];
+      recorder = undefined;
+      mic.setAttribute("aria-pressed", "false");
+      mic.classList.remove("on");
+      mic.replaceChildren(icon("mic", 18));
+      mic.setAttribute("aria-label", "Record a voice note");
+      const blob = new Blob(parts, { type });
+      a.add([new File([blob], `voice-note-${clockFmt.format(new Date()).replace(":", "")}.${type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm"}`, { type })]);
+    });
+    recorder.start();
+    mic.setAttribute("aria-pressed", "true");
+    mic.classList.add("on");
+    mic.replaceChildren(icon("stop", 18));
+    mic.setAttribute("aria-label", "Stop recording");
+  });
+  a.tray = tray;
+  a.tools = [picker, attach, canRecord ? mic : null];
+  draw();
+  return a;
+}
+
+/** The files a message of Paul's went with, under his words. */
+const sentFiles = (m) => (m.files?.length ? h("div", { class: "sent-files" }, m.files.map((n) => h("span", { class: "file-chip" }, icon("clip", 12), h("span", { class: "file-chip-name" }, n)))) : null);
+const mineBubble = (m) => h("div", { class: "mine" }, h("div", { class: "bubble" }, m.text || null, sentFiles(m)));
+
 /* ---------- Threads: talking to the chief about one job or one pull request ---------- */
 
 /** The thread the page being looked at belongs to: "job:<id>" or "pull:<alias>:<number>". */
@@ -791,16 +889,19 @@ function threadKeyOf(r) {
 
 const threadInput = h("textarea", { id: "ask-thread", rows: "1", maxlength: String(TEXT_MAX), autocomplete: "off" });
 const threadSend = h("button", { class: "send", type: "submit", "aria-label": "Send" }, icon("send", 18));
+const threadFiles = attachments(threadInput);
 const threadLog = h("div", { class: "thread-log", role: "log", tabindex: "0" });
 const threadEl = h(
   "section",
   { class: "pane thread", "aria-label": `Talk to ${CHIEF} about this` },
   h("div", { class: "pane-head" }, h("h2", {}, `Talk to ${CHIEF} about this`)),
   threadLog,
+  threadFiles.tray,
   h(
     "form",
     { class: "composer", onsubmit: (e) => { e.preventDefault(); void sendThread(threadInput.value); } },
     h("label", { class: "sr", for: "ask-thread" }, `Message ${CHIEF} about this`),
+    threadFiles.tools,
     threadInput,
     threadSend,
   ),
@@ -820,7 +921,7 @@ function threadItems() {
   const out = [];
   for (const item of stream) {
     if (item.job) out.push(h("div", { class: "chat-card" }, jobCard(item.job, now)));
-    else if (item.message.from === "paul") out.push(h("div", { class: "mine" }, h("div", { class: "bubble" }, item.message.text)));
+    else if (item.message.from === "paul") out.push(mineBubble(item.message));
     else out.push(h("div", { class: "theirs" }, avatar("chief"), h("div", { class: "theirs-body" }, h("div", { class: "theirs-who" }, h("b", {}, CHIEF), h("span", { class: "muted num" }, clock(item.message.at))), rendered(item.message.html ?? "", "report said"))));
   }
   if (!stream.length) out.push(h("p", { class: "muted" }, `Nothing said here yet. What you write goes to ${CHIEF} with this attached, so there is no need to say what it is about.`));
@@ -843,6 +944,7 @@ async function refreshThread() {
   if (state.thread?.key !== key) {
     state.thread = { key, view: undefined, raw: "", problem: undefined, sending: false };
     threadInput.value = "";
+    threadFiles.clear();
   }
   const t = state.thread;
   try {
@@ -867,7 +969,10 @@ async function refreshThread() {
 /** A message into this page's thread. The service attaches the topic; the words are only Paul's. */
 async function sendThread(raw, key = threadKeyOf(route())) {
   const text = raw.trim();
-  if (!text || !key) return false;
+  // Files in the tray go with what Paul typed in the box, never with a message a button wrote for him.
+  const typed = raw === threadInput.value && key === threadKeyOf(route());
+  const files = typed ? threadFiles.files.length : 0;
+  if ((!text && !files) || !key) return false;
   if (state.thread?.key !== key) state.thread = { key, view: undefined, raw: "", problem: undefined, sending: false };
   const t = state.thread;
   if (t.sending) return false;
@@ -875,8 +980,11 @@ async function sendThread(raw, key = threadKeyOf(route())) {
   threadSend.disabled = true;
   let ok = false;
   try {
-    await postMessage({ text, thread: key });
-    if (raw === threadInput.value) threadInput.value = "";
+    await postMessage({ text, thread: key, ...(files ? { files: await threadFiles.payload() } : {}) });
+    if (typed) {
+      threadInput.value = "";
+      threadFiles.clear();
+    }
     t.problem = undefined;
     ok = true;
   } catch (err) {
@@ -1093,7 +1201,7 @@ function chatItems() {
       out.push(h("div", { class: "chat-card" }, jobCard(item.job, now)));
       lastFrom = "job";
     } else if (item.message.from === "paul") {
-      out.push(h("div", { class: "mine" }, h("div", { class: "bubble" }, item.message.text)));
+      out.push(mineBubble(item.message));
       lastFrom = "paul";
     } else {
       const first = lastFrom !== "clearops";
@@ -1128,6 +1236,7 @@ function chatItems() {
 
 const input = h("textarea", { id: "ask", rows: "1", maxlength: String(TEXT_MAX), placeholder: `Ask ${CHIEF}, or type / for a command`, autocomplete: "off" });
 const sendButton = h("button", { class: "send", type: "submit", "aria-label": "Send" }, icon("send", 18));
+const mainFiles = attachments(input);
 const logEl = h("div", { class: "chat-log", role: "log", "aria-label": `Conversation with ${CHIEF}`, tabindex: "0" });
 const boardEl = h("aside", { class: "beside", "aria-label": "Jobs board" });
 const fullBoardEl = h("div", { class: "full-board" });
@@ -1140,10 +1249,12 @@ const chatEl = h(
     "div",
     { class: "composer-wrap" },
     h("div", { class: "chips" }, chips),
+    mainFiles.tray,
     h(
       "form",
       { class: "composer", onsubmit: (e) => { e.preventDefault(); void send(input.value); } },
       h("label", { class: "sr", for: "ask" }, `Message ${CHIEF}`),
+      mainFiles.tools,
       input,
       sendButton,
     ),
@@ -1173,18 +1284,25 @@ async function postMessage(body) {
     location.assign(SIGN_IN);
     throw new Error("Signed out.");
   }
-  if (!res.ok) throw new Error(res.status === 413 ? "That message is too long." : "The message was not accepted.");
+  if (!res.ok) {
+    const said = await res.json().catch(() => ({}));
+    throw new Error(res.status === 413 ? "That is too large to send." : typeof said.error === "string" && said.error.length > 12 ? said.error : "The message was not accepted.");
+  }
 }
 
 async function send(raw) {
   const text = raw.trim();
-  if (!text || state.sending) return;
+  // Files in the tray go with what Paul typed in the box, never with a chip or a button's message.
+  const typed = raw === input.value;
+  const files = typed ? mainFiles.files.length : 0;
+  if ((!text && !files) || state.sending) return;
   state.sending = true;
   sendButton.disabled = true;
   try {
-    await postMessage({ text });
-    if (raw === input.value) {
+    await postMessage({ text, ...(files ? { files: await mainFiles.payload() } : {}) });
+    if (typed) {
       input.value = "";
+      mainFiles.clear();
       grow();
     }
     state.chatProblem = undefined;

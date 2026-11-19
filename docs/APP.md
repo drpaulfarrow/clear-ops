@@ -110,9 +110,25 @@ Two things to know. The eval (`npm run eval`) is meant to follow a change of mod
 ### What this changes in the rules
 Caps and models were deploy-time only. `CLAUDE.md` gains a clause and there is an invariant test: one module writes these settings, one route calls it, and it can assign exactly three caps and four roles' models.
 
+## What slice 7 adds: files and voice notes with a message (`webFiles` in `src/web-chat.ts`)
+
+Both message boxes (the main chat and a thread) have a paperclip and, where the browser can record, a microphone. A screenshot can also be pasted straight into the box. What is chosen waits in a tray above the box and goes with the next message Paul sends, or on its own. A voice note is recorded in the browser, waits in the tray like any file, and is transcribed by the service as a voice note from any channel is.
+
+- **Saved like any channel's upload.** The orchestrator's own upload path (`src/uploads.ts`): the private uploads directory, sanitised names, owner-only files, the size cap, zip and PDF handling, never executed. The chief is told what arrived in the same words, and sees a picture inline.
+- **The bytes come in the message.** The app sends each file as base64 in the one JSON message route, so the same-site check that guards every action in the app guards files too. Nothing is fetched from anywhere.
+- **All or nothing.** At most 5 files and 18 MB together. If any file is not what the app sends, the message is refused whole.
+- **The larger body is read only for a signed-in browser.** Anyone else meets the app-wide 100 KB limit before a large body is read.
+- **A caption cannot approve.** Approval words are refused before a file is saved, as in the main chat.
+- **The transcript keeps the names, never the contents.**
+
+Not here yet: thumbnails of what was sent, pictures in the chief's replies, and the slash-command menu.
+
+### What this changes in the rules
+The app's sender used to pass the orchestrator only with no files. It now carries files its own route received from Paul's signed-in browser. One line of an existing test said the opposite and is changed; the invariant test pins where the bytes come from and who gets the larger body.
+
 ## Still to come
 
-What it does not do yet: a breakdown of spend by model and a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), voice, uploads, push notifications, search. Each is a later slice.
+What it does not do yet: a breakdown of spend by model and a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), live voice with Cleo, pictures in replies, the slash-command menu, push notifications, search. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 
