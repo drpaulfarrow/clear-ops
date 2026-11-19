@@ -1209,10 +1209,19 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   // approval word, is never kept when it is a one-time code, and reaches the orchestrator as the app's
   // own sender with the flag no channel listener sets.
   const post = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/chat`"));
-  // Since 19 Nov 2026 the conversation is the main one or the thread of a job or a pull request, and it
-  // is only ever one `appThread` made: the main address, or a thread address built by `webThread` for a
-  // job the store holds or a repository ClearOps manages. Nothing in the request is used as an address.
-  assert.match(post, /const where = appThread\(\(req\.body as \{ thread\?: unknown \} \| undefined\)\?\.thread\);\s*if \(!where\) return void res\.status\(404\)[^\n]*\n\s*const refused = webRefusal\(text\);\s*chat\.inbound\(parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text, where, files\.map\(\(f\) => f\.name\)\);\s*if \(refused\) void chat\.send\(where, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true, \.\.\.\(files\.length \? \{ attachments: files \} : \{\}\) \}\);/);
+  // Since 19 Nov 2026 the conversation is the main one, the thread of a job or a pull request, or (on
+  // Paul's ask the same day) a chat of his own, and its address is only ever one the service made:
+  // `appThread`'s (the main address, a thread address built by `webThread` for a job the store holds or
+  // a repository ClearOps manages, or `webOwnChat` for a chat the transcript still keeps), or
+  // `webOwnChat` on the id `chat.open` has just made for a new chat. Nothing in the request is used as
+  // an address: it names a chat only by an id the transcript already keeps, or asks for a new one with
+  // one fixed word. What is kept of the message, never a one-time code, is what a new chat is named from.
+  assert.match(post, /const asked = \(req\.body as \{ thread\?: unknown \} \| undefined\)\?\.thread;\s*const kept = parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text;\s*const opened = asked === WEB_NEW_CHAT \? chat\.open\(kept \|\| files\[0\]!\.name\) : undefined;\s*const where = opened \? webOwnChat\(opened\.id\) : appThread\(asked\);\s*if \(!where\) return void res\.status\(404\)[^\n]*\n\s*const refused = webRefusal\(text\);\s*chat\.inbound\(kept, where, files\.map\(\(f\) => f\.name\)\);\s*if \(refused\) void chat\.send\(where, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true, \.\.\.\(files\.length \? \{ attachments: files \} : \{\}\) \}\);/);
+  // A chat is opened in one place only: that route, after the same-site check and after the message has
+  // been read and checked. Reading a conversation never opens one.
+  assert.equal((index.match(/chat\.open\(/g) ?? []).length, 1);
+  assert.ok(post.indexOf("chat.open(") > post.indexOf("if (!ownScript(req)) return void res.status(403)"));
+  assert.ok(post.indexOf("chat.open(") > post.indexOf("if (text.length > WEB_TEXT_MAX) return void res.status(413)"));
   // Files with a message (19 Nov 2026) are bytes that route itself read from his signed-in browser and
   // checked whole (`webFiles`); they are handed on as attachments and saved by the same code as any
   // channel's upload. The larger body that takes is read only for a browser already signed in.
@@ -1228,10 +1237,15 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
     "undefined",
     "deps.store.getJob(job[1]!) ? webThread({ job: job[1]! }) : undefined",
     "repoRegistry.list().some((r) => r.alias === pull[1] && r.slug) ? webThread({ pull: { repo: pull[1]!, number: Number(pull[2]) } }) : undefined",
+    "chat.chat(own[1]!) ? webOwnChat(own[1]!) : undefined",
     "undefined",
   ]);
   const webChatSrc = src("web-chat.ts");
-  assert.match(webChatSrc, /const WEB_THREAD = \/\^web:\(\?:job:\(\[A-Za-z0-9_-\]\{1,64\}\)\|pull:\(\[A-Za-z0-9\._-\]\{1,64\}\):\(\[1-9\]\\d\{0,8\}\)\)\$\/;/);
+  assert.match(webChatSrc, /const WEB_THREAD = \/\^web:\(\?:job:\(\[A-Za-z0-9_-\]\{1,64\}\)\|pull:\(\[A-Za-z0-9\._-\]\{1,64\}\):\(\[1-9\]\\d\{0,8\}\)\|chat:\(\[a-f0-9\]\{8\}\)\)\$\/;/);
+  // A chat's id is made by the service, at random, when it is opened, and a chat is never about a job or
+  // a pull request: no job's context is attached to it by its address.
+  assert.match(webChatSrc, /let id = randomBytes\(4\)\.toString\("hex"\);/);
+  assert.match(webChatSrc, /if \(!m \|\| m\[4\]\) return undefined;/);
   assert.match(webChatSrc, /export function isWebConversation\(address: string\): boolean \{\s*return address === WEB_CONVERSATION \|\| WEB_THREAD\.test\(address\);\s*\}/);
   assert.equal((index.match(/web: true/g) ?? []).length, 1, "the app's route is the only caller that says a message is from the app");
   for (const listener of ["discord.ts", "telegram.ts", "whatsapp.ts", "voice-bridge.ts", "instinct-chat.ts", "instinct-bridge.ts", "device.ts"]) assert.doesNotMatch(src(listener), /\bweb: true\b|WEB_SENDER/, `${listener} cannot speak as the app`);

@@ -655,13 +655,15 @@ export interface AppChat {
   typing: boolean;
   /** The jobs started from this conversation, newest last, so the app can show each as a live card. */
   jobs: AppJob[];
+  /** Paul's own chats beside the main one, the one spoken in most recently first. */
+  chats: Array<{ id: string; title: string; count: number; lastAt: string }>;
 }
 
 /** How many of the conversation's jobs ride along with the chat. */
 export const APP_CHAT_JOBS = 40;
 
 /** One of the app's conversations with the chief (the main one, or a thread), and the jobs it started. */
-export function appChat(source: AppSource, chat: Pick<WebChat, "view">, conversation: string = WEB_CONVERSATION): AppChat {
+export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial<Pick<WebChat, "ownChats">>, conversation: string = WEB_CONVERSATION): AppChat {
   const now = source.now ?? Date.now();
   const view = chat.view(conversation);
   const ev = evidenceOf(source.store);
@@ -677,6 +679,8 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view">, conversa
     ),
     typing: view.typing,
     jobs: jobs.map((j) => toAppJob(source, j, ev)),
+    // Paul's own chats, for the list he switches between: the same whichever conversation was asked for.
+    chats: (chat.ownChats?.() ?? []).map((c) => ({ id: c.id, title: c.title, count: c.count, lastAt: c.lastAt })),
   };
 }
 

@@ -50,6 +50,8 @@ const ICONS = {
   clip: ["M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8L10 17a1.8 1.8 0 0 1-2.6-2.6l7.2-7.2"],
   mic: ["M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z", "M5 11a7 7 0 0 0 14 0M12 18v3"],
   stop: ["M7 7h10v10H7z"],
+  plus: ["M12 5v14M5 12h14"],
+  down: ["m6 9 6 6 6-6"],
 };
 function icon(name, size = 16, label) {
   const svg = document.createElementNS(SVG_NS, "svg");
@@ -125,6 +127,11 @@ const state = {
   chat: undefined,
   chatRaw: "",
   chatProblem: undefined,
+  /** Which conversation the home page shows: "" for the main one, a chat's id, or "new" for one not yet begun. */
+  own: /^[a-f0-9]{8}$/.test(store("clearops.chat") ?? "") ? store("clearops.chat") : "",
+  /** Paul's own chats as last heard, for the list. */
+  chats: [],
+  chatsOpen: false,
   sending: false,
   /** What the last button press did, said once at the top of the page. */
   notice: undefined,
@@ -1359,10 +1366,11 @@ function chatItems() {
       lastFrom = "clearops";
     }
   }
-  if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
+  if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, state.own ? `A chat of its own. ${CHIEF} starts fresh here: what you said in your other chats is not carried over.` : `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
   // Whatever is waiting for his decision sits at the foot of the conversation, with the same buttons as
   // on the board, wherever it was first put to him.
-  const waiting = state.board?.waiting ?? [];
+  // In the main conversation only: a chat of his own stays on its subject, and the header still says something waits.
+  const waiting = state.own ? [] : state.board?.waiting ?? [];
   if (waiting.length) {
     out.push(h("div", { class: "chat-day wait" }, waiting.length === 1 ? "Waiting on you" : `${waiting.length} things waiting on you`));
     for (const item of waiting) out.push(h("div", { class: "chat-card" }, waitingCard(item, now)));
@@ -1375,6 +1383,60 @@ function chatItems() {
   if (live || chat.typing || unanswered) out.push(h("div", { class: "working", role: "status" }, h("span", { class: "dot live" }), h("span", {}, live ? live.text : `${CHIEF} is working on it`)));
   if (state.chatProblem) out.push(h("div", { class: "banner" }, h("b", {}, "Not sent or not up to date. "), state.chatProblem));
   return out;
+}
+
+/* ---------- Chats: the main conversation, and others of Paul's own beside it ---------- */
+
+const chatBarEl = h("div", { class: "chat-bar" });
+const ownTitle = () => (state.own === "new" ? "New chat" : state.own ? state.chats.find((c) => c.id === state.own)?.title ?? "Chat" : "Main");
+
+/** Shows another conversation. Each is its own with the chief: what is said in one is not carried into another. */
+function showChat(own) {
+  state.chatsOpen = false;
+  if (own !== state.own) {
+    state.own = own;
+    store("clearops.chat", own === "new" ? "" : own);
+    state.chat = own === "new" ? { generatedAt: new Date().toISOString(), messages: [], jobs: [], typing: false } : undefined;
+    state.chatRaw = "";
+    state.chatProblem = undefined;
+    stickNext = true;
+  }
+  drawChat();
+  if (own !== "new") void chatTick();
+  if (!narrow.matches) input.focus();
+}
+
+function drawChatBar() {
+  const now = Date.now();
+  const row = (own, title, note) =>
+    h(
+      "button",
+      { class: "chat-row", type: "button", role: "option", "aria-selected": own === state.own ? "true" : "false", onclick: () => showChat(own) },
+      h("span", { class: "chat-row-title" }, title),
+      note ? h("span", { class: "muted num" }, note) : null,
+    );
+  chatBarEl.replaceChildren(
+    h(
+      "div",
+      { class: "chat-bar-top" },
+      h(
+        "button",
+        { class: "chat-pick", type: "button", "aria-haspopup": "listbox", "aria-expanded": state.chatsOpen ? "true" : "false", "aria-label": `Chat: ${ownTitle()}. Choose another`, onclick: () => { state.chatsOpen = !state.chatsOpen; drawChatBar(); } },
+        h("span", { class: "chat-pick-title" }, ownTitle()),
+        icon("down", 16),
+      ),
+      h("button", { class: "btn quiet chat-new", type: "button", disabled: state.own === "new", onclick: () => showChat("new") }, icon("plus", 16), h("span", {}, "New chat")),
+    ),
+    state.chatsOpen
+      ? h(
+          "div",
+          { class: "chat-list", role: "listbox", "aria-label": "Chats" },
+          row("", "Main", "where jobs and decisions are reported"),
+          state.chats.map((c) => row(c.id, c.title, `${c.count} ${c.count === 1 ? "message" : "messages"} · ${ago(c.lastAt, now)}`)),
+          state.chats.length ? null : h("p", { class: "muted chat-list-note" }, `No other chats yet. New chat starts one, and ${CHIEF} keeps each apart.`),
+        )
+      : null,
+  );
 }
 
 const input = h("textarea", { id: "ask", rows: "1", maxlength: String(TEXT_MAX), autocomplete: "off" });
@@ -1393,6 +1455,7 @@ const chips = ["What's waiting on me?", "/jobs", "/spend"].map((text) => h("butt
 const chatEl = h(
   "section",
   { class: "chat", "aria-label": "Chat" },
+  chatBarEl,
   logEl,
   h(
     "div",
@@ -1438,6 +1501,7 @@ async function postMessage(body) {
     const said = await res.json().catch(() => ({}));
     throw new Error(res.status === 413 ? "That is too large to send." : typeof said.error === "string" && said.error.length > 12 ? said.error : "The message was not accepted.");
   }
+  return res.json().catch(() => ({}));
 }
 
 async function send(raw) {
@@ -1449,7 +1513,16 @@ async function send(raw) {
   state.sending = true;
   sendButton.disabled = true;
   try {
-    await postMessage({ text, ...(files ? { files: await mainFiles.payload() } : {}) });
+    const own = state.own;
+    const said = await postMessage({ text, ...(own ? { thread: own === "new" ? "chat:new" : `chat:${own}` } : {}), ...(files ? { files: await mainFiles.payload() } : {}) });
+    // A new chat exists once its first message is in: the service names it and says which it is.
+    const opened = own === "new" && /^chat:[a-f0-9]{8}$/.test(said.thread ?? "") ? said.thread.slice(5) : undefined;
+    if (opened && state.own === "new") {
+      state.own = opened;
+      store("clearops.chat", opened);
+      state.chat = undefined;
+      state.chatRaw = "";
+    }
     if (typed) {
       input.value = "";
       mainFiles.clear();
@@ -1469,6 +1542,7 @@ async function send(raw) {
 
 let stickNext = true;
 function drawChat() {
+  drawChatBar();
   const stick = stickNext || logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120;
   logEl.replaceChildren(...chatItems());
   if (stick) logEl.scrollTop = logEl.scrollHeight;
@@ -1607,12 +1681,25 @@ async function refreshJob(id) {
 }
 
 async function refreshChat() {
+  const own = state.own;
+  // A chat not yet begun has nothing to read: it exists once its first message is sent.
+  if (own === "new") return false;
   try {
-    const text = await getJson("/chat");
+    const text = await getJson(own ? `/chat?thread=${encodeURIComponent(`chat:${own}`)}` : "/chat");
+    if (state.own !== own) return false;
+    // A chat that is no longer kept: back to the main conversation.
+    if (text === undefined) {
+      state.own = "";
+      store("clearops.chat", "");
+      state.chat = undefined;
+      state.chatRaw = "";
+      return refreshChat();
+    }
     const changed = text !== state.chatRaw;
     if (changed) {
       state.chatRaw = text;
       state.chat = JSON.parse(text);
+      state.chats = state.chat.chats ?? [];
     }
     return changed;
   } catch (err) {
