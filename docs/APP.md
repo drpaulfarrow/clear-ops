@@ -58,7 +58,7 @@ Three invariant tests said nothing but the orchestrator and a gate itself may ap
 
 ## What slice 4 adds: reviewing and merging a pull request (`src/app-pulls.ts`)
 
-A job with a pull request has a Pull request panel on its page. Review it here asks GitHub for it as it is now: title, branch, author, description, every check on its head commit, and each changed file with its changes, opened one file at a time. `docs/app/pull.png` shows it with a made-up pull request. Merge is one tap, and it is the only place the service itself merges anything. No model is involved.
+A job with a pull request has a Pull request panel on its page, above the trace. Review it here asks GitHub for it as it is now: title, branch, author, description, every check on its head commit, and each changed file with its changes, opened one file at a time. `docs/app/pull.png` shows it with a made-up pull request. Merge is one tap, and it is the only place the service itself merges anything. No model is involved.
 
 - **Only the job's own pull request, in the job's own repository.** A job's `pr` is often read from its report, which is a model's words. If it is not in the managed repository the job works on, it is refused before GitHub is asked anything.
 - **The commit Paul was shown.** The tap carries the head commit of the view. The service looks again first and refuses if new commits were pushed, and GitHub is given the same commit so it refuses too.
