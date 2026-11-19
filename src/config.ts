@@ -284,6 +284,12 @@ export const config = {
   /** Largest single attachment accepted, in megabytes. Telegram bots cannot fetch more than 20. */
   uploadMaxMb: Number(process.env.UPLOAD_MAX_MB ?? 20),
   /**
+   * The Stable Audio API key's file, read only inside a generate_beat request (src/beats.ts): the
+   * default is the key file on the data volume, STABILITY_KEY_FILE moves it. It is never logged,
+   * echoed or held anywhere past the request that carries it as a header.
+   */
+  stabilityKeyFile: path.resolve(process.env.STABILITY_KEY_FILE ?? path.join(process.env.DATA_DIR ?? "./data", "stability-api.key")),
+  /**
    * Where this service is reachable from a browser, for the Google consent redirect. Fly sets
    * FLY_APP_NAME, so on Fly this is https://<app>.fly.dev unless PUBLIC_URL overrides it.
    */
