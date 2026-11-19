@@ -330,9 +330,20 @@ export class Orchestrator {
         if (!(err instanceof UploadError)) console.error("upload failed", err instanceof Error ? err.message : err);
       }
     }
-    await this.messenger.send(from, receiptText(saved, failed));
+    // In the app a voice note is shown as what was heard, on Paul's own message (`heard` in
+    // src/web-chat.ts), so there it gets no file receipt: only if it could not be transcribed, when it
+    // is a file like any other after all. Every other channel's receipt is what it always was.
+    const inApp = isWebConversation(from);
+    const spokenFile = (u: SavedUpload) => inApp && isAudio(u.originalName, u.mimeType);
+    const receipted = saved.filter((u) => !spokenFile(u));
+    if (receipted.length || failed.length) await this.messenger.send(from, receiptText(receipted, failed));
     if (!saved.length) return;
     const voice = await this.transcribeVoiceNotes(saved);
+    if (inApp && saved.some(spokenFile)) {
+      const unheard = saved.filter((u) => spokenFile(u) && !voice.some((v) => v.path === u.path && v.text));
+      if (unheard.length) await this.messenger.send(from, receiptText(unheard, []));
+      await this.messenger.heard?.(from, messageId, voice.map((v) => v.text).filter((t): t is string => !!t)).catch(() => undefined);
+    }
     const images = inlineImages(saved);
     const note = describeUploads(saved, failed, images.length, voice);
     // A voice note carries no caption, so the transcript is Paul's message for this turn: the chief

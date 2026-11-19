@@ -643,6 +643,8 @@ export interface AppChatMessage {
   live?: true;
   /** The names of the files Paul sent with it. */
   files?: string[];
+  /** What was heard in the voice note(s) he sent with it. Empty: they could not be transcribed. Absent: none, or not transcribed yet. */
+  heard?: string;
   /** A picture the service sent with it: the name the app asks its picture route for, and the caption as plain words for its description. */
   picture?: string;
   caption?: string;
@@ -675,7 +677,7 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
   return {
     generatedAt: new Date(now).toISOString(),
     messages: view.messages.map((m) =>
-      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}) } : { id: m.id, at: m.at, from: m.from, html: renderMarkdown(m.text), ...(m.picture ? { picture: m.picture, caption: m.text } : {}) },
+      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}), ...(m.heard !== undefined ? { heard: m.heard } : {}) } : { id: m.id, at: m.at, from: m.from, html: renderMarkdown(m.text), ...(m.picture ? { picture: m.picture, caption: m.text } : {}) },
     ),
     typing: view.typing,
     jobs: jobs.map((j) => toAppJob(source, j, ev)),

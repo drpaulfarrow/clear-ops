@@ -346,3 +346,11 @@ a.spend{text-decoration:none;color:inherit}
 .chat-row .muted{font-size:12px}
 .chat-list-note{padding:8px 12px;font-size:13px}
 @media (max-width:640px){.chat-bar{padding:8px 12px 0}}
+
+/* ---------- A voice note, shown as what was heard ---------- */
+.voice{display:flex;flex-direction:column;gap:4px}
+.bubble>.voice:not(:first-child){margin-top:6px}
+.voice-tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted)}
+.voice-said{white-space:pre-wrap}
+.voice-wait{font-size:13px;color:var(--muted)}
+.file-chip>svg{flex:none;color:var(--muted)}

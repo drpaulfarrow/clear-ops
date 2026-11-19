@@ -927,9 +927,10 @@ export function buildApp(given: AppDeps) {
     const where = opened ? webOwnChat(opened.id) : appThread(asked);
     if (!where) return void res.status(404).json({ error: "There is no such thread." });
     const refused = webRefusal(text);
-    chat.inbound(kept, where, files.map((f) => f.name));
+    const mine = chat.inbound(kept, where, files.map((f) => f.name));
     if (refused) void chat.send(where, refused);
-    else void orchestrator.handle(WEB_SENDER, text, { replyTo: where, web: true, ...(files.length ? { attachments: files } : {}) });
+    // With files, the message's own number goes too, so what is heard in a voice note is shown on that message.
+    else void orchestrator.handle(WEB_SENDER, text, { replyTo: where, web: true, ...(files.length ? { attachments: files, messageId: mine.id } : {}) });
     res.status(202).json({ ok: true, ...(opened ? { thread: `chat:${opened.id}` } : {}) });
   });
   /**
