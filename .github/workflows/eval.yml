@@ -1,4 +1,5 @@
-# The chief's eval suite (scripts/eval.ts): ordinary requests sent to the real chief on the models
+# The chief's eval suite (scripts/eval-chief.ts, `npm run eval:chief`; `npm run eval` is the
+# thirty-task efficiency baseline, which needs no keys): ordinary requests sent to the real chief on the models
 # fly.toml sets, with the workers stubbed, so it costs pennies. It needs live keys (OpenRouter, Brave,
 # Exa), so it never runs a branch's own code: branch authors here are agents, and a pull request
 # trigger would hand those keys to unreviewed code that could edit this very script. It runs on main
@@ -25,7 +26,7 @@ on:
       - "src/retrieval.ts"
       - "src/messages.ts"
       - "fly.toml"
-      - "scripts/eval.ts"
+      - "scripts/eval-chief.ts"
 jobs:
   chief:
     if: github.ref == 'refs/heads/main'
@@ -55,4 +56,4 @@ jobs:
           EVAL_VERBOSE: "1"
         run: |
           if [ -z "$OPENROUTER_API_KEY" ]; then echo "No OPENROUTER_API_KEY secret, so there is nothing to evaluate."; exit 0; fi
-          npm run eval
+          npm run eval:chief

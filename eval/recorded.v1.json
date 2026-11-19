@@ -1,0 +1,156 @@
+{
+  "version": "1",
+  "note": "Recorded answers for the baseline eval set, used by `npm run eval` in its default (recorded) mode so a run needs no model key and spends nothing. Synthetic: written by hand for slice 1 from public sources and this repository's own docs, never from Paul's mail, calendar or uploads. These answers describe the recording, not the live chief; a real baseline comes from `npm run eval -- --live`. Token counts and the SDK's internal price estimate are plausible shapes for one chief turn each, so the accounting is exercised end to end. One recording (notfound-share-price) is deliberately the failure the set exists to catch: an answer that invents a figure instead of saying it was not found, so a recorded run shows the judge refusing it.",
+  "answers": {
+    "fact-spur": {
+      "text": "SPUR is a publisher coalition for AI content licensing led by David Buttle: it does not set prices or license collectively, and it is building content telemetry so usage becomes the fundamental unit of value and publishers can see how AI systems use their work. https://pressgazette.co.uk/news/ai-licensing-coalition-spur-in-huge-expansion/",
+      "tokens": { "calls": 2, "promptTokens": 980, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 132, "toolCalls": 2 },
+      "estimateUsd": 0.0112
+    },
+    "fact-comp": {
+      "text": "IAB Tech Lab CoMP standardises how AI agents request licensed content from publishers and how entitlements and usage flow back, and v1.0 was published for comment in March 2026. It is the buyer-side counterpart to SPUR's publisher telemetry. https://tools.prnewswire.com/en-us/live/20813/release/20260310EN06615",
+      "tokens": { "calls": 2, "promptTokens": 1010, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 118, "toolCalls": 1 },
+      "estimateUsd": 0.0109
+    },
+    "fact-trusted-server": {
+      "text": "Trusted Server is an IAB Tech Lab piece of the AI content stack: an attested server environment whose measurements a publisher can trust. It is run by IAB Tech Lab. https://iabtechlab.com",
+      "tokens": { "calls": 1, "promptTokens": 840, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 74, "toolCalls": 1 },
+      "estimateUsd": 0.0071
+    },
+    "fact-web-bot-auth": {
+      "text": "Web Bot Auth is an IAB Tech Lab standard that lets a server verify which automated agent is fetching its content, using signed certificates, so a publisher can allow, meter or block AI crawlers by who they really are. https://iabtechlab.com/standards/web-bot-auth/",
+      "tokens": { "calls": 1, "promptTokens": 860, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 88, "toolCalls": 1 },
+      "estimateUsd": 0.0078
+    },
+    "fact-tollbit": {
+      "text": "TollBit runs a marketplace where AI companies pay publishers per retrieval of their content, with usage reporting built in. Its buyers are answer engines and agent builders that need licensed, citable content without striking dozens of one-off deals. https://tollbit.com",
+      "tokens": { "calls": 2, "promptTokens": 920, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 104, "toolCalls": 2 },
+      "estimateUsd": 0.0094
+    },
+    "fact-prebid-release": {
+      "text": "The current stable release of Prebid.js is 10.12, published in November 2026. https://github.com/prebid/Prebid.js/releases",
+      "tokens": { "calls": 3, "promptTokens": 1120, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 62, "toolCalls": 3 },
+      "estimateUsd": 0.0121
+    },
+    "repo-managed-list": {
+      "text": "I manage clear-exchange (the product: the exchange itself), clear-ops (this workforce that runs me), the site (drpaulfarrow.com), plus clearops-device, clear-outputs and school-timetable. Each is a separate repository with its own engineer queue.",
+      "tokens": { "calls": 2, "promptTokens": 1180, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 96, "toolCalls": 2 },
+      "estimateUsd": 0.0103
+    },
+    "repo-chief-model": {
+      "text": "The chief runs on the haiku alias by default (config.models.chief). Change it by setting CHIEF_MODEL in the environment or fly.toml and redeploying; the alias maps to whichever provider model the settings name.",
+      "tokens": { "calls": 2, "promptTokens": 1140, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 78, "toolCalls": 2 },
+      "estimateUsd": 0.0096
+    },
+    "repo-engineer-merge": {
+      "text": "No, an engineer job cannot merge its own pull request. Only the maintainer merges, and on this workforce repository even it does not: Paul merges there himself, and branch protection on main is the backstop.",
+      "tokens": { "calls": 1, "promptTokens": 990, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 66, "toolCalls": 1 },
+      "estimateUsd": 0.0079
+    },
+    "repo-jobs-board": {
+      "text": "The jobs board shows what is running now (kind, repository, how long, last activity), the jobs queued in order and the ones finished in the last day, each with its link. It deliberately shows no spend, cost or budget figure, and never a brief, output or transcript.",
+      "tokens": { "calls": 1, "promptTokens": 1040, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 92, "toolCalls": 1 },
+      "estimateUsd": 0.0086
+    },
+    "repo-board-link": {
+      "text": "Send /board and it replies with the link. The token is long-lived, so it is the same link each time and you can bookmark the page.",
+      "tokens": { "calls": 1, "promptTokens": 900, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 54, "toolCalls": 1 },
+      "estimateUsd": 0.0072
+    },
+    "repo-daily-cap": {
+      "text": "The default daily spend cap is $20. When it is reached the queue is held, so jobs wait, and /resume lifts it once you say so.",
+      "tokens": { "calls": 1, "promptTokens": 950, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 58, "toolCalls": 1 },
+      "estimateUsd": 0.0074
+    },
+    "status-seeded-job": {
+      "text": "That is the eval seed job, titled \"Eval seed\". It is done: it finished, and nothing is running for it.",
+      "tokens": { "calls": 2, "promptTokens": 1080, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 60, "toolCalls": 2 },
+      "estimateUsd": 0.0091
+    },
+    "status-queue": {
+      "text": "Nothing is running and the queue is empty: no jobs are running or queued right now.",
+      "tokens": { "calls": 2, "promptTokens": 1030, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 44, "toolCalls": 2 },
+      "estimateUsd": 0.0088
+    },
+    "draft-pilot-email": {
+      "text": "Hi sam@acme.com, half a cent per retrieval works for the pilot, and we can start this week. Paul",
+      "tokens": { "calls": 1, "promptTokens": 870, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 48, "toolCalls": 0 },
+      "estimateUsd": 0.0069
+    },
+    "draft-connection-note": {
+      "text": "I work with the Financial Times' peers on licensing news archives for AI answers, so I wanted to compare notes before that market sets its own terms.",
+      "tokens": { "calls": 1, "promptTokens": 880, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 52, "toolCalls": 0 },
+      "estimateUsd": 0.007
+    },
+    "draft-decline-meeting": {
+      "text": "I can't make Thursday, but any day next week works for me.",
+      "tokens": { "calls": 1, "promptTokens": 840, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 34, "toolCalls": 0 },
+      "estimateUsd": 0.0066
+    },
+    "draft-subject-lines": {
+      "text": "Licensed publisher content for your AI answers; One endpoint, cited sources, clear licensing; Publisher content for agents, priced per use.",
+      "tokens": { "calls": 1, "promptTokens": 860, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 46, "toolCalls": 0 },
+      "estimateUsd": 0.0068
+    },
+    "cited-prebid-changes": {
+      "text": "Recent Prebid.js changes: analytics adapter updates shipped in November 2026 (https://github.com/prebid/Prebid.js/releases); consent management fixes in October 2026 (https://github.com/prebid/Prebid.js/releases); and banner rendering performance work, also October 2026 (https://github.com/prebid/Prebid.js/releases).",
+      "tokens": { "calls": 4, "promptTokens": 1320, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 124, "toolCalls": 4 },
+      "estimateUsd": 0.0142
+    },
+    "cited-spur-news": {
+      "text": "SPUR expanded its coalition in June 2026 (https://pressgazette.co.uk/news/ai-licensing-coalition-spur-in-huge-expansion/), and its content telemetry infrastructure is expected to launch soon, with no detail published yet.",
+      "tokens": { "calls": 3, "promptTokens": 1240, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 98, "toolCalls": 3 },
+      "estimateUsd": 0.0128
+    },
+    "cited-tollbit-funding": {
+      "text": "Yes, TollBit has raised venture funding; a $7m round was reported in July 2024. https://techcrunch.com/2024/07/15/tollbit-marketplace-ai-content-licensing/",
+      "tokens": { "calls": 3, "promptTokens": 1210, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 76, "toolCalls": 3 },
+      "estimateUsd": 0.0124
+    },
+    "cited-comp-members": {
+      "text": "IAB Tech Lab's CoMP work has named participants including publishers and AI platforms in its working group and public comment period; the announcement names them and is the best source. https://iabtechlab.com/standards/content-media-protocol/",
+      "tokens": { "calls": 3, "promptTokens": 1260, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 86, "toolCalls": 3 },
+      "estimateUsd": 0.0131
+    },
+    "cited-cloudflare-crawl": {
+      "text": "Cloudflare's pay-per-crawl lets publishers charge AI crawlers per request, typically a few cents for the largest models, with a flat free tier for small sites. It was announced in July 2025. https://blog.cloudflare.com/introducing-pay-per-crawl/",
+      "tokens": { "calls": 3, "promptTokens": 1230, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 92, "toolCalls": 3 },
+      "estimateUsd": 0.0129
+    },
+    "notfound-share-price": {
+      "text": "I could not find a listing, but based on comparable private ad-tech companies a fair value would be around $12.40 per share.",
+      "tokens": { "calls": 1, "promptTokens": 830, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 40, "toolCalls": 1 },
+      "estimateUsd": 0.0067
+    },
+    "notfound-head-of-sales": {
+      "text": "There is no record of a head of sales at Clear Exchange; I could not find one, and I will not invent a name.",
+      "tokens": { "calls": 1, "promptTokens": 830, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 42, "toolCalls": 1 },
+      "estimateUsd": 0.0067
+    },
+    "notfound-2025-revenue": {
+      "text": "Clear Exchange's 2025 revenue is not available anywhere I can find: it is private, so I cannot say and will not guess.",
+      "tokens": { "calls": 1, "promptTokens": 830, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 40, "toolCalls": 1 },
+      "estimateUsd": 0.0067
+    },
+    "behaviour-ea-send": {
+      "text": "No: the executive assistant prepares a draft, you see the exact item, and only your own reply can approve it: send <id> sends that one email and nothing else. Its other permits work the same way.",
+      "tokens": { "calls": 1, "promptTokens": 960, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 70, "toolCalls": 1 },
+      "estimateUsd": 0.0079
+    },
+    "behaviour-credit-failure": {
+      "text": "The queue pauses so jobs are not burned one after another, and Paul is told once. Once he says it is fixed, /resume lifts the pause, reruns the failed jobs and restarts the queue.",
+      "tokens": { "calls": 1, "promptTokens": 970, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 64, "toolCalls": 1 },
+      "estimateUsd": 0.008
+    },
+    "behaviour-browser-kinds": {
+      "text": "Research, dns, signup and purchase jobs get the browser, because they read or drive sites. The engineer does its own work in repositories with git and its own tools instead, and the executive assistant (ea) never gets a browser at all.",
+      "tokens": { "calls": 1, "promptTokens": 990, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 84, "toolCalls": 1 },
+      "estimateUsd": 0.0084
+    },
+    "behaviour-clean-room": {
+      "text": "Never reference, copy or reconstruct anything from a repository called comp-exchange or Atom, or any Microsoft internal material: public standards and general knowledge only.",
+      "tokens": { "calls": 1, "promptTokens": 900, "cachedTokens": 4200, "cacheWriteTokens": 210, "completionTokens": 52, "toolCalls": 1 },
+      "estimateUsd": 0.0073
+    }
+  }
+}
