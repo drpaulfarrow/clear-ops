@@ -736,8 +736,9 @@ function jobPage() {
     noticeBar(),
     jobActions(detail),
     h("div", { class: "stats" }, cost, model, steps, time),
-    h("div", { class: "panes" }, about, trace),
+    // Above the trace, not below it: a long trace on a phone hid it (19 Nov 2026).
     detail.actions?.review ? pullPane(detail) : null,
+    h("div", { class: "panes" }, about, trace),
     output,
   );
 }
