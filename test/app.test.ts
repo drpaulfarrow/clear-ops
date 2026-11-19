@@ -375,13 +375,18 @@ test("the board shows the provider's own figures or none, never the SDK's estima
 
   const board = appBoard({ store: s, queue: quietQueue, now });
   const raw = JSON.stringify(board);
+  // For "this figure is nowhere in the answer": the answer without its timestamps. A job's own times come
+  // from the real clock, and 18:35:55.512 holds "55.5" as surely as an estimate of $55.50 would (it failed
+  // CI that way on 19 Nov 2026, at exactly that second).
+  const figures = (answer: unknown) => JSON.stringify(answer).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, "");
+  assert.ok(!figures({ at: "2026-11-19T18:35:55.512Z" }).includes("55.5") && figures({ usd: 55.5 }).includes("55.5"), "a time is set aside, a figure is not");
   assert.deepEqual(board.spend, { usd: 12.5, note: "OpenRouter's own figure", capReached: false, capLifted: false });
   assert.deepEqual(board.jobs.map((j) => [j.title, j.status]), [["Running job", "running"], ["Queued job", "queued"], ["Estimate only", "done"], ["Real cost", "done"]]);
   assert.equal(board.hasOlder, true, "the job from three days ago is history, not the board");
   assert.equal(board.jobs.find((j) => j.id === real.id)!.costUsd, 3.184);
   assert.equal(board.jobs.find((j) => j.id === guess.id)!.costUsd, undefined);
   assert.equal(board.jobs.find((j) => j.id === running.id)!.costUsd, undefined);
-  for (const estimate of ["7.77", "41.41", "9.99", "8.88"]) assert.ok(!raw.includes(estimate), `the estimate ${estimate} is nowhere in the answer`);
+  for (const estimate of ["7.77", "41.41", "9.99", "8.88"]) assert.ok(!figures(board).includes(estimate), `the estimate ${estimate} is nowhere in the answer`);
   assert.equal(board.jobs.find((j) => j.title === "Queued job")!.held, true);
   assert.deepEqual(board.waiting.map((w) => [w.what, w.id, w.command]), [["purchase", "p7k2", "buy p7k2"]], "a live approval is named; an expired one is not");
   assert.ok(!raw.includes("A shop name") && !raw.includes("a private item") && !raw.includes("£12.00"), "what waits is named, never described");
@@ -389,7 +394,7 @@ test("the board shows the provider's own figures or none, never the SDK's estima
   const unread = appBoard({ store: s, queue: { ...quietQueue, spendState: () => ({ usd: 55.5, source: "estimate" as const, note: "OpenRouter could not be read" }) }, now });
   assert.equal(unread.spend.usd, undefined);
   assert.match(unread.spend.note, /No spend figure: OpenRouter could not be read/);
-  assert.ok(!JSON.stringify(unread).includes("55.5"));
+  assert.ok(!figures(unread).includes("55.5"));
 
   const page = appHistory({ store: s, queue: quietQueue, now }, board.jobs[board.jobs.length - 1]!.finishedAt);
   assert.deepEqual(page.jobs.map((j) => j.title), ["Old job"]);
