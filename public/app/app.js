@@ -1415,7 +1415,10 @@ function drawChatBar() {
       h("span", { class: "chat-row-title" }, title),
       note ? h("span", { class: "muted num" }, note) : null,
     );
+  // replaceChildren writes anything that is not an element as text, the word "null" included, so the
+  // list is left out when it is closed rather than passed as nothing.
   chatBarEl.replaceChildren(
+    ...[
     h(
       "div",
       { class: "chat-bar-top" },
@@ -1436,6 +1439,7 @@ function drawChatBar() {
           state.chats.length ? null : h("p", { class: "muted chat-list-note" }, `No other chats yet. New chat starts one, and ${CHIEF} keeps each apart.`),
         )
       : null,
+    ].filter(Boolean),
   );
 }
 
