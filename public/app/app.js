@@ -135,6 +135,8 @@ const state = {
   historyLoading: false,
   job: undefined,
   jobRaw: "",
+  /** The thread on the page being looked at: { key, view, raw, problem, sending }. One at a time. */
+  thread: undefined,
   /** The pull request being reviewed: { key, data, loading, error, open }, one at a time. */
   pull: undefined,
   jobMissing: false,
@@ -238,6 +240,9 @@ function jobLine(job, now) {
   return h("div", { class: `card-line${tone}` }, h("span", {}, `${job.outcome?.text ?? "The run finished."} ${ago(job.finishedAt, now) ?? ""}`));
 }
 
+/** That something has been said in a job's or a pull request's own thread. */
+const threadNote = (note, now) => (note ? h("div", { class: "card-line" }, h("span", {}, `Thread: ${note.count} ${note.count === 1 ? "message" : "messages"}, the last ${ago(note.lastAt, now)}.`)) : null);
+
 function jobCard(job, now) {
   return h(
     "a",
@@ -251,6 +256,7 @@ function jobCard(job, now) {
     ),
     jobLine(job, now),
     job.said ? h("div", { class: "card-said" }, job.said) : null,
+    threadNote(job.thread, now),
   );
 }
 
@@ -593,6 +599,19 @@ function pullFile(p, f) {
   );
 }
 
+/**
+ * Asks the chief, in the pull request's own thread, to have its conflicts resolved. It is an ordinary
+ * message in Paul's name, sent because he pressed the button: the chief decides how, and starts the job.
+ */
+async function askToResolve(v) {
+  const text = `Pull request #${v.number} in ${v.repository} (${v.url}) conflicts with ${v.base} and cannot be merged. Please start an engineer job on the ${v.repo} repository to merge ${v.base} into its branch ${v.branch}, resolve the conflicts, run the build and the tests, and push to that same pull request. No new pull request, and do not merge it: I will merge it myself once it is clean.`;
+  const key = `pull:${v.repo}:${v.number}`;
+  const sent = await sendThread(text, key);
+  say(sent ? `Asked ${CHIEF} to resolve the conflicts. The answer is in this pull request's thread.` : "That could not be sent just now.", !sent);
+  if (sent && route().name !== "pull") location.hash = `#/pull/${v.repo}/${v.number}`;
+  else draw();
+}
+
 /** One pull request of a managed repository. `wrote` is the repository as a worker mistyped it in its report. */
 function pullPane({ repo, number, wrote }) {
   const p = state.pull?.key === pullKey(repo, number) ? state.pull : undefined;
@@ -624,6 +643,13 @@ function pullPane({ repo, number, wrote }) {
             h("button", { class: "btn", type: "button", disabled: busy || p.loading, onclick: () => void loadPull(repo, number) }, p.loading ? "Looking" : "Look again"),
             h("a", { class: "btn", href: v.url, rel: "noopener noreferrer", target: "_blank" }, icon("link"), "On GitHub"),
           ),
+          v.conflicts
+            ? h(
+                "div",
+                { class: "links" },
+                h("button", { class: "btn", type: "button", disabled: busy || state.thread?.sending, onclick: () => void askToResolve(v) }, `Ask ${CHIEF} to resolve the conflicts`),
+              )
+            : null,
           v.blocked ? h("p", { class: "prose" }, v.blocked) : h("p", { class: "prose muted" }, `Merges ${v.branch} into ${v.base} at commit ${v.head.slice(0, 7)}, the one shown here.${v.redeploys ? " Merging redeploys ClearOps once no job is running." : ""}`),
         )
       : null;
@@ -654,6 +680,136 @@ function pullPane({ repo, number, wrote }) {
   );
 }
 
+/* ---------- Threads: talking to the chief about one job or one pull request ---------- */
+
+/** The thread the page being looked at belongs to: "job:<id>" or "pull:<alias>:<number>". */
+function threadKeyOf(r) {
+  return r.name === "job" ? `job:${r.id}` : r.name === "pull" ? `pull:${r.repo}:${r.number}` : undefined;
+}
+
+const threadInput = h("textarea", { id: "ask-thread", rows: "1", maxlength: String(TEXT_MAX), autocomplete: "off" });
+const threadSend = h("button", { class: "send", type: "submit", "aria-label": "Send" }, icon("send", 18));
+const threadLog = h("div", { class: "thread-log", role: "log", tabindex: "0" });
+const threadEl = h(
+  "section",
+  { class: "pane thread", "aria-label": `Talk to ${CHIEF} about this` },
+  h("div", { class: "pane-head" }, h("h2", {}, `Talk to ${CHIEF} about this`)),
+  threadLog,
+  h(
+    "form",
+    { class: "composer", onsubmit: (e) => { e.preventDefault(); void sendThread(threadInput.value); } },
+    h("label", { class: "sr", for: "ask-thread" }, `Message ${CHIEF} about this`),
+    threadInput,
+    threadSend,
+  ),
+);
+threadInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !narrow.matches) {
+    e.preventDefault();
+    void sendThread(threadInput.value);
+  }
+});
+
+function threadItems() {
+  const t = state.thread;
+  if (!t?.view) return [h("p", { class: "muted" }, t?.problem ?? "Loading.")];
+  const now = Date.parse(t.view.generatedAt);
+  const stream = [...t.view.messages.filter((m) => !m.live).map((m) => ({ at: m.at, message: m })), ...t.view.jobs.map((j) => ({ at: j.createdAt, job: j }))].sort((a, b) => a.at.localeCompare(b.at));
+  const out = [];
+  for (const item of stream) {
+    if (item.job) out.push(h("div", { class: "chat-card" }, jobCard(item.job, now)));
+    else if (item.message.from === "paul") out.push(h("div", { class: "mine" }, h("div", { class: "bubble" }, item.message.text)));
+    else out.push(h("div", { class: "theirs" }, avatar("chief"), h("div", { class: "theirs-body" }, h("div", { class: "theirs-who" }, h("b", {}, CHIEF), h("span", { class: "muted num" }, clock(item.message.at))), rendered(item.message.html ?? "", "report said"))));
+  }
+  if (!stream.length) out.push(h("p", { class: "muted" }, `Nothing said here yet. What you write goes to ${CHIEF} with this attached, so there is no need to say what it is about.`));
+  const live = t.view.messages.find((m) => m.live);
+  const unanswered = t.view.messages.filter((m) => !m.live).at(-1)?.from === "paul";
+  if (live || t.view.typing || unanswered) out.push(h("div", { class: "working", role: "status" }, h("span", { class: "dot live" }), h("span", {}, live ? live.text : `${CHIEF} is working on it`)));
+  if (t.problem) out.push(h("div", { class: "banner" }, h("b", {}, "Not sent or not up to date. "), t.problem));
+  return out;
+}
+
+function drawThread() {
+  const stick = threadLog.scrollHeight - threadLog.scrollTop - threadLog.clientHeight < 120;
+  threadLog.replaceChildren(...threadItems());
+  if (stick) threadLog.scrollTop = threadLog.scrollHeight;
+}
+
+async function refreshThread() {
+  const key = threadKeyOf(route());
+  if (!key) return false;
+  if (state.thread?.key !== key) {
+    state.thread = { key, view: undefined, raw: "", problem: undefined, sending: false };
+    threadInput.value = "";
+  }
+  const t = state.thread;
+  try {
+    const text = await getJson(`/chat?thread=${encodeURIComponent(key)}`);
+    if (state.thread !== t) return false;
+    if (text === undefined) {
+      t.problem = "This has no thread.";
+      return true;
+    }
+    const changed = text !== t.raw || !!t.problem;
+    t.raw = text;
+    t.view = JSON.parse(text);
+    if (!t.sending) t.problem = undefined;
+    return changed;
+  } catch (err) {
+    if (err.message === "signed out" || state.thread !== t) return false;
+    if (!t.view) t.problem = "The thread could not be loaded just now.";
+    return !t.view;
+  }
+}
+
+/** A message into this page's thread. The service attaches the topic; the words are only Paul's. */
+async function sendThread(raw, key = threadKeyOf(route())) {
+  const text = raw.trim();
+  if (!text || !key) return false;
+  if (state.thread?.key !== key) state.thread = { key, view: undefined, raw: "", problem: undefined, sending: false };
+  const t = state.thread;
+  if (t.sending) return false;
+  t.sending = true;
+  threadSend.disabled = true;
+  let ok = false;
+  try {
+    await postMessage({ text, thread: key });
+    if (raw === threadInput.value) threadInput.value = "";
+    t.problem = undefined;
+    ok = true;
+  } catch (err) {
+    t.problem = err.message === "Failed to fetch" ? "The service could not be reached." : err.message;
+    drawThread();
+  } finally {
+    t.sending = false;
+    threadSend.disabled = false;
+  }
+  void threadTick();
+  return ok;
+}
+
+function threadBusy() {
+  const v = state.thread?.view;
+  if (!v) return false;
+  const last = v.messages[v.messages.length - 1];
+  return v.typing || v.messages.some((m) => m.live) || (last && last.from === "paul") || v.jobs.some((j) => j.status === "running" || j.status === "queued");
+}
+
+let threadTimer;
+async function threadTick() {
+  clearTimeout(threadTimer);
+  if (!threadKeyOf(route())) return;
+  if (!document.hidden && (await refreshThread())) drawThread();
+  threadTimer = setTimeout(threadTick, threadBusy() ? CHAT_BUSY_EVERY_MS : CHAT_QUIET_EVERY_MS);
+}
+
+/** The thread pane for the page being drawn. One element, kept across redraws, so what is being typed stays. */
+function threadPane() {
+  threadInput.setAttribute("placeholder", `Ask ${CHIEF} about this`);
+  drawThread();
+  return threadEl;
+}
+
 /** A pull request on a page of its own, opened from the board's list. */
 function pullPage(r) {
   return h(
@@ -662,6 +818,7 @@ function pullPage(r) {
     h("div", { class: "job-head" }, h("a", { class: "btn", href: "#/" }, icon("back"), "Board")),
     noticeBar(),
     pullPane({ repo: r.repo, number: r.number }),
+    threadPane(),
   );
 }
 
@@ -671,6 +828,7 @@ function pullCard(pr, now) {
     { class: "card", href: `#/pull/${pr.repo}/${pr.number}` },
     h("div", { class: "card-main" }, h("div", { class: "card-title" }, `#${pr.number} ${pr.title}`), h("div", { class: "card-sub" }, [pr.repository, pr.branch, `by ${pr.author}`].filter(Boolean).join(" · "))),
     h("div", { class: "card-line" }, h("span", {}, `${pr.draft ? "Draft. " : ""}Opened ${ago(pr.openedAt, now)}. Tap to review.`)),
+    threadNote(pr.thread, now),
   );
 }
 
@@ -777,6 +935,7 @@ function jobPage() {
     h("div", { class: "stats" }, cost, model, steps, time),
     // Above the trace, not below it: a long trace on a phone hid it (19 Nov 2026).
     detail.pull ? pullPane(detail.pull) : null,
+    threadPane(),
     h("div", { class: "panes" }, about, trace),
     output,
   );
@@ -905,15 +1064,23 @@ input.addEventListener("keydown", (e) => {
   }
 });
 
+/** Paul's own words to the chief: the main conversation, or with `thread` the thread of a job or a pull request. */
+async function postMessage(body) {
+  const res = await fetch(`${API}/chat`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, credentials: "same-origin", body: JSON.stringify(body) });
+  if (res.status === 401) {
+    location.assign(SIGN_IN);
+    throw new Error("Signed out.");
+  }
+  if (!res.ok) throw new Error(res.status === 413 ? "That message is too long." : "The message was not accepted.");
+}
+
 async function send(raw) {
   const text = raw.trim();
   if (!text || state.sending) return;
   state.sending = true;
   sendButton.disabled = true;
   try {
-    const res = await fetch(`${API}/chat`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, credentials: "same-origin", body: JSON.stringify({ text }) });
-    if (res.status === 401) return location.assign(SIGN_IN);
-    if (!res.ok) throw new Error(res.status === 413 ? "That message is too long." : "The message was not accepted.");
+    await postMessage({ text });
     if (raw === input.value) {
       input.value = "";
       grow();
@@ -952,7 +1119,17 @@ function draw() {
   headerEl.replaceChildren(header(state.board));
   if (r.name === "job" || r.name === "pull") {
     shellEl.className = "shell";
+    // The thread pane is one element moved into each new drawing of the page. Moving it drops the
+    // caret and the scroll, so both are put back: a redraw must not interrupt someone typing.
+    const caret = document.activeElement === threadInput ? [threadInput.selectionStart, threadInput.selectionEnd] : undefined;
+    const atEnd = threadLog.scrollHeight - threadLog.scrollTop - threadLog.clientHeight < 120;
+    const top = threadLog.scrollTop;
     bodyEl.replaceChildren(r.name === "job" ? jobPage() : pullPage(r));
+    threadLog.scrollTop = atEnd ? threadLog.scrollHeight : top;
+    if (caret) {
+      threadInput.focus({ preventScroll: true });
+      threadInput.setSelectionRange(caret[0], caret[1]);
+    }
     return;
   }
   const mode = layout();
@@ -1118,14 +1295,17 @@ window.addEventListener("hashchange", () => {
   draw();
   void tick();
   openPullRoute();
+  void threadTick();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   void tick();
   void chatTick();
+  void threadTick();
 });
 
 draw();
 void tick();
 void chatTick();
 openPullRoute();
+void threadTick();

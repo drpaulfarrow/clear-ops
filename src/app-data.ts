@@ -60,6 +60,8 @@ export interface AppSource {
   jobPull?: (job: Job) => JobPull | undefined;
   /** The open pull requests of the managed repositories, as last read from GitHub. Never waits. */
   openPulls?: () => { pulls: PullSummary[]; unread: string[]; loading: boolean };
+  /** The app's threads that have anything in them, by address (src/web-chat.ts). */
+  threads?: () => Map<string, { count: number; lastAt: string }>;
   /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
   gates?: AppGates;
   /** Where traces are read from, for the tests. */
@@ -88,6 +90,8 @@ export interface AppJob {
   costUsd?: number;
   /** A pull request address, where the job has one. */
   pr?: string;
+  /** Its thread in the app, when anything has been said there. */
+  thread?: AppThreadNote;
   /** Failed: why, in a word or two. */
   failure?: string;
   /** Running: what the worker is doing this minute, in plain words. */
@@ -162,6 +166,12 @@ export interface AppWaiting {
   seen?: string;
 }
 
+/** That a job or a pull request has a thread with something in it. */
+export interface AppThreadNote {
+  count: number;
+  lastAt: string;
+}
+
 export interface AppBoard {
   generatedAt: string;
   spend: AppSpend;
@@ -174,7 +184,7 @@ export interface AppBoard {
   /** Whether older finished jobs exist beyond the recent ones. */
   hasOlder: boolean;
   /** Every open pull request in the managed repositories, newest first, as GitHub lists them. */
-  pulls: PullSummary[];
+  pulls: Array<PullSummary & { thread?: AppThreadNote }>;
   /** Repositories whose pull requests GitHub would not show, so "none open" is not claimed for them. */
   pullsUnread: string[];
   /** The list has not been read yet since the service started. */
@@ -369,6 +379,7 @@ function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
   const cost = realCost(job);
   const outcome = outcomeOf(source.store, job, ev, source);
   const pr = source.jobPull?.(job)?.url ?? (job.pr && PR_URL.test(job.pr) ? job.pr : undefined);
+  const note = source.threads?.().get(`web:job:${job.id}`);
   const said = job.status === "done" || job.status === "failed" ? saidOf(job) : undefined;
   const base: AppJob = {
     id: job.id,
@@ -385,6 +396,7 @@ function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
     ...modelOf(job),
     ...(cost !== undefined ? { costUsd: cost } : {}),
     ...(pr ? { pr } : {}),
+    ...(note ? { thread: note } : {}),
     ...(job.fixRound ? { fixRound: job.fixRound } : {}),
     ...(job.reviewOf ? { reviewOf: job.reviewOf } : {}),
     ...(outcome ? { outcome } : {}),
@@ -490,6 +502,7 @@ export function appBoard(source: AppSource): AppBoard {
   const recent = finished.filter((j) => now - Date.parse(j.finishedAt ?? j.createdAt) <= APP_RECENT_MS).slice(0, APP_RECENT_MAX);
   const ev = evidenceOf(source.store);
   const open = source.openPulls?.() ?? { pulls: [], unread: [], loading: false };
+  const threads = source.threads?.();
   const health = boardHealth({ store: source.store, uptime: source.uptime, probes: source.probes, activeWorkers: source.activeWorkers, liveness: (id) => source.queue.liveness(id), now });
   return {
     generatedAt: new Date(now).toISOString(),
@@ -499,7 +512,10 @@ export function appBoard(source: AppSource): AppBoard {
     waiting: appWaiting(source.store, source.gates, now),
     jobs: [...running, ...queued, ...recent].map((j) => toAppJob(source, j, ev)),
     hasOlder: finished.length > recent.length,
-    pulls: open.pulls,
+    pulls: open.pulls.map((p) => {
+      const note = threads?.get(`web:pull:${p.repo}:${p.number}`);
+      return note ? { ...p, thread: note } : p;
+    }),
     pullsUnread: open.unread,
     pullsLoading: open.loading,
   };
@@ -543,14 +559,14 @@ export interface AppChat {
 /** How many of the conversation's jobs ride along with the chat. */
 export const APP_CHAT_JOBS = 40;
 
-/** The app's conversation with the chief, and the jobs it started. */
-export function appChat(source: AppSource, chat: Pick<WebChat, "view">): AppChat {
+/** One of the app's conversations with the chief (the main one, or a thread), and the jobs it started. */
+export function appChat(source: AppSource, chat: Pick<WebChat, "view">, conversation: string = WEB_CONVERSATION): AppChat {
   const now = source.now ?? Date.now();
-  const view = chat.view();
+  const view = chat.view(conversation);
   const ev = evidenceOf(source.store);
   const jobs = source.store
     .allJobs()
-    .filter((j) => (j.replyTo ?? j.requestedBy) === WEB_CONVERSATION)
+    .filter((j) => (j.replyTo ?? j.requestedBy) === conversation)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .slice(-APP_CHAT_JOBS);
   return {

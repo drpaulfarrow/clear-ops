@@ -78,9 +78,25 @@ A job is tied to a pull request only inside the repository the job works on (`fo
 ### What this changes in the rules
 "Only the maintainer merges" was true of everything in the service. It is still true of every agent. The one addition is Paul's own tap, which has its own invariant test, and `CLAUDE.md` has one clause saying so. The engineer and maintainer denials are untouched. On 19 Nov 2026, on Paul's say, the tap went from "a job's own pull request" to "any open pull request in a repository ClearOps manages".
 
+## What slice 5 adds: threads (`src/web-chat.ts`, `src/orchestrator.ts`)
+
+Every job's page and every pull request's page has "Talk to Marlo about this": a chat box whose messages go to the chief with that job or pull request attached, so Paul does not have to say what he is talking about (`docs/app/thread.png`). Each is a conversation of its own, as a Discord thread is: its own transcript, its own running context with the chief, and the jobs started from it report back into it. The main chat stays for everything else. A card on the board says when its thread has something in it.
+
+- **The address is the topic.** `web:job:<id>` or `web:pull:<alias>:<number>`. The app names a thread as `job:<id>` or `pull:<alias>:<number>`, and the service builds the address only for a job the store holds or a repository ClearOps manages. Nothing else in a request is ever used as an address.
+- **What the chief is told.** For a job, the same context a Discord thread gets: its title, brief, status and the thread's recent messages, marked as from the store and not from Paul. For a pull request, which one and in which repository, and that a job about it works on that same pull request and merges nothing. The chief's own prompt, tools and model are unchanged.
+- **Everything that held for the main chat holds in a thread.** Signed in, this site's own script, the app's own sender that no allowlist holds, approval words refused before they are kept, a one-time code never written down.
+- **Kept apart.** The main conversation keeps its newest 500 messages and each thread its newest 200, so neither can push the other out. At most 200 threads are kept; the one quiet for longest goes first.
+- **Typing is not interrupted.** The thread box is one element kept across redraws, and the caret and scroll are put back when the page under it redraws.
+
+### Conflicts
+A pull request whose branch conflicts with its base cannot be merged, and the panel now has "Ask Marlo to resolve the conflicts". It sends one ordinary message in Paul's name into that pull request's thread, asking for an engineer job to merge the base into the branch, resolve the conflicts, run the build and tests and push to that same pull request, and not to merge it. The chief decides how and starts the job like any other request; the button has no powers of its own.
+
+### What this changes in the rules
+The app's sender used to pass the orchestrator in exactly one conversation, `web:main`. It now passes in the main conversation or a well-formed thread (`isWebConversation`). The invariant test pins the pattern, and that the route's address is only ever one the service itself built.
+
 ## Still to come
 
-What it does not do yet: changing caps or models, project spaces of Paul's own, voice, push notifications, search. Each is a later slice.
+What it does not do yet: changing caps or models, project spaces of Paul's own (each with its own chat), voice, uploads, push notifications, search. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

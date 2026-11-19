@@ -119,6 +119,8 @@ export interface PullView {
   files: PullFile[];
   /** Why it cannot be merged from here right now. Absent when it can. */
   blocked?: string;
+  /** It is open and its branch conflicts with the base, so someone has to resolve that before it can merge. */
+  conflicts: boolean;
   /** True when merging it redeploys this service. */
   redeploys: boolean;
 }
@@ -368,6 +370,7 @@ export class AppPulls {
       checks,
       files: shown,
       redeploys: !!this.o.selfAlias && this.o.selfAlias === t.repo.alias,
+      conflicts: state === "open" && pr.mergeable === false,
     };
     const blocked = blockedBy(view, pr.mergeable);
     return blocked ? { ...view, blocked } : view;
