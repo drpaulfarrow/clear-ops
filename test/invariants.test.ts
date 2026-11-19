@@ -1212,7 +1212,16 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   // Since 19 Nov 2026 the conversation is the main one or the thread of a job or a pull request, and it
   // is only ever one `appThread` made: the main address, or a thread address built by `webThread` for a
   // job the store holds or a repository ClearOps manages. Nothing in the request is used as an address.
-  assert.match(post, /const where = appThread\(\(req\.body as \{ thread\?: unknown \} \| undefined\)\?\.thread\);\s*if \(!where\) return void res\.status\(404\)[^\n]*\n\s*const refused = webRefusal\(text\);\s*chat\.inbound\(parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text, where\);\s*if \(refused\) void chat\.send\(where, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true \}\);/);
+  assert.match(post, /const where = appThread\(\(req\.body as \{ thread\?: unknown \} \| undefined\)\?\.thread\);\s*if \(!where\) return void res\.status\(404\)[^\n]*\n\s*const refused = webRefusal\(text\);\s*chat\.inbound\(parseCodeCommand\(text\) \? WEB_CODE_PLACEHOLDER : text, where, files\.map\(\(f\) => f\.name\)\);\s*if \(refused\) void chat\.send\(where, refused\);\s*else void orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true, \.\.\.\(files\.length \? \{ attachments: files \} : \{\}\) \}\);/);
+  // Files with a message (19 Nov 2026) are bytes that route itself read from his signed-in browser and
+  // checked whole (`webFiles`); they are handed on as attachments and saved by the same code as any
+  // channel's upload. The larger body that takes is read only for a browser already signed in.
+  assert.match(post, /files = webFiles\(\(req\.body as \{ files\?: unknown \} \| undefined\)\?\.files\);/);
+  assert.ok(post.indexOf("files = webFiles(") > post.indexOf("if (!ownScript(req)) return void res.status(403)"), "the same-site check comes before any file is read");
+  assert.match(index, /const bigChat = express\.json\(\{ limit: WEB_BODY_LIMIT \}\);\s*app\.post\(`\$\{APP_PATH\}\/api\/chat`, \(req, res, next\) => \(\(deps\.appAuth \?\? serviceAppAuth\)\.sessionValid\(deps\.store, req\.headers\.cookie\) \? bigChat\(req, res, next\) : next\(\)\)\);/);
+  assert.equal((index.match(/WEB_BODY_LIMIT/g) ?? []).length, 2, "one route reads the larger body, and no other");
+  assert.match(src("web-chat.ts"), /download: async \(\) => bytes,/, "an attachment from the app is the bytes the route received: nothing is fetched from anywhere");
+  assert.doesNotMatch(src("web-chat.ts"), /\bfetch\(|fetchCapped|https?:\/\//, "the app's chat fetches nothing");
   const appThread = routes.slice(routes.indexOf("const appThread = (raw: unknown): string | undefined => {"), routes.indexOf("app.get(`${APP_PATH}/api/chat`"));
   assert.deepEqual([...appThread.matchAll(/return ([^;]+);/g)].map((m) => m[1]), [
     "WEB_CONVERSATION",
@@ -1227,9 +1236,10 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.equal((index.match(/web: true/g) ?? []).length, 1, "the app's route is the only caller that says a message is from the app");
   for (const listener of ["discord.ts", "telegram.ts", "whatsapp.ts", "voice-bridge.ts", "instinct-chat.ts", "instinct-bridge.ts", "device.ts"]) assert.doesNotMatch(src(listener), /\bweb: true\b|WEB_SENDER/, `${listener} cannot speak as the app`);
   // In the orchestrator the app's sender passes only as exactly itself, in exactly one of its own
-  // conversations (the main one or a well-formed thread), with no files, and every approval word is refused before any command is parsed.
+  // conversations (the main one or a well-formed thread), and every approval word is refused before any command is parsed.
   const orch = src("orchestrator.ts");
-  assert.match(orch, /const web = viaWeb && sender === WEB_SENDER && isWebConversation\(from\) && attachments\.length === 0;\s*if \(!web\) \{\s*if \(!isAllowed\(sender\)\) \{/);
+  assert.match(orch, /const web = viaWeb && sender === WEB_SENDER && isWebConversation\(from\);\s*if \(!web\) \{\s*if \(!isAllowed\(sender\)\) \{/);
+  assert.ok(orch.indexOf("if (attachments.length) return this.handleUploads(") > orch.indexOf("const refused = webRefusal(trimmed);"), "a caption from the app cannot approve either: it is refused before a file is saved");
   const refusedAt = orch.indexOf("const refused = webRefusal(trimmed);");
   assert.ok(refusedAt > 0);
   for (const parser of ["parseDnsCommand(trimmed)", "parseSignupCommand(trimmed)", "parsePurchaseCommand(trimmed)", "parseCodeCommand(trimmed)", "parseActAsMeCommand(trimmed)", "parseDocReadCommand(trimmed)", "parseOutboundCommand(trimmed)", "this.handleApproval("]) assert.ok(orch.indexOf(parser) > refusedAt, `${parser} is reached only after the app's refusal`);

@@ -300,3 +300,18 @@ a.spend{text-decoration:none;color:inherit}
 .setting-name{font-weight:600}
 .pick.money{width:110px}
 .row.plain{cursor:default}
+
+/* ---------- Files and voice notes with a message ---------- */
+.tool{flex:none;width:40px;height:44px;border:0;border-radius:50%;background:none;color:var(--muted);display:flex;align-items:center;justify-content:center;cursor:pointer}
+.tool:hover{color:var(--text)}
+.tool.on{color:var(--bad-text)}
+.composer{padding-left:8px}
+.files{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.files[hidden]{display:none}
+.file-chip{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font-size:13px}
+.file-chip-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
+.file-chip-x{border:0;background:none;color:var(--muted);display:flex;padding:4px;cursor:pointer}
+.file-note{color:var(--bad-text);font-size:13px}
+.sent-files{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.bubble .file-chip{background:none;border-color:currentColor;opacity:.85}
+.thread .files{margin-bottom:8px}
