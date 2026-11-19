@@ -37,6 +37,7 @@ import { realCost } from "./worker-stats.js";
 import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
 import type { PrInfo } from "./pr-state.js";
+import type { JobPull, PullSummary } from "./app-pulls.js";
 import type { DnsAction, Job, OutboundAction, PurchaseAction, SignupAction, Store } from "./store.js";
 import type { UptimeReport } from "./uptime.js";
 
@@ -55,6 +56,10 @@ export interface AppSource {
   activeWorkers?: () => number;
   /** What GitHub says of a pull request, when it has been asked (src/pr-state.ts). Never waits. */
   prState?: (url: string) => PrInfo | undefined;
+  /** The pull request a job is tied to inside its own repository (src/app-pulls.ts). No network. */
+  jobPull?: (job: Job) => JobPull | undefined;
+  /** The open pull requests of the managed repositories, as last read from GitHub. Never waits. */
+  openPulls?: () => { pulls: PullSummary[]; unread: string[]; loading: boolean };
   /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
   gates?: AppGates;
   /** Where traces are read from, for the tests. */
@@ -168,6 +173,12 @@ export interface AppBoard {
   jobs: AppJob[];
   /** Whether older finished jobs exist beyond the recent ones. */
   hasOlder: boolean;
+  /** Every open pull request in the managed repositories, newest first, as GitHub lists them. */
+  pulls: PullSummary[];
+  /** Repositories whose pull requests GitHub would not show, so "none open" is not claimed for them. */
+  pullsUnread: string[];
+  /** The list has not been read yet since the service started. */
+  pullsLoading: boolean;
 }
 
 export interface AppJobDetail {
@@ -178,6 +189,8 @@ export interface AppJobDetail {
   produced?: string;
   doneWhen?: string;
   links: Array<{ what: string; url: string }>;
+  /** The job's pull request in its own repository, for the review panel. `wrote` is the repository as the worker mistyped it. */
+  pull?: { repo: string; number: number; wrote?: string };
   /** The run's limits: turns, and the real-money cap when one is set. */
   limits: { maxTurns: number; budgetUsd?: number };
   trace: { lines: TraceLine[]; total: number; figures: TraceFigures };
@@ -252,10 +265,12 @@ function askedFor(job: Job): Array<"purchase" | "email" | "dns" | "signup"> {
  * what the worker's report says. A worker saying "met" earns no tick; a worker saying it did not get
  * there, or that it needs him, is taken at its word, because that is not a claim anyone inflates.
  */
-function outcomeOf(store: Store, job: Job, ev: Evidence, prState?: AppSource["prState"]): AppOutcome | undefined {
+type Github = Pick<AppSource, "prState" | "jobPull">;
+
+function outcomeOf(store: Store, job: Job, ev: Evidence, gh: Github = {}): AppOutcome | undefined {
   if (job.status !== "done" && job.status !== "failed") return undefined;
   if (job.verdict) return job.verdict.met ? { state: "met", text: "You marked this as done.", by: "you" } : { state: "not_met", text: "You marked this as not done.", by: "you" };
-  const held = recorded(store, job, ev, prState);
+  const held = recorded(store, job, ev, gh);
   if (held.state !== "unconfirmed") return { ...held, by: "service" };
   const claim = job.claimed;
   // The words of a job that works over his private things are not put on a card.
@@ -283,7 +298,7 @@ function ownPr(job: Job, github: PrInfo): boolean {
   return Number.isFinite(opened) && Number.isFinite(from) && Number.isFinite(to) && opened >= from - OWN_PR_SLACK_MS && opened <= to + OWN_PR_SLACK_MS;
 }
 
-function recorded(store: Store, job: Job, ev: Evidence, prState?: AppSource["prState"]): Omit<AppOutcome, "by"> {
+function recorded(store: Store, job: Job, ev: Evidence, gh: Github = {}): Omit<AppOutcome, "by"> {
   if (job.status === "failed") return { state: "not_met", text: `Stopped before it finished: ${failureLabel(job.failure)}.` };
   // A job that was allowed to buy, send, change DNS or sign up: the gate's own record says whether it did.
   for (const what of askedFor(job)) {
@@ -307,7 +322,12 @@ function recorded(store: Store, job: Job, ev: Evidence, prState?: AppSource["prS
   // word counts for the job only when the pull request is its own. A job's `pr` is often just the first
   // pull request its report names, so a job that diagnosed or reviewed one is not done because it merged.
   if (PR_KINDS.includes(job.kind)) {
-    const github = job.pr && PR_URL.test(job.pr) ? prState?.(job.pr) : undefined;
+    // The address is the job's pull request in its own repository where that can be told (a worker
+    // sometimes mistypes the owner), and otherwise the address as the report gave it.
+    const address = gh.jobPull?.(job)?.url ?? (job.pr && PR_URL.test(job.pr) ? job.pr : undefined);
+    const seen = address ? gh.prState?.(address) : undefined;
+    const missing = seen?.state === "missing";
+    const github = missing ? undefined : seen;
     const own = !!github && ownPr(job, github);
     if (own && github.state === "merged") return { state: "met", text: "Its pull request was merged." };
     if (own && github.state === "closed") return { state: "not_met", text: "Its pull request was closed without being merged." };
@@ -318,6 +338,8 @@ function recorded(store: Store, job: Job, ev: Evidence, prState?: AppSource["prS
     if (github && github.state !== "open") return { state: "unconfirmed", text: `The pull request it worked on was ${github.state === "merged" ? "merged" : "closed without being merged"}. Nothing here confirms this job's own part.` };
     if (verdict?.outcome === "needs_founder") return { state: "waiting", text: `Reviewed and left for you${verdict.detail ? `: ${shortText(redact(verdict.detail), 140)}` : "."}` };
     if (verdict?.outcome === "changes_requested") return { state: "not_met", text: "The review asked for changes." };
+    // Nothing is waiting on Paul at an address GitHub does not have.
+    if (missing) return { state: "unconfirmed", text: "GitHub does not show the pull request this job names, so nothing here can check it." };
     if (job.reviewOnly && job.pr) return { state: "waiting", text: "Its pull request is open for you to review." };
     return { state: "unconfirmed", text: job.pr ? "It opened a pull request. No review verdict is recorded." : "It finished without a pull request." };
   }
@@ -345,7 +367,8 @@ function modelOf(job: Job): { model?: string; modelPinned?: boolean } {
 function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
   const repository = lockKey(job) ?? job.target ?? "product";
   const cost = realCost(job);
-  const outcome = outcomeOf(source.store, job, ev, source.prState);
+  const outcome = outcomeOf(source.store, job, ev, source);
+  const pr = source.jobPull?.(job)?.url ?? (job.pr && PR_URL.test(job.pr) ? job.pr : undefined);
   const said = job.status === "done" || job.status === "failed" ? saidOf(job) : undefined;
   const base: AppJob = {
     id: job.id,
@@ -361,7 +384,7 @@ function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
     ...(job.lastActivityAt ? { lastActivityAt: job.lastActivityAt } : {}),
     ...modelOf(job),
     ...(cost !== undefined ? { costUsd: cost } : {}),
-    ...(job.pr && PR_URL.test(job.pr) ? { pr: job.pr } : {}),
+    ...(pr ? { pr } : {}),
     ...(job.fixRound ? { fixRound: job.fixRound } : {}),
     ...(job.reviewOf ? { reviewOf: job.reviewOf } : {}),
     ...(outcome ? { outcome } : {}),
@@ -441,7 +464,7 @@ export interface AppJobActions {
   review: boolean;
 }
 
-function actionsOf(job: Job): AppJobActions {
+function actionsOf(job: Job, review: boolean): AppJobActions {
   const active = job.status === "running" || job.status === "queued";
   return {
     verdict: job.status === "done" || job.status === "failed",
@@ -450,7 +473,7 @@ function actionsOf(job: Job): AppJobActions {
     front: job.status === "queued" && !!job.waitingFor && job.waitingFor !== job.id,
     retry: job.status === "failed",
     rerunModels: rerunRefusal(job) ? [] : [...PER_JOB_MODELS],
-    review: !!job.pr && PR_URL.test(job.pr),
+    review,
   };
 }
 
@@ -466,6 +489,7 @@ export function appBoard(source: AppSource): AppBoard {
   const finished = all.filter(isFinished).sort(finishedDesc);
   const recent = finished.filter((j) => now - Date.parse(j.finishedAt ?? j.createdAt) <= APP_RECENT_MS).slice(0, APP_RECENT_MAX);
   const ev = evidenceOf(source.store);
+  const open = source.openPulls?.() ?? { pulls: [], unread: [], loading: false };
   const health = boardHealth({ store: source.store, uptime: source.uptime, probes: source.probes, activeWorkers: source.activeWorkers, liveness: (id) => source.queue.liveness(id), now });
   return {
     generatedAt: new Date(now).toISOString(),
@@ -475,6 +499,9 @@ export function appBoard(source: AppSource): AppBoard {
     waiting: appWaiting(source.store, source.gates, now),
     jobs: [...running, ...queued, ...recent].map((j) => toAppJob(source, j, ev)),
     hasOlder: finished.length > recent.length,
+    pulls: open.pulls,
+    pullsUnread: open.unread,
+    pullsLoading: open.loading,
   };
 }
 
@@ -546,6 +573,7 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
   const now = source.now ?? Date.now();
   const app = toAppJob(source, job, evidenceOf(source.store));
   const links = app.pr ? [{ what: "pull request", url: app.pr }] : [];
+  const pull = source.jobPull?.(job);
   const described = describeJob(job, { hasPullRequest: !!app.pr }, app.repository);
   const limits = runLimits(job.kind, job.depth);
   const lines = readTrace(job.id, source.traceDir);
@@ -565,7 +593,8 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
     limits: { maxTurns: limits.maxTurns, ...(limits.realBudgetUsd !== undefined ? { budgetUsd: limits.realBudgetUsd } : {}) },
     trace: { lines: lines.slice(-APP_TRACE_LINES), total: lines.length, figures: traceFigures(lines) },
     ...(report?.markdown !== undefined ? { outputHtml: renderMarkdown(report.markdown) } : {}),
-    actions: actionsOf(job),
+    actions: actionsOf(job, !!pull),
+    ...(pull ? { pull: { repo: pull.repo, number: pull.number, ...(pull.wrote ? { wrote: pull.wrote } : {}) } } : {}),
     related,
   };
 }
