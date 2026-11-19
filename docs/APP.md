@@ -56,9 +56,25 @@ A purchase is offered only while its job still holds the basket, as before. Noth
 ### What this changes in the rules
 Three invariant tests said nothing but the orchestrator and a gate itself may approve mail, DNS or a sign-up. They now say the same about everything outside the app's approval route, and that route has its own invariant. `CLAUDE.md` gains one sentence saying so.
 
+## What slice 4 adds: reviewing and merging a pull request (`src/app-pulls.ts`)
+
+A job with a pull request has a Pull request panel on its page. Review it here asks GitHub for it as it is now: title, branch, author, description, every check on its head commit, and each changed file with its changes, opened one file at a time. `docs/app/pull.png` shows it with a made-up pull request. Merge is one tap, and it is the only place the service itself merges anything. No model is involved.
+
+- **Only the job's own pull request, in the job's own repository.** A job's `pr` is often read from its report, which is a model's words. If it is not in the managed repository the job works on, it is refused before GitHub is asked anything.
+- **The commit Paul was shown.** The tap carries the head commit of the view. The service looks again first and refuses if new commits were pushed, and GitHub is given the same commit so it refuses too.
+- **Nothing blocked is merged.** Closed, a draft, in conflict, a check failed or still running, or GitHub not yet sure it can merge: the button is off and the panel says why. Look again asks GitHub afresh. Branch protection stays the backstop, and GitHub's own refusal is shown as said.
+- **One write only.** A merge commit, as Paul's own merges are. It never squashes, rebases, pushes, approves, comments, closes or deletes a branch.
+- **From this site's own script, signed in.** The same check as every other action in the app. What was merged is said in the app's chat and where the job began.
+- **Another party's text.** Titles, descriptions and diffs are cut to size (100 files, 20,000 characters a file, 300,000 in all), have secrets redacted, and are shown as plain text, never as HTML.
+
+On this repository a merge redeploys the service once no job is running, and the panel says so. Not here yet: asking for changes, commenting, or merging with a check still red. Those are done on GitHub.
+
+### What this changes in the rules
+"Only the maintainer merges" was true of everything in the service. It is still true of every agent. The one addition is Paul's own tap, which has its own invariant test, and `CLAUDE.md` gains one clause saying so. The engineer and maintainer denials are untouched.
+
 ## Still to come
 
-What it does not do yet: reviewing and merging a pull request from the app, cancelling or re-running a job, merging a pull request, changing caps or models, project spaces of Paul's own, voice, push notifications, search. Each is a later slice. Something waiting on Paul is shown with the words to send in chat, and nothing else about it.
+What it does not do yet: changing caps or models, project spaces of Paul's own, voice, push notifications, search. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

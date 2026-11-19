@@ -1176,10 +1176,10 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
   // Two routes under /app are not a GET: the one that ends the session, and Paul's own message to the
   // chief (slice 2). Nothing under /app approves, starts, stops or edits anything directly.
-  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`"]);
-  // Every one of the three that does something is taken from this site's own script only.
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/jobs/:id/merge`"]);
+  // Every one of the four that does something is taken from this site's own script only.
   assert.match(routes, /const ownScript = \(req: express\.Request\): boolean => \{[\s\S]*?return !!req\.is\("application\/json"\) && \(origin === undefined \|\| origin === new URL\(config\.publicUrl\)\.origin\) && \(site === undefined \|\| site === "same-origin"\);/);
-  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 3);
+  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 4);
   // That message is taken from this site's own script only, is refused before it is kept when it is an
   // approval word, is never kept when it is a one-time code, and reaches the orchestrator as the app's
   // own sender with the flag no channel listener sets.
@@ -1210,6 +1210,38 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(data, /const cost = realCost\(job\);/);
   assert.doesNotMatch(data, /job\.costUsd/);
   assert.match(src("github-auth.ts"), /const WORKER_STRIPPED = \[[^\]]*"UI_GITHUB_CLIENT_ID", "UI_GITHUB_CLIENT_SECRET"\]/);
+});
+
+test("the service merges a pull request only on Paul's own tap in the web app, on the commit he was shown, in the job's own repository", () => {
+  const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
+  // One module asks GitHub to merge, and one route calls it. No agent, command word, chat message,
+  // schedule or other listener can reach it.
+  for (const f of files) if (f !== "app-pulls.ts") assert.doesNotMatch(src(f), /merge_method|\/pulls\/[^\s"'`]*\/merge[`"']/, `${f} must not ask GitHub to merge`);
+  for (const f of files) if (f !== "index.ts") assert.doesNotMatch(src(f), /\bpulls\.merge\(|new AppPulls\(/, `${f} must not reach the app's merge`);
+  const index = src("index.ts");
+  assert.equal((index.match(/\bpulls\.merge\(/g) ?? []).length, 1);
+  const route = index.slice(index.indexOf("app.post(`${APP_PATH}/api/jobs/:id/merge`"), index.indexOf("app.get(`${APP_PATH}/api/jobs/:id`,"));
+  // The route sits behind the app's sign-in gate, takes only this site's own script, and hands over the
+  // stored job and the commit from the request body: never an address or a repository from the request.
+  const own = route.indexOf("if (!ownScript(req)) return void res.status(403)");
+  const merge = route.indexOf("pulls.merge(job, (req.body as { sha?: unknown } | undefined)?.sha)");
+  assert.ok(own > 0 && merge > own, "the same-site check comes before the merge");
+  assert.match(route, /const job = \/\^\[A-Za-z0-9_-\]\{1,64\}\$\/\.test\(id\) \? deps\.store\.getJob\(id\) : undefined;/);
+  assert.doesNotMatch(route, /req\.(query|params\.(?!id\b))|req\.body[^)]*\b(url|repo|pr|owner)\b/);
+  const pulls = src("app-pulls.ts");
+  // In the module: the pull request must be in the job's own managed repository before GitHub is asked
+  // anything, the merge names the commit shown and only after a fresh look found it unblocked and
+  // unchanged, and the only thing ever written to GitHub is that one merge.
+  assert.match(pulls, /if \(!own \|\| own\.toLowerCase\(\) !== slug\.toLowerCase\(\)/);
+  assert.match(pulls, /if \(typeof sha !== "string" \|\| !SHA\.test\(sha\)\) throw new PullError\("refused", 400\);/);
+  assert.match(pulls, /const now = await this\.load\(job, false\);\s*if \(now\.blocked\) throw new PullError\(`Not merged\. \$\{now\.blocked\}`\);\s*if \(now\.head !== sha\) throw new PullError\([^)]*\);\s*const res = await this\.github\(t, `\/pulls\/\$\{t\.number\}\/merge`, \{ method: "PUT", body: JSON\.stringify\(\{ sha, merge_method: "merge" \}\) \}\);/);
+  assert.equal((pulls.match(/method: "(PUT|POST|PATCH|DELETE)"/g) ?? []).length, 1, "one write to GitHub: the merge");
+  assert.doesNotMatch(pulls, /merge_method: "(squash|rebase)"|delete_branch|\/reviews|\/comments|git\/refs/, "no squash, rebase, review, comment or branch deletion");
+  assert.match(pulls, /fetch\(`https:\/\/api\.github\.com\/repos\/\$\{t\.owner\}\/\$\{t\.repo\}\$\{path\}`/, "GitHub's own API, for that repository, and nowhere else");
+  // No worker gains a way to merge by this: the engineer and gated maintainer denials are untouched.
+  const agents = src("agents.ts");
+  assert.match(agents, /export const SELF_MERGE_DENY = \["Bash\(gh pr merge\*\)", "Bash\(git merge\*\)", "Bash\(git push\*\)", "Bash\(gh api\*merge\*\)", "Bash\(gh api\*\/merges\*\)"\];/);
+  assert.doesNotMatch(agents, /app-pulls|AppPulls/);
 });
 
 test("a decision in the web app is Paul's own tap on the exact item shown, and reaches a gate only as a single-use grant", () => {
