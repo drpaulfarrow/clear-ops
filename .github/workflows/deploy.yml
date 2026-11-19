@@ -72,8 +72,15 @@ jobs:
       - name: Create the app and its volume on first run
         if: steps.check.outputs.ready == 'true'
         run: |
-          flyctl apps list --json | grep -q "\"Name\": *\"$FLY_APP\"" || flyctl apps create "$FLY_APP"
-          flyctl volumes list --app "$FLY_APP" --json | grep -q clear_ops_data || flyctl volumes create clear_ops_data --app "$FLY_APP" --region lhr --size 3 --yes
+          # "Not in the list" and "the list could not be read" are different things. Fly's API failed
+          # once on 19 Nov 2026, the old one-liner took that for "no such app" and tried to create it,
+          # and the deploy failed on a name already taken. The same slip on the second line would have
+          # made a second, empty volume. So a list that cannot be read stops here: nothing is created
+          # on a guess, the running service is untouched, and re-running the job is the fix.
+          apps=$(flyctl apps list --json) || { echo "Could not read the list of Fly apps, so nothing was created or deployed. Re-run this job."; exit 1; }
+          echo "$apps" | grep -q "\"Name\": *\"$FLY_APP\"" || flyctl apps create "$FLY_APP"
+          volumes=$(flyctl volumes list --app "$FLY_APP" --json) || { echo "Could not read the list of volumes, so nothing was created or deployed. Re-run this job."; exit 1; }
+          echo "$volumes" | grep -q clear_ops_data || flyctl volumes create clear_ops_data --app "$FLY_APP" --region lhr --size 3 --yes
       - name: Stage runtime secrets from this repository's secrets
         if: steps.check.outputs.ready == 'true'
         env:
