@@ -48,9 +48,12 @@ const GITHUB_TOKEN = "gho_tokenThatMustNeverBeKept123456";
 /** What the fake chief says. Unset, any run is a bug: nothing but a chat message may reach a model. */
 let chiefSays: string | undefined;
 const chiefAsked: string[] = [];
+/** The provider's ids for the calls the fake chief's next turns make, for the tests that price them. */
+let chiefCalls: string[] = [];
 const runner: AgentRunner = async (o) => {
   if (chiefSays === undefined) throw new Error("the web app must not run any worker");
   chiefAsked.push(o.prompt);
+  for (const id of chiefCalls) o.costMeter?.note(id);
   return { text: chiefSays, sessionId: "chief-session" };
 };
 
@@ -971,6 +974,38 @@ test("a job can be stopped or run again from the app, and nothing it was permitt
   }
 });
 
+test("the chief's own replies are priced after they are sent, by model, for the day", async () => {
+  const { RealCostMeter } = await import("../src/realcost.js");
+  const { chatPricingSettled } = await import("../src/orchestrator.js");
+  const cookie = await session();
+  const asked: string[] = [];
+  const provider = (async (input: string | URL) => {
+    const id = decodeURIComponent(new URL(String(input)).searchParams.get("id") ?? "");
+    asked.push(id);
+    return new Response(JSON.stringify({ data: { id, total_cost: id === "c1" ? 0.04 : 0.01, model: id === "c1" ? "z-ai/glm-5.3" : "deepseek/deepseek-v4.1-flash" } }), { status: 200 });
+  }) as typeof fetch;
+  const was = orchestrator.chiefMeter;
+  orchestrator.chiefMeter = () => new RealCostMeter({ apiKey: "test-key", fetch: provider, gapMs: 0, settleMs: 500, settlePassMs: 5, timeoutMs: 500, warn: () => undefined });
+  chiefSays = "Nothing is running.";
+  chiefCalls = ["c1", "c2"];
+  try {
+    assert.equal((await postChat({ text: "What is running?" }, cookie)).status, 202);
+    await settled();
+    await chatPricingSettled();
+    assert.deepEqual([...asked].sort(), ["c1", "c2"]);
+    const held = store.chatCost()!;
+    assert.deepEqual(held.models.map((m) => [m.model, m.usd, m.calls]), [["z-ai/glm-5.3", 0.04, 1], ["deepseek/deepseek-v4.1-flash", 0.01, 1]]);
+    // It is on the Spend page as the chief's own line, which is how a dear model on the chief shows up.
+    const page = JSON.parse(await text(await get(`${APP_PATH}/api/spend`, cookie))) as { byAgentModel: Array<{ who: string; model: string; usd: number }> };
+    const today = held.ymd === new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London" }).format(new Date(now));
+    if (today) assert.deepEqual(page.byAgentModel.filter((r) => r.who === "The chief").map((r) => [r.model, r.usd]), [["z-ai/glm-5.3", 0.04], ["deepseek/deepseek-v4.1-flash", 0.01]]);
+  } finally {
+    chiefSays = undefined;
+    chiefCalls = [];
+    orchestrator.chiefMeter = was;
+  }
+});
+
 /* ---------- Files with a message ---------- */
 
 const b64 = (s: string | Buffer) => Buffer.from(s).toString("base64");
@@ -1058,9 +1093,13 @@ test("the Spend page adds up only the provider's own figures, on the day a job f
   const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-spend-")));
   const done = (kind: string, title: string, target: string, minsAgo: number, usage?: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
     s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, target as never, PAUL, { title } as never).id, { status: "done", startedAt: iso(minsAgo + 10), finishedAt: iso(minsAgo), ...(usage ? { usage } : {}), ...extra } as never);
-  const a = done("engineer", "Dear one", "self", 30, { costUsd: 3.5, costSource: "provider" });
-  done("engineer", "Cheap one", "product", 60, { costUsd: 0.5, costSource: "provider" });
-  done("maintain", "Review: Dear one", "self", 20, { costUsd: 1, costSource: "provider" });
+  const totals = (calls: number) => ({ calls, promptTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, completionTokens: 0, reasoningTokens: 0, toolCalls: 0 });
+  // Priced call by call, so the record says which model each charge was for.
+  const a = done("engineer", "Dear one", "self", 30, { role: "engineer", costUsd: 3.5, costSource: "provider", totals: totals(40), costByModel: [{ model: "z-ai/glm-5.3", usd: 3.2, calls: 30 }, { model: "deepseek/deepseek-v4.1-flash", usd: 0.3, calls: 10 }] });
+  done("engineer", "Cheap one", "product", 60, { role: "engineer", costUsd: 0.5, costSource: "provider", totals: totals(8), costByModel: [{ model: "z-ai/glm-5.3", usd: 0.5, calls: 8 }] });
+  // A total only: under its one model when it ran on one, otherwise "not recorded".
+  done("maintain", "Review: Dear one", "self", 20, { role: "maintainer", costUsd: 1, costSource: "provider", totals: totals(12), models: [{ model: "moonshotai/kimi-k3.1-pro" }] });
+  s.setChatCost({ ymd: "2026-11-18", models: [{ model: "deepseek/deepseek-v4.1-flash", usd: 0.25, calls: 50 }] });
   // No figure of its own, the SDK's estimate, and yesterday's job: none of them is counted.
   done("research", "No figure", "product", 40);
   done("research", "Estimate only", "product", 45, { costUsd: 9, costSource: "estimate" }, { costUsd: 12 });
@@ -1069,14 +1108,24 @@ test("the Spend page adds up only the provider's own figures, on the day a job f
   const page = appSpend({ store: s, queue, now });
   assert.deepEqual(page.jobs.map((j) => [j.title, j.costUsd]), [["Dear one", 3.5], ["Review: Dear one", 1], ["Cheap one", 0.5]]);
   assert.equal(page.jobs[0]!.id, a.id);
-  assert.deepEqual(page.byAgent, [{ name: "engineer", usd: 4, jobs: 2 }, { name: "maintainer", usd: 1, jobs: 1 }]);
+  // "Which agent used which model for what": the chief's own replies are a line of their own.
+  assert.deepEqual(page.byAgentModel.map((r) => [r.who, r.model, Number(r.usd.toFixed(2)), r.calls]), [
+    ["Engineers", "z-ai/glm-5.3", 3.7, 38],
+    ["The maintainer", "moonshotai/kimi-k3.1-pro", 1, 12],
+    ["Engineers", "deepseek/deepseek-v4.1-flash", 0.3, 10],
+    ["The chief", "deepseek/deepseek-v4.1-flash", 0.25, 50],
+  ]);
   assert.deepEqual(page.byProject, [{ name: "workforce", usd: 4.5, jobs: 2 }, { name: "Clear Exchange", usd: 0.5, jobs: 1 }]);
-  assert.deepEqual([page.attributedUsd, page.unattributedUsd, page.withoutFigure], [5, 1.25, 2]);
+  assert.deepEqual([page.attributedUsd, page.unattributedUsd, page.withoutFigure], [5.25, 1, 2]);
+  // Yesterday's record of the chief's replies is not today's.
+  s.setChatCost({ ymd: "2026-11-17", models: [{ model: "deepseek/deepseek-v4.1-flash", usd: 9, calls: 1 }] });
+  assert.equal(appSpend({ store: s, queue, now }).byAgentModel.some((r) => r.who === "The chief"), false);
+  s.setChatCost({ ymd: "2026-11-18", models: [{ model: "deepseek/deepseek-v4.1-flash", usd: 0.25, calls: 50 }] });
   assert.ok(!page.jobs.some((j) => ["Estimate only", "No figure", "Yesterday"].includes(j.title)), "a job with only the SDK's estimate, with nothing, or from another day is not on the page");
   // With no provider reading for the day the estimate is not shown and nothing is subtracted from it;
   // and when the jobs' own figures come to more than the day's reading, no remainder is claimed.
   const blind = appSpend({ store: s, queue: { ...quietQueue, spendState: () => ({ usd: 40, source: "estimate" as const, note: "OpenRouter could not be read" }) }, now });
-  assert.deepEqual([blind.spend.usd, blind.unattributedUsd, blind.attributedUsd], [undefined, undefined, 5]);
+  assert.deepEqual([blind.spend.usd, blind.unattributedUsd, blind.attributedUsd], [undefined, undefined, 5.25]);
   assert.equal(appSpend({ store: s, queue: { ...quietQueue, spendState: () => ({ usd: 2, source: "provider" as const, asOf: now }) }, now }).unattributedUsd, undefined);
 });
 

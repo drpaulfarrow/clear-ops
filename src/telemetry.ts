@@ -24,7 +24,7 @@
  * text for any kind. `PRIVATE_KINDS`.
  */
 import type { Provider } from "./llm.js";
-import type { RealCost } from "./realcost.js";
+import type { ModelCost, RealCost } from "./realcost.js";
 import { spendDisplay, type RealSpend } from "./spend.js";
 import type { JobKind } from "./store.js";
 
@@ -221,8 +221,33 @@ export interface JobUsage {
   costSource: UsageCostSource;
   /** Why there is no per-job figure, when there is none. */
   costNote?: string;
+  /** The provider's own charges for this run by the model each call ran on (src/realcost.ts). */
+  costByModel?: ModelCost[];
   /** The job was stopped before it finished, so these figures are partial. */
   partial?: boolean;
+}
+
+/**
+ * Adds what the provider charged for one of the chief's turns to the day's record, by model, starting
+ * again when the London day turns over. Only the current day is ever held.
+ */
+export function mergeModelCosts(held: { ymd: string; models: ModelCost[] } | undefined, ymd: string, add: ModelCost[]): { ymd: string; models: ModelCost[] } {
+  const by = new Map<string, ModelCost>((held?.ymd === ymd ? held.models : []).map((m) => [m.model, { ...m }]));
+  for (const m of add) {
+    const row = by.get(m.model) ?? { model: m.model, usd: 0, calls: 0 };
+    by.set(m.model, { model: m.model, usd: row.usd + m.usd, calls: row.calls + m.calls });
+  }
+  return { ymd, models: [...by.values()].sort((a, b) => b.usd - a.usd) };
+}
+
+/**
+ * A usage record with the provider's own figure put in, for a run that was priced after it ended
+ * (src/realcost.ts). Only ever the provider's figure: anything else leaves the record as it was.
+ */
+export function withRealCost(usage: JobUsage, real: RealCost): JobUsage {
+  if (real.source !== "provider" || usage.provider === "anthropic") return usage;
+  const { costNote: _was, ...rest } = usage;
+  return { ...rest, costSource: "provider", costUsd: real.usd, ...(real.note ? { costNote: real.note } : {}), ...(real.byModel?.length ? { costByModel: real.byModel } : {}) };
 }
 
 /** Calls kept per job. Beyond this the totals keep counting and only the call list is trimmed. */
@@ -380,6 +405,7 @@ export function jobUsageFromRun(run: RunUsage, o: { partial?: boolean; realCost?
   else if (provider) {
     usage.costUsd = provider.usd;
     if (provider.note) usage.costNote = provider.note;
+    if (provider.byModel?.length) usage.costByModel = provider.byModel;
   } else usage.costNote = NO_PER_JOB_FIGURE;
   if (o.partial) usage.partial = true;
   return usage;

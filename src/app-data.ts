@@ -440,16 +440,27 @@ export interface AppSpendGroup {
   jobs: number;
 }
 
+/** One role on one model: what the provider charged for those calls today. */
+export interface AppSpendRow {
+  who: string;
+  model: string;
+  usd: number;
+  calls: number;
+}
+
+const ROLE_WORDS: Record<string, string> = { chief: "The chief", worker: "Workers", engineer: "Engineers", maintainer: "The maintainer", designer: "The designer", assistant: "The assistant" };
+
 export interface AppSpendPage {
   generatedAt: string;
   spend: AppSpend;
   /** Jobs that finished today and have the provider's own figure, dearest first. */
   jobs: Array<{ id: string; title: string; kind: string; who: string; repositoryName: string; costUsd: number }>;
-  byAgent: AppSpendGroup[];
+  /** Which role spent what on which model: the provider's own charges, dearest first. */
+  byAgentModel: AppSpendRow[];
   byProject: AppSpendGroup[];
-  /** Those jobs' figures added up. */
+  /** Those jobs' figures and the chief's own replies, added up. */
   attributedUsd: number;
-  /** Today's total less that, when today's total is the provider's own: the chief's replies and every job with no figure of its own. */
+  /** Today's total less that, when today's total is the provider's own: whatever has not been priced yet, and jobs still running. */
   unattributedUsd?: number;
   /** Jobs that finished today with no figure of their own. */
   withoutFigure: number;
@@ -482,7 +493,25 @@ export function appSpend(source: AppSource): AppSpendPage {
     }
     return [...by.values()].sort((a, b) => b.usd - a.usd);
   };
-  const attributed = priced.reduce((n, p) => n + p.usd, 0);
+  // Role by model. A job priced call by call says which model each charge was for; one with only a
+  // total is put under the one model it ran on, or under "not recorded" when it ran on several.
+  const rows = new Map<string, AppSpendRow>();
+  const addRow = (who: string, model: string, usd: number, calls: number) => {
+    const key = `${who}\n${model}`;
+    const row = rows.get(key) ?? { who, model, usd: 0, calls: 0 };
+    rows.set(key, { who, model, usd: row.usd + usd, calls: row.calls + calls });
+  };
+  for (const { job, usd } of priced) {
+    const who = ROLE_WORDS[job.usage?.role ?? ""] ?? kindName(job.kind);
+    const by = job.usage?.costByModel;
+    if (by?.length) for (const m of by) addRow(who, m.model, m.usd, m.calls);
+    else addRow(who, job.usage?.models?.length === 1 ? job.usage.models[0]!.model : "not recorded", usd, job.usage?.totals.calls ?? 0);
+  }
+  // The chief's own replies, priced after each turn.
+  const chat = source.store.chatCost();
+  const chief = chat?.ymd === today ? chat.models : [];
+  for (const m of chief) addRow(ROLE_WORDS.chief!, m.model, m.usd, m.calls);
+  const attributed = priced.reduce((n, p) => n + p.usd, 0) + chief.reduce((n, m) => n + m.usd, 0);
   return {
     generatedAt: new Date(now).toISOString(),
     spend,
@@ -490,7 +519,7 @@ export function appSpend(source: AppSource): AppSpendPage {
       .sort((a, b) => b.usd - a.usd)
       .slice(0, APP_SPEND_JOBS)
       .map(({ job, usd }) => ({ id: job.id, title: jobTitle(job), kind: job.kind, who: kindName(job.kind), repositoryName: repoLabel(lockKey(job) ?? job.target ?? "product"), costUsd: usd })),
-    byAgent: group((j) => kindName(j.kind)),
+    byAgentModel: [...rows.values()].sort((a, b) => b.usd - a.usd),
     byProject: group((j) => repoLabel(lockKey(j) ?? j.target ?? "product")),
     attributedUsd: attributed,
     ...(spend.usd !== undefined && spend.usd >= attributed ? { unattributedUsd: spend.usd - attributed } : {}),

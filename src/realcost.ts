@@ -25,8 +25,11 @@
  * figures have passed the cap, or when the SDK's guard fires, and then the message names the measure
  * that actually stopped it.
  *
- * Reading every call is one request per call, so nothing is read unless a cap needs a running total;
- * when a run ends for money its calls are priced once, there and then.
+ * Reading every call is one request per call, so during a run nothing is read unless a cap needs a
+ * running total. When a run ends for money its calls are priced once, there and then. And since
+ * 19 Nov 2026 every run that has ended is priced once in the background, after its result has gone to
+ * Paul, so the Spend page can say which role spent what on which model: the provider's reply names the
+ * model, and the figures are kept by model (`byModel`). That never holds a job up and never feeds a cap.
  */
 import { config } from "./config.js";
 import { OPENROUTER_BASE_URL } from "./llm.js";
@@ -60,6 +63,19 @@ export interface RealCost {
   source: "provider" | "unavailable";
   /** Why there is no figure, or why the figure is a lower bound, in one plain clause. */
   note?: string;
+  /**
+   * The same charges by the model the provider says each call ran on, dearest first. Set when at least
+   * one call was priced. The amounts are the provider's own, unrounded, so they can be added up across
+   * runs; `usd` above stays the figure a cap is judged on.
+   */
+  byModel?: ModelCost[];
+}
+
+/** What the provider charged for the calls it says ran on one model. */
+export interface ModelCost {
+  model: string;
+  usd: number;
+  calls: number;
 }
 
 /** What the SDK loop tells the meter: the generation id of each model call it sees. */
@@ -124,6 +140,8 @@ export class RealCostMeter implements JobCostWatch {
   private readonly seen = new Set<string>();
   private readonly ids: string[] = [];
   private readonly amounts = new Map<string, number>();
+  /** The model the provider says each priced call ran on. */
+  private readonly models = new Map<string, string>();
   /** Calls the provider has not published a figure for yet: read again, never given up on at once. */
   private readonly pending = new Set<string>();
   /** Calls there is no figure for and no point asking again about. */
@@ -208,11 +226,18 @@ export class RealCostMeter implements JobCostWatch {
     // Rounded to the cent up, like every other figure the provider gives us, and a fraction of a cent
     // is never lost in the workforce's favour.
     const rounded = Math.ceil(usd * 100) / 100;
+    const by = new Map<string, ModelCost>();
+    for (const [id, amount] of this.amounts) {
+      const model = this.models.get(id) ?? "not reported";
+      const row = by.get(model) ?? { model, usd: 0, calls: 0 };
+      by.set(model, { model, usd: row.usd + amount, calls: row.calls + 1 });
+    }
     return {
       usd: rounded,
       calls,
       read,
       source: "provider",
+      byModel: [...by.values()].sort((a, b) => b.usd - a.usd),
       ...(read < calls ? { note: `OpenRouter priced ${read} of this job's ${calls} calls, so the figure is a lower bound` } : {}),
     };
   }
@@ -288,7 +313,7 @@ export class RealCostMeter implements JobCostWatch {
         this.notYet(id, attempt, res.status === 404 ? undefined : `HTTP ${res.status}`);
         return;
       }
-      const body = (await res.json()) as { data?: { total_cost?: unknown } };
+      const body = (await res.json()) as { data?: { total_cost?: unknown; model?: unknown } };
       const amount = Number(body?.data?.total_cost);
       if (!Number.isFinite(amount) || amount < 0) {
         this.unpriced.add(id);
@@ -296,6 +321,7 @@ export class RealCostMeter implements JobCostWatch {
       }
       this.pending.delete(id);
       this.amounts.set(id, amount);
+      if (typeof body.data?.model === "string" && body.data.model.trim()) this.models.set(id, body.data.model.trim().slice(0, 120));
       this.checkCap();
     } catch (err) {
       this.notYet(id, attempt, err instanceof Error ? err.message : String(err));
