@@ -231,8 +231,9 @@ test("the merged current schema: a resumed session under the versioned namespace
   // Two schema changes each shipped as version 3 on their own branch (main's 3 added start_job's
   // private source reference; the contract branch's 3 added doneWhen). The integration reconciles
   // them as one schema, version 4, so the versioned ops namespace stays the single source of truth.
-  assert.equal(OPS_SCHEMA_VERSION, 4, "the merged wire shape bumps the schema version past both version 3s");
-  assert.equal(OPS_SERVER_NAME, "ops_v4", "the one current namespace carries both parameters");
+  // Version 5 since 19 Nov 2026: the usage_report tool, a new tool and so a schema change of its own.
+  assert.equal(OPS_SCHEMA_VERSION, 5, "the current version: 4 merged both version 3s, 5 added usage_report");
+  assert.equal(OPS_SERVER_NAME, "ops_v5", "the one current namespace carries both parameters");
   // The same session again, resumed under the current namespace with the merged schema: the model
   // must be advertised doneWhen and source together, and the real CLI must dispatch both.
   const four = await runTurn("turn-four", { resume: firstSession, name: OPS_SERVER_NAME, withReviewOnly: true, withCurrent: true, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn four", brief: "Synthetic brief.", reviewOnly: true, source: "synthetic-source-reference" } });
