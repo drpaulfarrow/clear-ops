@@ -59,7 +59,7 @@ import { repoLabel } from "./job-descriptions.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
-import { routeWeb, webChat as serviceWebChat, webFiles, WebFilesError, webRefusal, webThread, WEB_BODY_LIMIT, WEB_COMMANDS, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
+import { routeWeb, webChat as serviceWebChat, webFiles, WebFilesError, webOwnChat, webRefusal, webThread, WEB_BODY_LIMIT, WEB_COMMANDS, WEB_NEW_CHAT, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
 import { parseCodeCommand } from "./otp.js";
 import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
@@ -867,6 +867,9 @@ export function buildApp(given: AppDeps) {
     if (job) return deps.store.getJob(job[1]!) ? webThread({ job: job[1]! }) : undefined;
     const pull = /^pull:([A-Za-z0-9._-]{1,64}):([1-9]\d{0,8})$/.exec(raw);
     if (pull) return repoRegistry.list().some((r) => r.alias === pull[1] && r.slug) ? webThread({ pull: { repo: pull[1]!, number: Number(pull[2]) } }) : undefined;
+    // One of Paul's own chats: only an id the transcript itself made and still keeps.
+    const own = /^chat:([a-f0-9]{8})$/.exec(raw);
+    if (own) return chat.chat(own[1]!) ? webOwnChat(own[1]!) : undefined;
     return undefined;
   };
   app.get(`${APP_PATH}/api/chat`, (req, res) => {
@@ -915,14 +918,19 @@ export function buildApp(given: AppDeps) {
     }
     if (!text && !files.length) return void res.status(400).json({ error: "empty" });
     if (text.length > WEB_TEXT_MAX) return void res.status(413).json({ error: "too long" });
-    // The main conversation, or the thread of a job or a pull request: only ever one of the app's own.
-    const where = appThread((req.body as { thread?: unknown } | undefined)?.thread);
+    // The main conversation, the thread of a job or a pull request, or a chat of his own: only ever one
+    // of the app's own. A new chat is opened by its first message: the service makes its id and names it
+    // from what is kept of that message, so a one-time code never becomes a name.
+    const asked = (req.body as { thread?: unknown } | undefined)?.thread;
+    const kept = parseCodeCommand(text) ? WEB_CODE_PLACEHOLDER : text;
+    const opened = asked === WEB_NEW_CHAT ? chat.open(kept || files[0]!.name) : undefined;
+    const where = opened ? webOwnChat(opened.id) : appThread(asked);
     if (!where) return void res.status(404).json({ error: "There is no such thread." });
     const refused = webRefusal(text);
-    chat.inbound(parseCodeCommand(text) ? WEB_CODE_PLACEHOLDER : text, where, files.map((f) => f.name));
+    chat.inbound(kept, where, files.map((f) => f.name));
     if (refused) void chat.send(where, refused);
     else void orchestrator.handle(WEB_SENDER, text, { replyTo: where, web: true, ...(files.length ? { attachments: files } : {}) });
-    res.status(202).json({ ok: true });
+    res.status(202).json({ ok: true, ...(opened ? { thread: `chat:${opened.id}` } : {}) });
   });
   /**
    * Paul's decision on something waiting for him, from the app's own button (slice 3; his call on 18 Nov

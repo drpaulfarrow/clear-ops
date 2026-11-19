@@ -25,6 +25,7 @@
  * what the chief said to Paul, which can include what a job found, so it is treated like the rest of
  * the data volume: never in a checkout, never copied anywhere, read only by the signed-in app.
  */
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
@@ -45,8 +46,26 @@ export const WEB_PREFIX = "web:";
 export const WEB_SENDER = "web:paul";
 /** The app's main conversation with the chief, and where its jobs report. */
 export const WEB_CONVERSATION = "web:main";
-/** A thread about one job or one pull request. Nothing else is a conversation of the app's. */
-const WEB_THREAD = /^web:(?:job:([A-Za-z0-9_-]{1,64})|pull:([A-Za-z0-9._-]{1,64}):([1-9]\d{0,8}))$/;
+/**
+ * A thread about one job or one pull request, or (since 19 Nov 2026) a chat of Paul's own beside the
+ * main one, under an id the service made when he opened it. Nothing else is a conversation of the app's.
+ */
+const WEB_THREAD = /^web:(?:job:([A-Za-z0-9_-]{1,64})|pull:([A-Za-z0-9._-]{1,64}):([1-9]\d{0,8})|chat:([a-f0-9]{8}))$/;
+/** The address of one of Paul's own chats, by its id. */
+const WEB_OWN = /^web:chat:[a-f0-9]{8}$/;
+/** What the app sends as the thread of the first message of a chat that does not exist yet. */
+export const WEB_NEW_CHAT = "chat:new";
+/** How many chats of his own are kept. Opening one more drops the one quiet for longest, with everything in it. */
+export const WEB_CHATS_MAX = 50;
+/** The longest name a chat is given. */
+export const WEB_CHAT_TITLE_MAX = 48;
+
+/** One of Paul's own chats: the id the service gave it and the name it took from his first words. */
+export interface OwnChat {
+  id: string;
+  title: string;
+  createdAt: string;
+}
 /** What a thread is about. */
 export type WebTopic = { job: string } | { pull: { repo: string; number: number } };
 
@@ -58,8 +77,15 @@ export function isWebConversation(address: string): boolean {
 /** What a thread's address is about, or undefined for the main conversation and anything else. */
 export function webTopic(address: string): WebTopic | undefined {
   const m = WEB_THREAD.exec(address);
-  if (!m) return undefined;
+  // A chat of his own is about nothing in particular: only a job's or a pull request's thread has a topic.
+  if (!m || m[4]) return undefined;
   return m[1] ? { job: m[1] } : { pull: { repo: m[2]!, number: Number(m[3]) } };
+}
+
+/** The address of one of Paul's own chats, or undefined when the id is not one the service makes. */
+export function webOwnChat(id: string): string | undefined {
+  const address = `web:chat:${id}`;
+  return WEB_OWN.test(address) ? address : undefined;
 }
 
 /** The address of the thread about a job or a pull request, or undefined when it does not name one. */
@@ -217,6 +243,8 @@ export interface WebChatOptions {
 
 export class WebChat {
   private messages: WebMessage[] = [];
+  /** Paul's own chats, in the order they were opened. */
+  private chats: OwnChat[] = [];
   private seq = 0;
   private typingUntil = new Map<string, number>();
   /** `threads()` as last worked out, until a message is added or removed. The board asks every few seconds. */
@@ -240,8 +268,11 @@ export class WebChat {
   private load(): void {
     if (!this.file) return;
     try {
-      const saved = JSON.parse(fs.readFileSync(this.file, "utf8")) as { seq?: unknown; messages?: unknown };
+      const saved = JSON.parse(fs.readFileSync(this.file, "utf8")) as { seq?: unknown; messages?: unknown; chats?: unknown };
+      if (Array.isArray(saved.chats)) this.chats = (saved.chats as OwnChat[]).filter((c) => c && typeof c.id === "string" && WEB_OWN.test(`web:chat:${c.id}`) && typeof c.title === "string" && typeof c.createdAt === "string").slice(-WEB_CHATS_MAX);
       if (Array.isArray(saved.messages)) this.messages = (saved.messages as WebMessage[]).filter((m) => m && typeof m.id === "string" && typeof m.text === "string" && (m.from === "paul" || m.from === "clearops") && (m.thread === undefined || (typeof m.thread === "string" && WEB_THREAD.test(m.thread))) && (m.picture === undefined || (typeof m.picture === "string" && WEB_PICTURE.test(m.picture))));
+      // A message in a chat that is no longer kept goes with it.
+      this.messages = this.messages.filter((m) => !m.thread || !WEB_OWN.test(m.thread) || this.chats.some((c) => `web:chat:${c.id}` === m.thread));
       this.seq = typeof saved.seq === "number" ? saved.seq : this.messages.length;
       this.read = true;
     } catch (err) {
@@ -256,7 +287,7 @@ export class WebChat {
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
       const tmp = `${this.file}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ seq: this.seq, messages: this.messages.filter((m) => !m.live) }), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify({ seq: this.seq, chats: this.chats, messages: this.messages.filter((m) => !m.live) }), { mode: 0o600 });
       fs.renameSync(tmp, this.file);
     } catch (err) {
       console.warn(`The app's chat could not be saved: ${err instanceof Error ? err.message : "error"}`);
@@ -265,7 +296,49 @@ export class WebChat {
 
   /** The thread an address names, or undefined for the main conversation. Anything else of the app's is the main one. */
   private threadOf(to: string): string | undefined {
-    return WEB_THREAD.test(to) ? to : undefined;
+    if (!WEB_THREAD.test(to)) return undefined;
+    // One of his own chats that is no longer kept: what was meant for it lands in the main conversation, not nowhere.
+    if (WEB_OWN.test(to) && !this.chats.some((c) => `web:chat:${c.id}` === to)) return undefined;
+    return to;
+  }
+
+  /* ---------- Paul's own chats ---------- */
+
+  /**
+   * Opens a chat of Paul's own, named from the words it starts with: the first line, tidied and cut
+   * short. The id is made here, at random, and is the only way the chat is ever addressed. Past
+   * WEB_CHATS_MAX the chat quiet for longest goes, with its messages and pictures.
+   */
+  open(firstWords: string): OwnChat {
+    const line = redact(firstWords).split("\n").find((l) => l.trim())?.replace(/\s+/g, " ").trim() ?? "";
+    const title = line.length > WEB_CHAT_TITLE_MAX ? `${line.slice(0, WEB_CHAT_TITLE_MAX - 1).trimEnd()}\u2026` : line || "New chat";
+    let id = randomBytes(4).toString("hex");
+    while (this.chats.some((c) => c.id === id)) id = randomBytes(4).toString("hex");
+    const opened: OwnChat = { id, title, createdAt: new Date(this.now()).toISOString() };
+    this.chats.push(opened);
+    if (this.chats.length > WEB_CHATS_MAX) {
+      const quiet = (c: OwnChat) => this.in(`web:chat:${c.id}`).at(-1)?.at ?? c.createdAt;
+      const oldest = this.chats.filter((c) => c !== opened).sort((a, b) => quiet(a).localeCompare(quiet(b)))[0]!;
+      this.chats = this.chats.filter((c) => c !== oldest);
+      for (const m of this.in(`web:chat:${oldest.id}`)) if (m.picture) this.discard(m.picture);
+      this.messages = this.messages.filter((m) => m.thread !== `web:chat:${oldest.id}`);
+      this.notes = undefined;
+    }
+    this.save();
+    return opened;
+  }
+
+  /** One of his own chats by its id, if it is still kept. */
+  chat(id: string): OwnChat | undefined {
+    return this.chats.find((c) => c.id === id);
+  }
+
+  /** His own chats for the app's list: the one spoken in most recently first. */
+  ownChats(): Array<OwnChat & { count: number; lastAt: string }> {
+    const notes = this.threads();
+    return this.chats
+      .map((c) => ({ ...c, count: notes.get(`web:chat:${c.id}`)?.count ?? 0, lastAt: notes.get(`web:chat:${c.id}`)?.lastAt ?? c.createdAt }))
+      .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
   }
 
   private in(thread: string | undefined): WebMessage[] {
@@ -286,14 +359,16 @@ export class WebChat {
   /** Each conversation keeps its newest messages, and only so many threads are kept at all. */
   private trim(thread: string | undefined): void {
     const before = this.messages;
-    const keep = thread ? WEB_THREAD_KEEP : WEB_KEEP;
+    // One of his own chats is a conversation in full and keeps as much as the main one.
+    const keep = thread && !WEB_OWN.test(thread) ? WEB_THREAD_KEEP : WEB_KEEP;
     const mine = this.in(thread);
     if (mine.length > keep) {
       const drop = new Set(mine.slice(0, mine.length - keep));
       this.messages = this.messages.filter((m) => !drop.has(m));
     }
     const last = new Map<string, number>();
-    this.messages.forEach((m, i) => m.thread && last.set(m.thread, i));
+    // Only job and pull request threads are counted here: his own chats have their own limit (`open`).
+    this.messages.forEach((m, i) => m.thread && !WEB_OWN.test(m.thread) && last.set(m.thread, i));
     if (last.size > WEB_THREADS_MAX) {
       const gone = new Set([...last].sort((a, b) => a[1] - b[1]).slice(0, last.size - WEB_THREADS_MAX).map(([t]) => t));
       this.messages = this.messages.filter((m) => !m.thread || !gone.has(m.thread));

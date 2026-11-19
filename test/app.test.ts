@@ -24,6 +24,7 @@ const { AppAuth, APP_PATH, APP_SIGN_IN_PATH, APP_AUTH_START_PATH, APP_AUTH_CALLB
 const { appBoard, appChat, appHistory, appJob, APP_HISTORY_PAGE } = await import("../src/app-data.js");
 const { webFiles, WebFilesError, WEB_FILES_MAX, WEB_FILES_BYTES } = await import("../src/web-chat.js");
 const { WEB_COMMANDS, WEB_PICTURE_BYTES } = await import("../src/web-chat.js");
+const { webOwnChat, WEB_NEW_CHAT, WEB_CHATS_MAX, WEB_CHAT_TITLE_MAX } = await import("../src/web-chat.js");
 const { HELP } = await import("../src/orchestrator.js");
 const { WebChat, routeWeb, webRefusal, webThread, webTopic, isWebConversation, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_THREAD_KEEP, WEB_THREADS_MAX, WEB_TEXT_MAX } = await import("../src/web-chat.js");
 const { isAllowed } = await import("../src/config.js");
@@ -1417,6 +1418,143 @@ test("each thread keeps its own transcript, apart from the main conversation and
   assert.equal(big.threads().size, WEB_THREADS_MAX);
   assert.equal(big.threads().has(A), false, "the thread quiet for longest is the one let go");
   assert.equal(big.threads().has(`web:job:j${WEB_THREADS_MAX + 4}`), true);
+});
+
+test("a chat of Paul's own is addressed by an id the service made, and is about nothing in particular", () => {
+  assert.equal(webOwnChat("1a2b3c4d"), "web:chat:1a2b3c4d");
+  for (const bad of ["", "new", "1a2b3c4", "1a2b3c4d5", "1A2B3C4D", "1a2b3c4g", "../../etc", "1a2b3c4d\n", "1a2b 3c4"]) assert.equal(webOwnChat(bad), undefined, JSON.stringify(bad));
+  assert.equal(isWebConversation("web:chat:1a2b3c4d"), true);
+  // It is not a job's or a pull request's thread, so no job's context is ever attached to it by its address.
+  assert.equal(webTopic("web:chat:1a2b3c4d"), undefined);
+  for (const bad of ["web:chat:", "web:chat:new", "web:chat:1a2b3c4", "web:chat:1A2B3C4D", "web:chat:1a2b3c4d:x", "web:chat:1a2b3c4d\n", "web:chats:1a2b3c4d"]) assert.equal(isWebConversation(bad), false, JSON.stringify(bad));
+});
+
+test("Paul's own chats are kept apart, named from their first words, and limited in number", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-own-chats-"));
+  let t = Date.UTC(2026, 10, 19, 9, 0, 0);
+  const own = new WebChat({ dir, now: () => (t += 1000) });
+  // Named by the service from the first line of what it starts with: tidied, cut short, never empty.
+  const offsite = own.open("  Plan the   Prebid offsite\nin January, somewhere warm ");
+  assert.match(offsite.id, /^[a-f0-9]{8}$/);
+  assert.equal(offsite.title, "Plan the Prebid offsite");
+  const long = own.open("x".repeat(200));
+  assert.equal(long.title.length, WEB_CHAT_TITLE_MAX);
+  assert.ok(long.title.endsWith("…"));
+  assert.equal(own.open("").title, "New chat");
+  assert.equal(own.open("\n\n").title, "New chat");
+  assert.notEqual(offsite.id, long.id);
+  assert.deepEqual(own.chat(offsite.id), offsite);
+  assert.equal(own.chat("00000000"), undefined);
+
+  // Each is a conversation of its own: nothing said in one is in another, or in the main one.
+  const A = webOwnChat(offsite.id)!;
+  const B = webOwnChat(long.id)!;
+  own.inbound("Where should it be?", A);
+  await own.send(A, "Lisbon is warm enough in January.");
+  own.inbound("Something else", B);
+  own.inbound("In the main conversation");
+  assert.deepEqual(own.view(A).messages.map((m) => m.text), ["Where should it be?", "Lisbon is warm enough in January."]);
+  assert.deepEqual(own.view(B).messages.map((m) => m.text), ["Something else"]);
+  assert.deepEqual(own.view().messages.map((m) => m.text), ["In the main conversation"]);
+  assert.deepEqual((await own.recent(A, 10)).map((m) => m.text), ["Where should it be?", "Lisbon is warm enough in January."]);
+  // The list is the one spoken in most recently first, with how much is in each.
+  assert.deepEqual(own.ownChats().slice(0, 2).map((c) => [c.title, c.count]), [[long.title, 1], ["Plan the Prebid offsite", 2]]);
+
+  // Kept across a restart, with its messages.
+  const again = new WebChat({ dir, now: () => (t += 1000) });
+  assert.deepEqual(again.chat(offsite.id), offsite);
+  assert.deepEqual(again.view(A).messages.map((m) => m.text), ["Where should it be?", "Lisbon is warm enough in January."]);
+
+  // A chat keeps as much as the main conversation, and is not one of the job threads that are counted and dropped.
+  for (let i = 0; i < WEB_THREAD_KEEP + 5; i++) again.inbound(`line ${i}`, A);
+  assert.equal((await again.recent(A, WEB_KEEP)).length, WEB_THREAD_KEEP + 7, "more than a job's thread keeps");
+  for (let i = 0; i < WEB_THREADS_MAX + 3; i++) again.inbound("in a job's thread", `web:job:j${i}`);
+  assert.ok(again.chat(offsite.id) && again.view(A).messages.length > 0, "job threads coming and going never drop a chat of his own");
+
+  // Past the limit the chat quiet for longest goes, with its messages and its pictures; the rest stay.
+  const png = path.join(dir, "shot.png");
+  fs.writeFileSync(png, PNG);
+  const quiet = again.open("The quiet one");
+  await again.sendImage(webOwnChat(quiet.id)!, png, "A picture in it");
+  const picture = again.view(webOwnChat(quiet.id)!).messages.at(-1)!.picture!;
+  assert.ok(again.picture(picture));
+  const B2 = webOwnChat(long.id)!;
+  for (const c of again.ownChats()) if (c.id !== quiet.id) again.inbound("still in use", webOwnChat(c.id)!);
+  while (again.ownChats().length < WEB_CHATS_MAX) again.inbound("first words", webOwnChat(again.open("another").id)!);
+  assert.ok(again.chat(quiet.id), "at the limit nothing has gone yet");
+  again.open("one more than the limit");
+  assert.equal(again.ownChats().length, WEB_CHATS_MAX);
+  assert.equal(again.chat(quiet.id), undefined);
+  assert.equal(again.picture(picture), undefined);
+  assert.ok(!fs.existsSync(path.join(dir, "app", "pictures", picture)));
+  assert.ok(again.chat(offsite.id) && again.chat(long.id) && again.view(B2).messages.length > 0);
+  // What is meant for a chat that is no longer kept (a job finishing later) lands in the main conversation, not nowhere.
+  await again.send(webOwnChat(quiet.id)!, "Finished: the job you started there");
+  assert.equal(again.view().messages.at(-1)!.text, "Finished: the job you started there");
+});
+
+test("a new chat is opened by its first message from Paul's signed-in browser, and is its own conversation with the chief", async () => {
+  const cookie = await session();
+  const view = async (thread?: string) => {
+    const res = await get(`${APP_PATH}/api/chat${thread ? `?thread=${encodeURIComponent(thread)}` : ""}`, cookie);
+    return { status: res.status, body: res.status === 200 ? (JSON.parse(await text(res)) as { messages: Array<{ from: string; text?: string; html?: string }>; chats: Array<{ id: string; title: string; count: number }>; jobs: unknown[] }) : undefined };
+  };
+  const chatsBefore = (await view()).body!.chats.length;
+  const mainBefore = (await view()).body!.messages.length;
+
+  // Not signed in, or not this site's own script: nothing is opened.
+  assert.equal((await postChat({ text: "Plan the offsite", thread: WEB_NEW_CHAT })).status, 401);
+  assert.equal((await postChat({ text: "Plan the offsite", thread: WEB_NEW_CHAT }, cookie, { origin: "https://evil.example" })).status, 403);
+  assert.equal((await postChat({ text: "", thread: WEB_NEW_CHAT }, cookie)).status, 400);
+  assert.equal((await postChat({ text: "x".repeat(WEB_TEXT_MAX + 1), thread: WEB_NEW_CHAT }, cookie)).status, 413);
+  // Reading never opens one, and an id the transcript does not keep names nothing, whatever its shape.
+  assert.equal((await view(WEB_NEW_CHAT)).status, 404);
+  assert.equal((await view("chat:00000000")).status, 404);
+  assert.equal((await postChat({ text: "hello", thread: "chat:00000000" }, cookie)).status, 404);
+  assert.equal((await postChat({ text: "hello", thread: "chat:../main" }, cookie)).status, 404);
+  assert.equal((await view()).body!.chats.length, chatsBefore, "none of that opened a chat");
+
+  chiefSays = "Lisbon is warm enough in January.";
+  chiefAsked.length = 0;
+  try {
+    const res = await postChat({ text: "Plan the Prebid offsite\nsomewhere warm", thread: WEB_NEW_CHAT }, cookie);
+    assert.equal(res.status, 202);
+    const said = (await res.json()) as { ok: boolean; thread?: string };
+    assert.match(said.thread!, /^chat:[a-f0-9]{8}$/);
+    const address = `web:${said.thread}`;
+    for (let i = 0; i < 100 && chat.view(address).messages.at(-1)?.from !== "clearops"; i++) await new Promise((r) => setTimeout(r, 10));
+    // The service named it from his first line, and it is in the list every conversation carries.
+    const mine = await view(said.thread);
+    assert.deepEqual(mine.body!.chats.find((c) => `chat:${c.id}` === said.thread), { id: said.thread!.slice(5), title: "Plan the Prebid offsite", count: 2, lastAt: mine.body!.chats.find((c) => `chat:${c.id}` === said.thread)!.lastAt } as never);
+    assert.deepEqual(mine.body!.messages.map((m) => m.from), ["paul", "clearops"]);
+    assert.match(mine.body!.messages[1]!.html!, /Lisbon is warm enough/);
+    // The chief gets his words and nothing attached: a chat of his own is about no job.
+    assert.equal(chiefAsked.length, 1);
+    assert.equal(chiefAsked[0], "Plan the Prebid offsite\nsomewhere warm");
+    // Its own conversation with the chief, and none of it in the main one or anywhere else.
+    assert.equal(store.getSession(address), "chief-session");
+    assert.equal((await view()).body!.messages.length, mainBefore);
+    assert.equal(elsewhere.filter((m) => m.text.includes("Lisbon")).length, 0);
+
+    // A second message goes to the same chat by its id, and opens nothing new.
+    assert.equal(((await (await postChat({ text: "And where to stay?", thread: said.thread }, cookie)).json()) as { thread?: string }).thread, undefined);
+    for (let i = 0; i < 100 && chat.view(address).messages.filter((m) => m.from === "clearops").length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal((await view(said.thread)).body!.messages.length, 4);
+    assert.equal((await view()).body!.chats.length, chatsBefore + 1);
+
+    // No approval word works in a chat of his own either, and a one-time code never becomes its name.
+    chiefAsked.length = 0;
+    const word = (await (await postChat({ text: "send 9b80e7", thread: said.thread }, cookie)).json()) as { ok: boolean };
+    assert.equal(word.ok, true);
+    assert.equal(chat.view(address).messages.at(-1)!.text, WEB_APPROVAL_REFUSAL);
+    const coded = (await (await postChat({ text: "code 9b80e7 481516", thread: WEB_NEW_CHAT }, cookie)).json()) as { thread?: string };
+    const codedView = (await view(coded.thread)).body!;
+    assert.equal(codedView.chats.find((c) => `chat:${c.id}` === coded.thread)!.title, WEB_CODE_PLACEHOLDER);
+    assert.ok(!JSON.stringify(codedView).includes("481516"));
+    assert.equal(chiefAsked.length, 0, "neither reached the chief");
+  } finally {
+    chiefSays = undefined;
+  }
 });
 
 test("a message in a job's thread reaches the chief with that job attached, and stays in that thread", async () => {

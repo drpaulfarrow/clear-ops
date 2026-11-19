@@ -22,7 +22,7 @@ The app opens on a conversation with the chief, with the board beside it. A swit
 - **While the chief works** the conversation shows what it is doing, as Discord does.
 - **Slash commands work as typed**: `/jobs`, `/spend`, `/resume`, `/trace <id>` and the rest. Since slice 8 typing a slash opens a menu of them.
 - **Typed approval words do not work here.** `send`, `buy`, `dns apply`, `signup apply`, a one-time code, `act as me`, `read doc`, `yes <id>`, `/password` and device pairing are refused with one plain line, and still work in Discord. Since slice 3 the app approves with buttons instead (below).
-- **Not yet**: a separate conversation per project. Files and voice notes came in slice 7, pictures in replies in slice 8.
+- **Not yet**: a separate conversation per project. Files and voice notes came in slice 7, pictures in replies in slice 8, and chats of Paul's own beside the main one in slice 9.
 
 ### How the chat is kept safe (`src/web-chat.ts`, `src/orchestrator.ts`)
 
@@ -144,6 +144,22 @@ Not here: a preview on a message after it is sent. The service keeps a sent file
 ### What this changes in the rules
 
 Nothing is loosened. One read route is added, for pictures the service itself put in the conversation. The invariant test pins that it takes a name and no path, that only `sendImage` keeps a picture, and that the app's chat never reads the uploads directory.
+
+## What slice 9 adds: chats of Paul's own (`open` and `ownChats` in `src/web-chat.ts`)
+
+Paul asked on 19 Nov 2026 to start a new chat on a new subject whenever he likes and pick between them. `docs/app/chats.png` shows it with made-up jobs.
+
+- **A bar above the conversation** names the chat being shown and opens the list: Main, then his own, the one spoken in most recently first. New chat starts another. The app remembers which one was open.
+- **Each is its own conversation with the chief**, as a job's thread is: what is said in one is not carried into another. Jobs started in a chat report there and show there as cards. The chief's notes and the jobs themselves are shared, as everywhere.
+- **A chat is opened by its first message.** New chat only clears the page. The service makes the chat's id, at random, when that first message arrives, and names it from the first line of what is kept of the message, cut to 48 characters. A one-time code is never kept, so it never becomes a name.
+- **Main is where the service reports**: decisions, settings changes and the cards for what is waiting on him appear there only. A chat of his own stays on its subject, and the header still says when something waits.
+- **Limits.** 50 chats, each keeping as much as the main conversation. Opening one more drops the chat quiet for longest, with its messages and pictures. A job that finishes after its chat has gone reports in Main.
+
+Not here yet: renaming or deleting a chat, and a marker for a chat with something new in it.
+
+### What this changes in the rules
+
+One invariant is widened, on Paul's ask: which conversations the app's sender may speak in. It was the main one or the thread of a job or a pull request; it is now also a chat of his own. What the invariant protects is unchanged and still pinned by the test: the address is only ever one the service made, a request names a chat only by an id the transcript already keeps or asks for a new one with one fixed word, a chat is opened only by the message route after the same-site check, reading never opens one, and approval words are refused in a chat as everywhere in the app.
 
 ## Still to come
 
