@@ -1364,6 +1364,17 @@ test("the command menu offers what the chief understands, and nothing the app wo
   assert.match(menu, /textarea\.value = filled\(c\);/);
 });
 
+test("the app never hands replaceChildren something that is not an element", () => {
+  // replaceChildren writes whatever is not a node as text, so a closed list passed as null showed the
+  // word "null" under the chat bar (19 Nov 2026). Every call either builds its children with h(), which
+  // drops nothing-values, spreads a list, or passes one element.
+  const script = appAsset("app.js")!.body.toString();
+  const calls = [...script.matchAll(/\.replaceChildren\(([^\n]*)\n?/g)].map((m) => m[1]!.trim());
+  assert.ok(calls.length >= 12);
+  for (const first of calls) assert.match(first, /^(\.\.\.|$|icon\(|shellEl\)|homeEl\)|header\(|spendPage\(|boardPage\(|r\.name === "job" \? jobPage\(\) : pullPage\(r\)\))/, `replaceChildren(${first}`);
+  assert.match(script, /chatBarEl\.replaceChildren\(\n\s*\.\.\.\[[\s\S]*?\]\.filter\(Boolean\),\n\s*\);/);
+});
+
 test("a thread's address names a job or a pull request, and nothing else is a conversation of the app's", () => {
   assert.equal(webThread({ job: "ab12cd" }), "web:job:ab12cd");
   assert.equal(webThread({ pull: { repo: "self", number: 111 } }), "web:pull:self:111");
