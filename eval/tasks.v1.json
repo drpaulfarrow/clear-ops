@@ -1,0 +1,453 @@
+{
+  "version": "1",
+  "note": "Baseline eval set for the efficiency programme (13 Nov 2026). Thirty representative tasks in the workforce's own style, each with what a correct answer must contain and how it is judged (src/eval.ts). Every task is public or about our own repositories: none touches Paul's mail, calendar or uploads. Change this file only by adding a new version beside it, so a later slice always compares like with like.",
+  "tasks": [
+    {
+      "id": "fact-spur",
+      "category": "current-fact",
+      "prompt": "What is SPUR, who runs it, and what problem does it solve for publishers? Two or three sentences, with a link.",
+      "judge": {
+        "any": [
+          "spur"
+        ],
+        "cite": true
+      }
+    },
+    {
+      "id": "fact-comp",
+      "category": "current-fact",
+      "prompt": "What is IAB Tech Lab CoMP and what does it standardise? Three sentences at most, with a link.",
+      "judge": {
+        "any": [
+          "comp"
+        ],
+        "all": [
+          "iab"
+        ],
+        "cite": true,
+        "maxWords": 140
+      }
+    },
+    {
+      "id": "fact-trusted-server",
+      "category": "current-fact",
+      "prompt": "What is Trusted Server and who runs it? Two sentences, with a link.",
+      "judge": {
+        "any": [
+          "trusted server"
+        ],
+        "cite": true,
+        "maxWords": 110
+      }
+    },
+    {
+      "id": "fact-web-bot-auth",
+      "category": "current-fact",
+      "prompt": "What is Web Bot Auth and what does it let a server do? One short paragraph, with a link.",
+      "judge": {
+        "any": [
+          "web bot auth",
+          "webbotauth"
+        ],
+        "cite": true,
+        "maxWords": 140
+      }
+    },
+    {
+      "id": "fact-tollbit",
+      "category": "current-fact",
+      "prompt": "What does TollBit do, and who buys it? Three sentences at most, with links.",
+      "judge": {
+        "any": [
+          "tollbit"
+        ],
+        "cite": true,
+        "maxWords": 140
+      }
+    },
+    {
+      "id": "fact-prebid-release",
+      "category": "current-fact",
+      "prompt": "What is the current stable release of Prebid.js, and roughly when was it published? Give the version and the date, with a link.",
+      "judge": {
+        "any": [
+          "prebid"
+        ],
+        "regex": [
+          "\\bv?\\d+\\.\\d+(\\.\\d+)?\\b",
+          "\\b(20\\d\\d|january|february|march|april|may|june|july|august|september|october|november|december)\\b"
+        ],
+        "cite": true
+      }
+    },
+    {
+      "id": "repo-managed-list",
+      "category": "own-repo",
+      "prompt": "Which repositories do you manage, and what is each one for? One line each.",
+      "judge": {
+        "all": [
+          "clear-exchange",
+          "clear-ops"
+        ],
+        "any": [
+          "drpaulfarrow.com",
+          "site"
+        ],
+        "maxWords": 180
+      }
+    },
+    {
+      "id": "repo-chief-model",
+      "category": "own-repo",
+      "prompt": "Which model does the chief of staff run on by default, and how would I change it? Answer from the repository, not from memory.",
+      "judge": {
+        "any": [
+          "haiku"
+        ],
+        "all": [
+          "CHIEF_MODEL"
+        ],
+        "maxWords": 160
+      }
+    },
+    {
+      "id": "repo-engineer-merge",
+      "category": "own-repo",
+      "prompt": "Can an engineer job merge its own pull request? Explain the rule in two sentences.",
+      "judge": {
+        "any": [
+          "maintainer"
+        ],
+        "maxWords": 120,
+        "anyGroups": [
+          [
+            "cannot",
+            "never",
+            "may not",
+            "no one else"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "repo-jobs-board",
+      "category": "own-repo",
+      "prompt": "What does the jobs board page show, and what does it deliberately leave out? Three sentences at most.",
+      "judge": {
+        "any": [
+          "running"
+        ],
+        "maxWords": 140,
+        "anyGroups": [
+          [
+            "queued"
+          ],
+          [
+            "spend",
+            "cost",
+            "budget"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "repo-board-link",
+      "category": "own-repo",
+      "prompt": "How do I get the link to the jobs board, and does it change each time I ask?",
+      "judge": {
+        "any": [
+          "/board"
+        ],
+        "maxWords": 100,
+        "anyGroups": [
+          [
+            "same",
+            "long-lived",
+            "token",
+            "bookmark"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "repo-daily-cap",
+      "category": "own-repo",
+      "prompt": "What is the default daily spend cap, and what happens when it is reached? Two sentences.",
+      "judge": {
+        "regex": [
+          "\\b20\\b"
+        ],
+        "any": [
+          "resume",
+          "queued",
+          "wait"
+        ],
+        "maxWords": 120
+      }
+    },
+    {
+      "id": "status-seeded-job",
+      "category": "job-status",
+      "prompt": "What is job {{jobId}} doing, and what is it called? Check the store rather than guessing.",
+      "judge": {
+        "any": [
+          "done",
+          "finished",
+          "complete"
+        ],
+        "maxWords": 120,
+        "anyGroups": [
+          [
+            "eval seed"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "status-queue",
+      "category": "job-status",
+      "prompt": "What is running or queued right now? If nothing is, say so plainly.",
+      "judge": {
+        "any": [
+          "running",
+          "queued",
+          "nothing",
+          "no jobs",
+          "idle",
+          "empty"
+        ],
+        "maxWords": 140
+      }
+    },
+    {
+      "id": "draft-pilot-email",
+      "category": "drafting",
+      "prompt": "Draft a two-line email to sam@acme.com saying half a cent per retrieval works for the pilot. Reply with just the email text.",
+      "judge": {
+        "all": [
+          "sam@acme.com"
+        ],
+        "any": [
+          "half a cent",
+          "half-cent",
+          "0.5 cent",
+          "0.005"
+        ],
+        "maxWords": 90
+      }
+    },
+    {
+      "id": "draft-connection-note",
+      "category": "drafting",
+      "prompt": "Write a one-sentence connection note to a publisher's head of revenue at the Financial Times, in Paul's voice, about licensing their archive for AI answers. Reply with just the note.",
+      "judge": {
+        "any": [
+          "ft",
+          "financial times"
+        ],
+        "maxWords": 70,
+        "anyGroups": [
+          [
+            "licens",
+            "archive",
+            "ai"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "draft-decline-meeting",
+      "category": "drafting",
+      "prompt": "Write a one-line reply declining a meeting on Thursday and offering next week instead. Reply with just the line.",
+      "judge": {
+        "any": [
+          "thursday"
+        ],
+        "maxWords": 60,
+        "anyGroups": [
+          [
+            "next week"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "draft-subject-lines",
+      "category": "drafting",
+      "prompt": "Give me three subject lines for an email to an AI company about licensing publisher content for answers. Just the three lines.",
+      "judge": {
+        "any": [
+          "licens"
+        ],
+        "minWords": 8,
+        "maxWords": 80
+      }
+    },
+    {
+      "id": "cited-prebid-changes",
+      "category": "retrieval-cited",
+      "prompt": "What has changed in Prebid.js in the last two months? Three short bullets, each with a link and a date.",
+      "judge": {
+        "any": [
+          "prebid"
+        ],
+        "cite": true,
+        "regex": [
+          "\\b(20\\d\\d|january|february|march|april|may|june|july|august|september|october|november|december)\\b"
+        ]
+      }
+    },
+    {
+      "id": "cited-spur-news",
+      "category": "retrieval-cited",
+      "prompt": "What is the latest news on SPUR? Two sentences, with links and dates.",
+      "judge": {
+        "any": [
+          "spur"
+        ],
+        "cite": true
+      }
+    },
+    {
+      "id": "cited-tollbit-funding",
+      "category": "retrieval-cited",
+      "prompt": "Has TollBit raised funding, and from whom? Cite the source.",
+      "judge": {
+        "any": [
+          "tollbit"
+        ],
+        "cite": true
+      }
+    },
+    {
+      "id": "cited-comp-members",
+      "category": "retrieval-cited",
+      "prompt": "Which organisations are publicly named as working on IAB Tech Lab's CoMP? Cite your sources.",
+      "judge": {
+        "any": [
+          "comp"
+        ],
+        "all": [
+          "iab"
+        ],
+        "cite": true
+      }
+    },
+    {
+      "id": "cited-cloudflare-crawl",
+      "category": "retrieval-cited",
+      "prompt": "What is Cloudflare's pay-per-crawl scheme and what does it charge? Cite a source.",
+      "judge": {
+        "any": [
+          "cloudflare"
+        ],
+        "cite": true,
+        "anyGroups": [
+          [
+            "crawl"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "notfound-share-price",
+      "category": "not-found",
+      "prompt": "What is Clear Exchange's share price today?",
+      "judge": {
+        "notFound": true,
+        "forbid": [
+          "$"
+        ],
+        "maxWords": 120
+      }
+    },
+    {
+      "id": "notfound-head-of-sales",
+      "category": "not-found",
+      "prompt": "Who is Clear Exchange's head of sales?",
+      "judge": {
+        "notFound": true,
+        "maxWords": 120
+      }
+    },
+    {
+      "id": "notfound-2025-revenue",
+      "category": "not-found",
+      "prompt": "What was Clear Exchange's revenue in 2025?",
+      "judge": {
+        "notFound": true,
+        "maxWords": 120
+      }
+    },
+    {
+      "id": "behaviour-ea-send",
+      "category": "own-behaviour",
+      "prompt": "Can the executive assistant send an email on its own? Explain exactly what has to happen before one goes out.",
+      "judge": {
+        "any": [
+          "approv"
+        ],
+        "maxWords": 160,
+        "anyGroups": [
+          [
+            "send <id>",
+            "send it",
+            "prepare"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "behaviour-credit-failure",
+      "category": "own-behaviour",
+      "prompt": "What happens when a job fails because the model provider is out of credit? Two or three sentences.",
+      "judge": {
+        "any": [
+          "queue"
+        ],
+        "maxWords": 160,
+        "anyGroups": [
+          [
+            "resume"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "behaviour-browser-kinds",
+      "category": "own-behaviour",
+      "prompt": "Which workers get the browser, and which never do? One short paragraph.",
+      "judge": {
+        "any": [
+          "research"
+        ],
+        "maxWords": 160,
+        "anyGroups": [
+          [
+            "engineer"
+          ],
+          [
+            "executive assistant",
+            "ea"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "behaviour-clean-room",
+      "category": "own-behaviour",
+      "prompt": "What is the clean-room rule for anyone working in the workforce repository? One or two sentences.",
+      "judge": {
+        "any": [
+          "comp-exchange"
+        ],
+        "maxWords": 120,
+        "anyGroups": [
+          [
+            "microsoft"
+          ]
+        ]
+      }
+    }
+  ]
+}

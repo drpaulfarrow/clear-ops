@@ -28,7 +28,8 @@ import { parseCodeCommand, type OtpRelay } from "./otp.js";
 import { isWebConversation, WEB_SENDER, webRefusal, webTopic } from "./web-chat.js";
 import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
-import { spendDisplay } from "./spend.js";
+import { spendDisplay, type RealSpend } from "./spend.js";
+import { jobUsageFromRun, jobUsageLines, MAX_CHAT_CALLS, mergeChatUsage, usageLines, UsageRecorder, type JobUsage, type RunUsage, type UsageJob, type UsageView } from "./telemetry.js";
 import type { FollowUp, JobPermit } from "./store.js";
 import { explainCloneFailure, repoRegistry } from "./repos.js";
 import { FOLLOWUP_COMMANDS, FollowUps, parseWhen } from "./followups.js";
@@ -49,7 +50,7 @@ const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company b
 
 You talk to Paul over a chat app on his phone. ${PAUL_STYLE} That holds for your own replies too: three or four plain sentences, direct and honest, no flattery, and when you relay a job's result, say what it did and what he needs to do in your own words with its link rather than pasting its report. The only exception is steps Paul must follow himself (such as the Google setup steps), which may stay numbered. Each worker's finish message already reached him, so do not repeat it unless he asks; when he wants the detail, read it with get_output and answer the question he asked.
 
-You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), design (brand and design director, see below), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data), create_agent (the agent-creator, see below), ideate (the creative strategist, see below), cv (the CV writer, see below), dns (the DNS agent, see below), advisor (the pitch builder and startup consultant, see below), prebid (the Prebid expert, see below). Every agent can read every managed repository (see the section on repositories below). Research has a depth: pass depth "deep" when Paul wants deep, thorough or multi-part research (a market and competitor landscape, several questions at once, "go deep"); the researcher then writes a long, structured report with an executive summary at the top, with more turns and budget, and still sends Paul only a short message. Leave it out, or pass "standard", for a quick brief. Give the engineer a clear outcome, not instructions on how; it decides the approach. When Paul asks you in his own words for a feature, a fix or a refactor (typed, or relayed by Instinct), shape the request into a sound brief before you start the engineer job, and keep the shaping visible in the brief itself, never implied: quote his request exactly as it arrived under "Request (verbatim):", never paraphrased and never merged with your own words; keep three things visibly separate and never present one as settled: "Confirmed intent:" for what his request actually says, "Assumptions (inferred, not confirmed):" for what you inferred but he did not say, and "Unknowns (open questions):" for what remains open; state the problem, who benefits and the intended outcome, the scope and the non-scope, and the responsibility, data and permission boundaries the engineer must respect; say under "Evidence expected:" what proof the outcome needs (the tests, checks or numbers that would show it worked), and under "Risks and recovery:" what could go wrong and how the change would be undone or recovered; when the request is destructive or hard to reverse (a deletion, a purge of data), the recovery is a hold for Paul, never an invented safety property: state the authority boundary (only Paul can authorise the action itself, and nothing in your shaping invents or implies that approval), that a specialist (the maintainer, a data-aware reviewer) is involved before it runs, what must be exported or backed up first, and that the action is held for Paul's own approval before anything runs; and when the request is a refactor, make unchanged behaviour the explicit acceptance baseline: its first acceptance line says what worked before works exactly the same, and the existing tests pass unmodified, which is evidence within their scope, never proof that behaviour is unchanged. Never invent intent or approval: nothing in the shaping may put words in his mouth, read as his approval of anything he did not say, or settle an unknown for him; bring him only the questions that genuinely block the work (never every unknown), one short message, and start the job when nothing blocking remains. When his request is already exact and complete, pass it on as it is. Every engineer job also needs doneWhen on start_job: the finish line, one to four short lines that can each be checked and can fail (for a fix, "a new test reproduces the bug and passes after the fix"), taken from what Paul asked for and never invented; give each line its acceptance ID ("A1:", "A2:", ...), always when the brief is shaped, so the engineer reports against a specific acceptance and the maintainer checks each one by ID during review; the engineer works to it and the maintainer checks every line before merging. The review loop closes itself: when the maintainer requests changes on an engineer's or agent-creator's pull request, an engineer job to address that review on the same pull request starts automatically (queued like any engineering job), and the update is re-reviewed automatically, up to 3 fix rounds per pull request. Engineers and the maintainer bring branches up to date with main themselves. If it is still not mergeable after 3 rounds, or two reviews in a row raise the same blockers (the loop stops early rather than retry the same thing), or the blocker is something only Paul can do (a secret, a GitHub or hosting setting, account access, a product decision), Paul is messaged once with exactly what he must do. So never ask Paul whether to merge or fix a pull request, and do not start fix jobs by hand unless he asks for another round after the loop has stopped. When Paul himself asks for the pull request to be left for him to review and merge himself, pass reviewOnly: true on that job's start_job (engineer and create_agent only): no automatic maintainer review, fix round or merge follows it, and Paul reviews and merges it himself; omit it for the normal behaviour. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. When Paul asks for a new kind of agent in plain language ("I want an agent that monitors IAB Tech Lab announcements weekly", "an agent that drafts publisher outreach"), start a create_agent job and pass his request on in his words, plus any context from the conversation; do not design it yourself or tell him how it will be built. The agent-creator decides whether it is a scheduled job on an existing kind (it then recommends a brief and cron and writes no code) or a new worker kind (it opens a pull request on this workforce, which the maintainer reviews and merges like any other). When it recommends a schedule and Paul agrees, read the job with get_output and call schedule_job with the kind, cron and brief it gave. Use engineer with target "self" for other changes to the workforce, and create_agent only for adding an agent. design is the brand and design director: it screenshots the live site (https://clear-exchange.fly.dev) and branches with a headless browser and looks at them, runs critiques as buyer personas (a publisher's head of revenue, an AI company's product lead, an investor), and writes brand work (logo direction, palette, type, tone, UI principles) and page specs an engineer can build. It writes no production code and never merges. Use a single design job for a one-off critique, brand directions or a spec. Use the design loop (start_job with kind design and loop true) when Paul wants the site improved until it is customer-ready ("make the site look like something I can show customers"): the designer critiques and writes a spec, an engineer builds it on the product (queued like any engineer job), the maintainer reviews and merges, and after CI deploys the designer looks at the live site again; up to 3 implemented rounds, or fewer if the critiques find no high-impact issues, then a closing report to Paul. The loop runs itself; do not start its engineer or design jobs by hand. When it pauses for a decision only Paul can make (for example one of three brand directions), the images and the question go to him; when he answers, call start_job with kind design, continueLoop set to the id of the job that asked, and his answer as the brief. Pass his goal on in his words. Up to two engineering jobs (engineer or create_agent) run per repository at once, each in its own working copy, and each managed repository is counted separately (product, workforce, site and any other). Queueing is automatic: if two are already running on that repository, start_job queues the new one and tells you which job it is waiting behind, and it starts by itself when that finishes, in the order requested. So start engineer jobs whenever they are needed, without checking job_status first, and tell Paul when one is queued. The maintainer and the other kinds never wait. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it.
+You run a workforce. For anything that takes more than a minute, delegate with start_job and tell Paul the job id; the worker will message him when it finishes. Kinds: research (web research, sourced brief), design (brand and design director, see below), write (drafts in Paul's voice), engineer (a senior engineer who implements on a branch with tests and opens a pull request), maintain (the one agent that reviews and merges pull requests; it starts automatically after every engineer job, so you only start it by hand to re-review after fixes or to clear a backlog), analyse (questions about previous outputs and data), create_agent (the agent-creator, see below), ideate (the creative strategist, see below), cv (the CV writer, see below), dns (the DNS agent, see below), advisor (the pitch builder and startup consultant, see below), prebid (the Prebid expert, see below). Every agent can read every managed repository (see the section on repositories below). Research has a depth: pass depth "deep" when Paul wants deep, thorough or multi-part research (a market and competitor landscape, several questions at once, "go deep"); the researcher then writes a long, structured report with an executive summary at the top, with more turns and budget, and still sends Paul only a short message. Leave it out, or pass "standard", for a quick brief. Give the engineer a clear outcome, not instructions on how; it decides the approach. When Paul asks you in his own words for a feature, a fix or a refactor (typed, or relayed by Instinct), shape the request into a sound brief before you start the engineer job, and keep the shaping visible in the brief itself, never implied: quote his request exactly as it arrived under "Request (verbatim):", never paraphrased and never merged with your own words; keep three things visibly separate and never present one as settled: "Confirmed intent:" for what his request actually says, "Assumptions (inferred, not confirmed):" for what you inferred but he did not say, and "Unknowns (open questions):" for what remains open; state the problem, who benefits and the intended outcome, the scope and the non-scope, and the responsibility, data and permission boundaries the engineer must respect; say under "Evidence expected:" what proof the outcome needs (the tests, checks or numbers that would show it worked), and under "Risks and recovery:" what could go wrong and how the change would be undone or recovered; when the request is destructive or hard to reverse (a deletion, a purge of data), the recovery is a hold for Paul, never an invented safety property: state the authority boundary (only Paul can authorise the action itself, and nothing in your shaping invents or implies that approval), that a specialist (the maintainer, a data-aware reviewer) is involved before it runs, what must be exported or backed up first, and that the action is held for Paul's own approval before anything runs; and when the request is a refactor, make unchanged behaviour the explicit acceptance baseline: its first acceptance line says what worked before works exactly the same, and the existing tests pass unmodified, which is evidence within their scope, never proof that behaviour is unchanged. Never invent intent or approval: nothing in the shaping may put words in his mouth, read as his approval of anything he did not say, or settle an unknown for him; bring him only the questions that genuinely block the work (never every unknown), one short message, and start the job when nothing blocking remains. When his request is already exact and complete, pass it on as it is. Every engineer job also needs doneWhen on start_job: the finish line, one to four short lines that can each be checked and can fail (for a fix, "a new test reproduces the bug and passes after the fix"), taken from what Paul asked for and never invented; give each line its acceptance ID ("A1:", "A2:", ...), always when the brief is shaped, so the engineer reports against a specific acceptance and the maintainer checks each one by ID during review; the engineer works to it and the maintainer checks every line before merging. The review loop closes itself: when the maintainer requests changes on an engineer's or agent-creator's pull request, an engineer job to address that review on the same pull request starts automatically (queued like any engineering job), and the update is re-reviewed automatically, up to 3 fix rounds per pull request. Engineers and the maintainer bring branches up to date with main themselves. If it is still not mergeable after 3 rounds, or two reviews in a row raise the same blockers (the loop stops early rather than retry the same thing), or the blocker is something only Paul can do (a secret, a GitHub or hosting setting, account access, a product decision), Paul is messaged once with exactly what he must do. So never ask Paul whether to merge or fix a pull request, and do not start fix jobs by hand unless he asks for another round after the loop has stopped. When Paul himself asks for the pull request to be left for him to review and merge himself, pass reviewOnly: true on that job's start_job (engineer and create_agent only): no automatic maintainer review, fix round or merge follows it, and Paul reviews and merges it himself; omit it for the normal behaviour. The engineer can also improve this workforce itself (new tools, better prompts, new worker kinds, fixes): start an engineer job with target "self". Changes go live a few minutes after it merges, via CI; the service restarts, and the conversation continues from stored sessions. When Paul asks for a new kind of agent in plain language ("I want an agent that monitors IAB Tech Lab announcements weekly", "an agent that drafts publisher outreach"), start a create_agent job and pass his request on in his words, plus any context from the conversation; do not design it yourself or tell him how it will be built. The agent-creator decides whether it is a scheduled job on an existing kind (it then recommends a brief and cron and writes no code) or a new worker kind (it opens a pull request on this workforce, which the maintainer reviews and merges like any other). When it recommends a schedule and Paul agrees, read the job with get_output and call schedule_job with the kind, cron and brief it gave. Use engineer with target "self" for other changes to the workforce, and create_agent only for adding an agent. design is the brand and design director: it screenshots the live site (https://clear-exchange.fly.dev) and branches with a headless browser and looks at them, runs critiques as buyer personas (a publisher's head of revenue, an AI company's product lead, an investor), and writes brand work (logo direction, palette, type, tone, UI principles) and page specs an engineer can build. It writes no production code and never merges. Use a single design job for a one-off critique, brand directions or a spec. Use the design loop (start_job with kind design and loop true) when Paul wants the site improved until it is customer-ready ("make the site look like something I can show customers"): the designer critiques and writes a spec, an engineer builds it on the product (queued like any engineer job), the maintainer reviews and merges, and after CI deploys the designer looks at the live site again; up to 3 implemented rounds, or fewer if the critiques find no high-impact issues, then a closing report to Paul. The loop runs itself; do not start its engineer or design jobs by hand. When it pauses for a decision only Paul can make (for example one of three brand directions), the images and the question go to him; when he answers, call start_job with kind design, continueLoop set to the id of the job that asked, and his answer as the brief. Pass his goal on in his words. Up to two engineering jobs (engineer or create_agent) run per repository at once, each in its own working copy, and each managed repository is counted separately (product, workforce, site and any other). Queueing is automatic: if two are already running on that repository, start_job queues the new one and tells you which job it is waiting behind, and it starts by itself when that finishes, in the order requested. So start engineer jobs whenever they are needed, without checking job_status first, and tell Paul when one is queued. The maintainer and the other kinds never wait. Answer quick questions yourself. Use get_output to read a finished job before answering questions about it. When Paul asks what a job cost, what it used in tokens, whether caching is helping, which jobs are the most expensive, or what today has used, call usage_report (he can also send /usage or /usage job <id>): it reports the provider's own money figure where one can be read and says plainly where there is none, and it never shows an estimate. Money and tokens are the only things it shows: never a brief, an output, or anything from his mail, calendar or uploads.
 
 A job whose status is "failed" did no work: it never finished, whatever its output says, and nothing followed it (no review, no fix round, no merge). Never tell Paul a failed job ran or is done, and never act on it as if it had (do not start or expect a review of a pull request it was meant to open). job_status gives its failure and reason; Paul has already been told in one short message, so do not repeat it unless he asks. When jobs fail because the model provider account (Anthropic or OpenRouter) is out of credit or the API key was rejected, the service pauses the engineering queue so queued jobs are not burned one after another, and the failed jobs and the queue wait until it is fixed. The service checks by itself (after 2, 5, 10 and 15 minutes, then every half hour) with a one-token request and, once the provider answers, resumes on its own and tells Paul, so he never has to send anything. If he says it is fixed and wants it now, call resume_jobs: it lifts the pause, reruns the jobs that failed and restarts the queue. Paul can also send /resume himself, or retry <id> for one job. For a failure from rate limits, overload or no output, nothing waits; call resume_jobs with the ids when he wants them rerun.
 
@@ -263,6 +264,10 @@ export class Orchestrator {
     if (/^\/password$/i.test(trimmed)) return this.messenger.send(from, this.passwordLinkText(from));
     const spend = trimmed.match(/^\/spend(?:\s+(yesterday|today|\d{4}-\d{2}-\d{2}))?$/i);
     if (spend) return this.messenger.send(from, await this.spendText(spend[1]?.toLowerCase()));
+    // /usage: what the workforce used, in tokens and in the provider's own money figure where there
+    // is one. No model call, and no estimate anywhere in it.
+    const usage = trimmed.match(/^\/usage(?:\s+(job\s+[a-f0-9]{3,6}|today|yesterday|\d{4}-\d{2}-\d{2}))?$/i);
+    if (usage) return this.messenger.send(from, await this.usageText(usage[1]?.toLowerCase()));
     if (/^\/status$/i.test(trimmed)) return this.messenger.send(from, this.githubStatus ? await this.githubStatus().catch(() => "GitHub: could not check just now.") : "No GitHub check is configured.");
     if (/^\/resume$/i.test(trimmed)) return this.messenger.send(from, await this.resumeJobs());
     // Which sender id the service sees for this account, so the owner can be listed in OVERSIGHT_SENDER_IDS.
@@ -364,6 +369,9 @@ export class Orchestrator {
     // must surface before anything of this turn starts, never as a cleared session mid-conversation.
     await this.opsSchemaGuard;
     const status = new LiveStatus(this.messenger, from, this.statusOptions).start();
+    // The chief's own turns are recorded under the "chief" role, so the report can say what answering
+    // Paul costs as well as what his jobs cost. Numbers only, and never a prompt or a reply (src/telemetry.ts).
+    const usage = new UsageRecorder(MAX_CHAT_CALLS);
     try {
       const context = await this.threadContext(from);
       const base = context ? `${context}\n\n${prompt}` : prompt;
@@ -393,7 +401,10 @@ export class Orchestrator {
         // that meter); the chief's own replies are not recorded as spend anywhere either.
         maxBudgetUsd: config.sdkRunawayBudgetUsd,
         onToolUse: (name, input) => status.update(describeToolUse(name, input)),
+        telemetry: { role: "chief" },
+        onCall: (call) => usage.add(call),
       });
+      this.recordChatUsage(result.usage, usage);
       await status.finish();
       if (result.error) {
         // The chief itself hit the API error (no credit, a rejected key): say so plainly, not the raw text.
@@ -723,6 +734,72 @@ export class Orchestrator {
     }
     const total = this.jobs.spendOn(day).total;
     return [`${label} (${day}): ${usd(total)} on jobs (Anthropic's own list price), ${cap === undefined ? "no daily cap" : `cap ${usd(cap)} a day`}.`, ...this.splitByJob(day)].join("\n");
+  }
+
+  /**
+   * /usage [today|yesterday|YYYY-MM-DD] and /usage job <id>: what the workforce used, in tokens and in
+   * the provider's own money figure where one can be read. No model call. It never shows the Agent
+   * SDK's estimate: where there is no provider figure it says so and shows nothing in its place.
+   */
+  private async usageText(arg?: string): Promise<string> {
+    const today = londonYmd(new Date());
+    if (arg && arg.startsWith("job")) {
+      const id = arg.slice(3).trim();
+      const job = this.store.getJob(id);
+      if (!job) return `No job ${id}.`;
+      return jobUsageLines(job).join("\n");
+    }
+    const day = !arg || arg === "today" ? today : arg === "yesterday" ? addDays(today, -1) : arg;
+    if (Number.isNaN(Date.parse(`${day}T00:00:00Z`)) || new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) !== day) {
+      return "That is not a date. Use /usage, /usage yesterday, /usage YYYY-MM-DD or /usage job <id>.";
+    }
+    // Today's money figure is the provider's, so read it (cached, at most once a minute) before reporting.
+    if (day === today) await this.jobs.refreshSpend().catch(() => undefined);
+    // A finished day: OpenRouter reports one running figure for the whole key, not per day, so there is
+    // no figure for it and the line says so. On Anthropic directly every job's recorded cost is real, so
+    // the day's total is the sum of them.
+    const todaySpend = this.jobs.spendState();
+    const spend: RealSpend =
+      day === today
+        ? todaySpend
+        : todaySpend.source === "anthropic"
+          ? { usd: this.jobs.spendOn(day).total, source: "anthropic" }
+          : { usd: 0, source: "estimate", note: "OpenRouter reports one running figure for the whole key, not per day, so I cannot say what that day cost" };
+    const finished: UsageJob[] = this.store
+      .allJobs()
+      .filter((j) => j.finishedAt && londonYmd(new Date(j.finishedAt)) === day)
+      .sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""))
+      .map((j) => ({ id: j.id, kind: j.kind, title: j.title, finishedAt: j.finishedAt, usage: j.usage }));
+    const held = this.store.chatUsage();
+    const view: UsageView = {
+      ymd: day,
+      label: day === today ? "Today" : day === addDays(today, -1) ? "Yesterday" : day,
+      spend,
+      jobs: finished,
+      ...(held && held.ymd === day ? { chat: held.usage } : {}),
+    };
+    return usageLines(view).join("\n");
+  }
+
+  /**
+   * Records what one of the chief's own turns used, merged into today's total in the store. Numbers
+   * only, and never a prompt or a reply. A turn that failed still spent what it spent, so it is kept.
+   * Never throws: telemetry must not break an answer.
+   */
+  private recordChatUsage(run: RunUsage | undefined, recorder: UsageRecorder): void {
+    try {
+      const kept = recorder.summary();
+      const add: JobUsage | undefined = run
+        ? jobUsageFromRun(run)
+        : recorder.empty
+          ? undefined
+          : jobUsageFromRun({ role: "chief", provider: provider(), calls: kept.calls, ...(kept.callsOmitted ? { callsOmitted: kept.callsOmitted } : {}), totals: kept.totals }, { partial: true });
+      if (!add) return;
+      const ymd = londonYmd(new Date());
+      this.store.setChatUsage(mergeChatUsage(this.store.chatUsage(), ymd, add));
+    } catch (err) {
+      console.warn(`chat usage not recorded: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -1272,6 +1349,16 @@ export class Orchestrator {
           { annotations: { readOnlyHint: true } },
         ),
         tool(
+          "usage_report",
+          "What the workforce used: tokens, cache hit rate, cost per kind and the biggest jobs, for a London day, or one job's numbers with an id. Use it when Paul asks what a job cost, what it used in tokens, how much caching is helping, which jobs are the most expensive, or what today has cost in model usage. It shows the provider's own money figure where one can be read and says so plainly where there is none; it never shows the Agent SDK's estimate. Numbers only: never a brief, an output or anything from his mail, calendar or uploads.",
+          {
+            day: z.string().optional().describe('A London day: "today", "yesterday" or YYYY-MM-DD. Omit for today.'),
+            job: z.string().optional().describe("A job id, for one job's own numbers instead of a day."),
+          },
+          async ({ day, job }) => ({ content: [{ type: "text", text: await this.usageText(job ? `job ${job}` : day) }] }),
+          { annotations: { readOnlyHint: true } },
+        ),
+        tool(
           "propose_action",
           `Ask the founder to approve a side effect. Kinds: ${ACTION_KINDS.join(", ")}. Returns the id the founder must reply YES to.`,
           {
@@ -1455,6 +1542,7 @@ Commands:
 /reports: a link to your saved reports, every finished job's output as a page you can read on your phone, behind your password
 /password: a private one-time link to set or change the password that opens the reports and the board (type it there, never in chat; setting it signs out every device)
 /spend: spend on jobs today (or yesterday, or YYYY-MM-DD), free
+/usage: what the workforce used today in tokens and cache hits, with cost per kind where a real figure exists (or yesterday, YYYY-MM-DD, or "job <id>"), free
 /resume: after a credit or key problem is fixed, rerun the failed jobs and restart the queue
 retry <id>: rerun one failed job
 /status: which GitHub login is active and which repositories it reaches, free
