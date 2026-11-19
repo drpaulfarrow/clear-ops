@@ -29,7 +29,7 @@ import { isWebConversation, WEB_SENDER, webRefusal, webTopic } from "./web-chat.
 import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay, type RealSpend } from "./spend.js";
-import { jobUsageFromRun, jobUsageLines, MAX_CHAT_CALLS, mergeChatUsage, usageLines, UsageRecorder, type JobUsage, type RunUsage, type UsageJob, type UsageView } from "./telemetry.js";
+import { jobUsageFromRun, jobUsageLines, MAX_CHAT_CALLS, mergeChatUsage, usageLines, UsageRecorder, type JobUsage, type RunUsage, type UsageJob, type UsageView, mergeModelCosts } from "./telemetry.js";
 import type { FollowUp, JobPermit } from "./store.js";
 import { explainCloneFailure, repoRegistry } from "./repos.js";
 import { FOLLOWUP_COMMANDS, FollowUps, parseWhen } from "./followups.js";
@@ -43,7 +43,7 @@ import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
 import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { lockActAsMe, normaliseDomain, parseActAsMeCommand, SitePolicy, unlockActAsMe } from "./site-policy.js";
 import { safeVaultDomains, vault, cardVault } from "./vault.js";
-import { RealCostMeter } from "./realcost.js";
+import { RealCostMeter, type JobCostWatch } from "./realcost.js";
 import { jobLabel, jobRef, jobTitle, nudgeTitle, scheduleTitle, TITLE_MAX_WORDS, validateTitle } from "./titles.js";
 
 const CHIEF_PROMPT = `You are the chief of staff for Clear Exchange, a company being founded by Paul Farrow. Clear Exchange is a planned private exchange where publishers compete to answer AI agents' questions with licensed content: agents send a query to one endpoint, the exchange matches it against a catalogue of publisher content, prices offers from publishers' rate cards, ranks on relevance first with price as a constraint, and issues signed entitlements, all inside an attested confidential VM. Supply comes from SPUR publishers' own APIs, marketplaces such as TollBit, and an open-source Prebid seller module running in IAB Tech Lab's Trusted Server. Revenue is a small clearing fee on every paid retrieval.
@@ -105,6 +105,11 @@ export interface HandleContext {
    */
   web?: boolean;
 }
+
+/** The chief's finished turns waiting to be priced, one after another (`Orchestrator.priceChat`). */
+let chatPricing: Promise<void> = Promise.resolve();
+/** Resolves once every finished turn has been priced. For the tests. */
+export const chatPricingSettled = (): Promise<void> => chatPricing;
 
 export class Orchestrator {
   private queues = new Map<string, Promise<void>>();
@@ -372,6 +377,7 @@ export class Orchestrator {
     // The chief's own turns are recorded under the "chief" role, so the report can say what answering
     // Paul costs as well as what his jobs cost. Numbers only, and never a prompt or a reply (src/telemetry.ts).
     const usage = new UsageRecorder(MAX_CHAT_CALLS);
+    const meter = this.chiefMeter();
     try {
       const context = await this.threadContext(from);
       const base = context ? `${context}\n\n${prompt}` : prompt;
@@ -396,15 +402,17 @@ export class Orchestrator {
         mcpServers: { [OPS_SERVER_NAME]: this.opsServer(sender, from, messageId, trigger ? { ...trigger, sender, conversation: from, ...(messageId ? { messageId } : {}), receivedAt: new Date().toISOString() } : undefined), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
         maxTurns: 25,
         // The chief's own turn gets the same runaway guard as a job: not a cap, only a backstop. It has
-        // no per-job cap, because nothing counts a real-dollar figure for a chat turn (a job's cap is
-        // the sum of the provider's own per-call charges, src/realcost.ts, and only JobRunner builds
-        // that meter); the chief's own replies are not recorded as spend anywhere either.
+        // no cap of its own. Its calls are noted by a meter with no cap, which reads nothing while the
+        // turn runs and prices them once afterwards, so the Spend page can say what answering Paul cost
+        // and on which model (src/realcost.ts).
         maxBudgetUsd: config.sdkRunawayBudgetUsd,
+        costMeter: meter,
         onToolUse: (name, input) => status.update(describeToolUse(name, input)),
         telemetry: { role: "chief" },
         onCall: (call) => usage.add(call),
       });
       this.recordChatUsage(result.usage, usage);
+      this.priceChat(meter);
       await status.finish();
       if (result.error) {
         // The chief itself hit the API error (no credit, a rejected key): say so plainly, not the raw text.
@@ -779,6 +787,23 @@ export class Orchestrator {
       ...(held && held.ymd === day ? { chat: held.usage } : {}),
     };
     return usageLines(view).join("\n");
+  }
+
+  /** The meter one chief turn's calls are noted on. No cap: nothing is read until the turn is over. Tests replace it. */
+  chiefMeter: () => JobCostWatch = () => new RealCostMeter();
+
+  /**
+   * Prices one of the chief's turns in the background and adds the provider's own charges to today's
+   * record, by model. After the reply has gone, one turn at a time, and never throws.
+   */
+  private priceChat(meter: JobCostWatch): void {
+    chatPricing = chatPricing
+      .then(async () => {
+        const real = await meter.settle();
+        if (real.source !== "provider" || !real.byModel?.length) return;
+        this.store.setChatCost(mergeModelCosts(this.store.chatCost(), londonYmd(new Date()), real.byModel));
+      })
+      .catch(() => undefined);
   }
 
   /**

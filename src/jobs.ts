@@ -33,7 +33,7 @@ import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { jobCredentialNote } from "./bootstrap.js";
 import { buildTitle, deriveTitle, designRoundTitle, fixTitle, isScheduledRun, jobLabel, jobRef, jobTitle, reviewTitle } from "./titles.js";
 import { preparedCopies, setupNote, workerBuildEnv, type PreparedCopies } from "./setup.js";
-import { isPrivateKind, jobUsageFromRun, roleForKind, UsageRecorder, type JobUsage, type ModelCall, type RunUsage } from "./telemetry.js";
+import { isPrivateKind, jobUsageFromRun, roleForKind, UsageRecorder, withRealCost, type JobUsage, type ModelCall, type RunUsage } from "./telemetry.js";
 
 const exec = promisify(execFile);
 
@@ -258,6 +258,11 @@ export function deadEnds(earlier: Array<{ id: string; text: string }>): string {
   const shown = earlier.slice(-2).map((r) => `Earlier review (job ${r.id}):\n${r.text.length > 1500 ? `${r.text.slice(0, 1500)}\n[cut]` : r.text}`);
   return `\n\nAlready tried: this pull request has been through ${earlier.length} earlier review${earlier.length === 1 ? "" : "s"}. Anything below that the latest review raises again was not fixed by the last round, so the approach taken then is a dead end: read what was done (git log on the branch) and take a different one, and say in your report what you did differently.\n\n${shown.join("\n\n")}`;
 }
+
+/** Finished jobs waiting to be priced, one after another (`JobRunner.priceAfter`). */
+let pricing: Promise<void> = Promise.resolve();
+/** Resolves once every finished job has been priced. For the tests. */
+export const pricingSettled = (): Promise<void> => pricing;
 
 export class JobRunner {
   private running = new Set<string>();
@@ -1310,8 +1315,9 @@ export class JobRunner {
       else await this.recordFailure(job, failureFromError(err));
     } finally {
       await progress?.finish().catch(() => undefined);
-      // No more per-call price reads for a job that has ended, however it ended.
-      costMeter?.stop();
+      // The run is over, however it ended: its calls are priced once, in the background, so the job's
+      // record says what the provider charged and on which model. Nothing waits on this.
+      this.priceAfter(id, costMeter);
       // The job's browser, if it opened one, goes with it, and so does any wait for a one-time code: a
       // reply that arrives afterwards settles nothing.
       await web?.close().catch(() => undefined);
@@ -1368,6 +1374,23 @@ export class JobRunner {
    * anything. Where it read nothing (no cap was counting, or the provider has not published yet), there
    * is no figure and the usage record says so; the SDK's estimate is never offered in its place.
    */
+  /**
+   * Prices a finished job's calls in the background and writes the provider's own figure into its
+   * record (src/realcost.ts). One job at a time, so a burst of finished jobs is not a burst of
+   * requests. It never holds a job up, never feeds a cap, and never throws.
+   */
+  private priceAfter(id: string, meter: JobCostWatch | undefined): void {
+    if (!meter) return;
+    meter.stop();
+    pricing = pricing
+      .then(async () => {
+        const real = await meter.settle();
+        const job = this.store.getJob(id);
+        if (job?.usage && real.source === "provider") this.store.updateJob(id, { usage: withRealCost(job.usage, real) });
+      })
+      .catch(() => undefined);
+  }
+
   private realCostFor(meter: JobCostWatch | undefined): RealCost | undefined {
     if (!meter) return undefined;
     const cost = meter.cost();

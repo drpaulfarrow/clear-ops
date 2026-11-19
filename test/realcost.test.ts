@@ -16,7 +16,8 @@ process.env.OPENROUTER_API_KEY = "test-key";
 
 const { RealCostMeter, usdAmount } = await import("../src/realcost.js");
 const { Store } = await import("../src/store.js");
-const { JobRunner } = await import("../src/jobs.js");
+const { JobRunner, pricingSettled } = await import("../src/jobs.js");
+const { withRealCost, mergeModelCosts } = await import("../src/telemetry.js");
 const { ConsoleMessenger } = await import("../src/whatsapp.js");
 const { budgetReason, failureText } = await import("../src/failures.js");
 const { config } = await import("../src/config.js");
@@ -365,4 +366,73 @@ test("the failure sentence reads as one plain message to Paul", () => {
     text,
     "Failed: Job caps on real cost · engineer · 8d67d5. It did no work because it was stopped for budget with OpenRouter's own figures at $0.30 against the $0.25 cap for this kind. Send retry 8d67d5 to run it again, or show job 8d67d5 for the detail.",
   );
+});
+
+/* ---------- Priced after the run, by model (19 Nov 2026) ---------- */
+
+/** A generation endpoint that also says which model each call ran on, as OpenRouter's does. */
+function modelProvider(calls: Record<string, [number, string]>) {
+  const asked: string[] = [];
+  const fetch: typeof globalThis.fetch = async (input) => {
+    const id = decodeURIComponent(new URL(String(input)).searchParams.get("id") ?? "");
+    asked.push(id);
+    const call = calls[id];
+    if (!call) return new Response("{}", { status: 404 });
+    return new Response(JSON.stringify({ data: { id, total_cost: call[0], model: call[1] } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  return { fetch, asked };
+}
+
+test("the provider's charges are kept by the model it says each call ran on", async () => {
+  const { fetch } = modelProvider({ a: [0.4, "z-ai/glm-5.3"], b: [0.25, "z-ai/glm-5.3"], c: [0.011, "deepseek/deepseek-v4.1-flash"] });
+  const meter = meterFor(fetch);
+  for (const id of ["a", "b", "c"]) meter.note(id);
+  assert.equal(meter.cost().byModel, undefined, "nothing is read while a run with no cap is going");
+  const cost = await meter.settle();
+  assert.equal(cost.usd, 0.67, "the job's own figure is still rounded up to the cent");
+  assert.deepEqual(cost.byModel!.map((m) => [m.model, Number(m.usd.toFixed(4)), m.calls]), [["z-ai/glm-5.3", 0.65, 2], ["deepseek/deepseek-v4.1-flash", 0.011, 1]]);
+  // A reply with no model named is still counted, under what it is.
+  const bare = meterFor(fakeProvider({ gen1: 0.1 }).fetch);
+  bare.note("gen1");
+  assert.deepEqual((await bare.settle()).byModel, [{ model: "not reported", usd: 0.1, calls: 1 }]);
+});
+
+test("a job with no cap is priced once after it has finished, and its record says which model cost what", async () => {
+  const { fetch, asked } = modelProvider({ g1: [0.3, "z-ai/glm-5.3"], g2: [0.02, "deepseek/deepseek-v4.1-flash"] });
+  let duringRun = -1;
+  const run: AgentRunner = async (o) => {
+    o.costMeter?.note("g1");
+    o.costMeter?.note("g2");
+    await new Promise((r) => setTimeout(r, 30));
+    duringRun = asked.length;
+    return { text: "Report.\n\n<message_to_paul>\nDone, nothing needed from you.\n</message_to_paul>", costUsd: 9 };
+  };
+  const { store, jobs } = setup(run, (capUsd, stop) => meterFor(fetch, capUsd, stop));
+  const before = config.jobBudgetUsd;
+  config.jobBudgetUsd = undefined;
+  try {
+    const job = jobs.start("research", "No cap on me", FOUNDER, "product");
+    await waitFor(() => store.getJob(job.id)!.status === "done");
+    assert.equal(duringRun, 0, "nothing was read while it ran: there is no cap to count against");
+    await pricingSettled();
+    const usage = store.getJob(job.id)!.usage!;
+    assert.deepEqual([usage.costSource, usage.costUsd, usage.costNote], ["provider", 0.32, undefined]);
+    assert.deepEqual(usage.costByModel!.map((m) => [m.model, m.usd, m.calls]), [["z-ai/glm-5.3", 0.3, 1], ["deepseek/deepseek-v4.1-flash", 0.02, 1]]);
+    assert.deepEqual([...asked].sort(), ["g1", "g2"], "each call priced once");
+    assert.equal(store.getJob(job.id)!.status, "done", "pricing changes nothing else about the job");
+  } finally {
+    config.jobBudgetUsd = before;
+  }
+});
+
+test("only the provider's own figure is ever written into a record after the run", () => {
+  const usage = { role: "worker" as const, provider: "openrouter" as const, calls: [], totals: { calls: 2, promptTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, completionTokens: 0, reasoningTokens: 0, toolCalls: 0 }, costSource: "unavailable" as const, costNote: "none yet", estimateUsd: 9 };
+  assert.equal(withRealCost(usage, { usd: 0, calls: 2, read: 0, source: "unavailable", note: "not priced" }), usage, "no figure, no change");
+  assert.equal(withRealCost({ ...usage, provider: "anthropic" }, { usd: 1, calls: 2, read: 2, source: "provider" }).costSource, "unavailable", "an Anthropic run is never given OpenRouter's figure");
+  const priced = withRealCost(usage, { usd: 0.32, calls: 2, read: 1, source: "provider", note: "a lower bound", byModel: [{ model: "m", usd: 0.3141, calls: 1 }] });
+  assert.deepEqual([priced.costSource, priced.costUsd, priced.costNote, priced.costByModel, priced.estimateUsd], ["provider", 0.32, "a lower bound", [{ model: "m", usd: 0.3141, calls: 1 }], 9]);
+  // The chief's turns add up by model within a London day and start again on the next.
+  const day = mergeModelCosts(mergeModelCosts(undefined, "2026-11-19", [{ model: "a", usd: 0.1, calls: 2 }]), "2026-11-19", [{ model: "a", usd: 0.05, calls: 1 }, { model: "b", usd: 0.4, calls: 3 }]);
+  assert.deepEqual(day.models.map((m) => [m.model, Number(m.usd.toFixed(2)), m.calls]), [["b", 0.4, 3], ["a", 0.15, 3]]);
+  assert.deepEqual(mergeModelCosts(day, "2026-11-20", [{ model: "a", usd: 0.01, calls: 1 }]), { ymd: "2026-11-20", models: [{ model: "a", usd: 0.01, calls: 1 }] });
 });

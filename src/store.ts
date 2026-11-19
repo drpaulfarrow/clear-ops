@@ -515,6 +515,11 @@ interface State {
    * day turns over, so this cannot grow without bound.
    */
   chatUsage?: { ymd: string; usage: JobUsage };
+  /**
+   * What the provider charged for the chief's own chat turns on the current London day, by model
+   * (src/realcost.ts, priced after each turn). Only the current day is kept.
+   */
+  chatCost?: { ymd: string; models: Array<{ model: string; usd: number; calls: number }> };
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -910,6 +915,16 @@ export class Store {
   }
   setChatUsage(next: { ymd: string; usage: JobUsage }): void {
     this.state.chatUsage = next;
+    this.save();
+  }
+
+  /** What the provider charged for the chief's own turns today, by model. Only the current day is kept. */
+  chatCost(): { ymd: string; models: Array<{ model: string; usd: number; calls: number }> } | undefined {
+    const held = this.state.chatCost;
+    return held ? { ymd: held.ymd, models: held.models.map((m) => ({ ...m })) } : undefined;
+  }
+  setChatCost(next: { ymd: string; models: Array<{ model: string; usd: number; calls: number }> }): void {
+    this.state.chatCost = next;
     this.save();
   }
 

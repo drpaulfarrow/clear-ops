@@ -765,14 +765,21 @@ function spendPage() {
     "section",
     { class: "pane", "aria-label": "Where it went" },
     h("h2", {}, "Where it went today"),
-    h("p", { class: "muted" }, "Only jobs with the provider's own figure are counted, on the day they finished. A job has one only when it runs under a per-job cap, because that is when each of its calls is priced. Setting a cap on other jobs below gives them one too."),
-    spendGroup("By agent", page.byAgent),
+    h("p", { class: "muted" }, "What the provider charged, by who ran on which model. A job is counted on the day it finished, a little after it ends, once each of its calls has been priced. The chief's own replies are counted as they are priced."),
+    h(
+      "div",
+      { class: "block" },
+      h("h3", {}, "By agent and model"),
+      page.byAgentModel.length
+        ? h("div", { class: "rows" }, page.byAgentModel.map((r) => h("div", { class: "row plain" }, h("div", { class: "row-main" }, h("div", { class: "card-title" }, `${r.who} on ${modelName(r.model)}`), h("div", { class: "card-sub" }, `${r.calls} ${r.calls === 1 ? "call" : "calls"}`)), h("div", { class: "row-right" }, h("span", { class: "card-cost num" }, money(r.usd))))))
+        : h("p", { class: "muted" }, "Nothing has been priced yet today."),
+    ),
     spendGroup("By project", page.byProject),
     h(
       "div",
       { class: "block" },
       h("h3", {}, "The rest"),
-      h("p", { class: "prose" }, page.unattributedUsd !== undefined ? `${money(page.unattributedUsd)} of today is not tied to a job here: the chief's own replies, and jobs with no figure of their own.` : "Today's total cannot be split further from what the store holds."),
+      h("p", { class: "prose" }, page.unattributedUsd !== undefined ? `${money(page.unattributedUsd)} of today is not in the lines here yet: jobs still running, and calls the provider has not priced.` : "Today's total cannot be split further from what the store holds."),
       page.withoutFigure ? h("p", { class: "muted" }, `${page.withoutFigure} ${page.withoutFigure === 1 ? "job" : "jobs"} finished today with no figure of ${page.withoutFigure === 1 ? "its" : "their"} own.`) : null,
     ),
     page.jobs.length ? h("div", { class: "block" }, h("h3", {}, "Jobs, dearest first"), h("div", { class: "rows" }, page.jobs.map((j) => h("a", { class: "row", href: `#/job/${j.id}` }, avatar(j.kind, "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, j.title), h("div", { class: "card-sub" }, `${j.who} · ${j.repositoryName}`)), h("div", { class: "row-right" }, h("span", { class: "card-cost num" }, money(j.costUsd))))))) : null,
