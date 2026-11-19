@@ -34,6 +34,15 @@ export const ALLOWED_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 export const MAX_TEXT = 12_000;
 const MAX_ELEMENTS = 80;
 const NAV_TIMEOUT = 20_000;
+/**
+ * How long Chromium is given to say it is ready. A cold start on a busy machine is slow: on CI's
+ * runners it has taken from 5 to over 20 seconds with the other tests running beside it, and the
+ * service's own shared cores are throttled under load. At 20 seconds a healthy start was being called
+ * a failure (twice on 19 Nov 2026, each one holding back a deploy). A Chromium that dies is noticed at
+ * once whatever this is, and one that never answers is killed when it runs out, so the longer wait
+ * costs only the hung case.
+ */
+export const CHROMIUM_START_MS = 45_000;
 /** How many times one session clears an interruption (a cookie wall, a region chooser, an offer). */
 const MAX_INTERRUPTIONS = 8;
 /** How many times one session walks a two-step verification screen, so no site is ever hammered. */
@@ -306,7 +315,7 @@ export async function launchChromium(proxy: string): Promise<{ browser: Browser;
     // DevToolsActivePort file in the profile is the fallback for builds that do not.
     const port = await new Promise<number>((resolve, reject) => {
       const file = path.join(profile, "data", "DevToolsActivePort");
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + CHROMIUM_START_MS;
       const fromLog = () => Number(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(stderr)?.[1] ?? 0);
       const fromFile = () => (fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8").split("\n")[0]) : 0);
       const done = (fn: () => void) => {

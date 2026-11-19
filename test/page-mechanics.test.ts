@@ -20,7 +20,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-mechanic
 process.env.VAULT_KEY = "test-vault-key-0123456789abcdef";
 
 const { asksForVerification, interruptionStep, routeRank, verificationStep, PAGE_MECHANICS_NOTE } = await import("../src/page-mechanics.js");
-const { BrowseSession } = await import("../src/browse.js");
+const { BrowseSession, CHROMIUM_START_MS } = await import("../src/browse.js");
 const { config } = await import("../src/config.js");
 
 /** The routes Amazon UK's page offers, exactly as it words them. */
@@ -170,6 +170,16 @@ const noDesigner = (() => {
 })();
 
 const PASSWORD = "correct horse battery staple 42!";
+
+test("Chromium is given long enough to start on a busy machine", () => {
+  // The first browser test below is a cold start with every other test file running beside it. At 20
+  // seconds it failed twice in a day on CI and passed once with 4 seconds to spare; neither was a fault.
+  assert.ok(CHROMIUM_START_MS >= 45_000, "a slow start is not a failed one");
+  const browse = fs.readFileSync(new URL("../src/browse.ts", import.meta.url), "utf8");
+  assert.match(browse, /const deadline = Date\.now\(\) \+ CHROMIUM_START_MS;/);
+  // And the longer wait cannot leave anything behind: a start that runs out is still killed.
+  assert.match(browse, /child\.kill\("SIGKILL"\);\s*throw err;/);
+});
 
 test(
   "an agent on Amazon's Two-Step Verification page drives the phone-text route itself instead of stopping",
