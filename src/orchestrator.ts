@@ -164,8 +164,9 @@ export class Orchestrator {
     // `sender` is who wrote; `from` is the conversation address replies and sessions are keyed by.
     // The web app's chat (src/web-chat.ts) is the one sender not on a channel allowlist: its route sits
     // behind the GitHub sign-in and is the only caller that sets `viaWeb`. It is exactly WEB_SENDER,
-    // talking in exactly the app's own conversation, with no files, or it is nobody.
-    const web = viaWeb && sender === WEB_SENDER && isWebConversation(from) && attachments.length === 0;
+    // talking in exactly one of the app's own conversations, or it is nobody. Its files are ones that
+    // route itself received from his signed-in browser (`webFiles`), saved below like any channel's.
+    const web = viaWeb && sender === WEB_SENDER && isWebConversation(from);
     if (!web) {
       if (!isAllowed(sender)) {
         console.warn(`Ignored message from unlisted sender ${sender}`);

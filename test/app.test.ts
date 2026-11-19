@@ -22,6 +22,7 @@ const { Store } = await import("../src/store.js");
 const { buildApp } = await import("../src/index.js");
 const { AppAuth, APP_PATH, APP_SIGN_IN_PATH, APP_AUTH_START_PATH, APP_AUTH_CALLBACK_PATH, APP_SIGN_OUT_PATH, APP_SESSION_COOKIE, APP_STATE_COOKIE, APP_SESSION_DAYS, APP_SIGN_INS_PER_MINUTE } = await import("../src/app-auth.js");
 const { appBoard, appChat, appHistory, appJob, APP_HISTORY_PAGE } = await import("../src/app-data.js");
+const { webFiles, WebFilesError, WEB_FILES_MAX, WEB_FILES_BYTES } = await import("../src/web-chat.js");
 const { WebChat, routeWeb, webRefusal, webThread, webTopic, isWebConversation, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_THREAD_KEEP, WEB_THREADS_MAX, WEB_TEXT_MAX } = await import("../src/web-chat.js");
 const { isAllowed } = await import("../src/config.js");
 const { mintAppApproval, spendAppApproval, APP_APPROVER, APP_GRANT_MS } = await import("../src/app-approver.js");
@@ -767,12 +768,14 @@ test("no approval word works from the app, and a one-time code is never written 
 test("the app's sender is nobody anywhere else, and is refused approval words by the orchestrator too", async () => {
   assert.equal(isAllowed(WEB_SENDER), false, "it is on no allowlist, so every approval gate refuses it for itself");
   const before = chat.view().messages.length;
-  // Without the route's own flag, or in any other conversation, or with a file, it is an unlisted sender.
+  // Without the route's own flag, or in any other conversation, it is an unlisted sender. (Until
+  // 19 Nov 2026 a file made it one too; the app's route now carries files, checked in its own test.)
   await orchestrator.handle(WEB_SENDER, "hello", { replyTo: WEB_CONVERSATION });
   await orchestrator.handle(WEB_SENDER, "hello", { replyTo: "web:other", web: true });
   await orchestrator.handle(WEB_SENDER, "hello", { web: true });
   await orchestrator.handle("web:someone", "hello", { replyTo: WEB_CONVERSATION, web: true });
-  await orchestrator.handle(WEB_SENDER, "hello", { replyTo: WEB_CONVERSATION, web: true, attachments: [{ name: "a.txt" } as never] });
+  await orchestrator.handle(WEB_SENDER, "hello", { replyTo: "web:other", web: true, attachments: [{ name: "a.txt" } as never] });
+  await orchestrator.handle(WEB_SENDER, "hello", { replyTo: WEB_CONVERSATION, attachments: [{ name: "a.txt" } as never] });
   assert.equal(chat.view().messages.length, before, "ignored: no reply, no model");
   assert.equal(elsewhere.length, 0);
   // With the flag, an approval word is still refused before any command is parsed.
@@ -965,6 +968,87 @@ test("a job can be stopped or run again from the app, and nothing it was permitt
     for (let i = 0; i < 200 && store.getJob(jobId)!.status !== "done" && store.getJob(jobId)!.status !== "failed"; i++) await new Promise((r) => setTimeout(r, 10));
   } finally {
     chiefSays = undefined;
+  }
+});
+
+/* ---------- Files with a message ---------- */
+
+const b64 = (s: string | Buffer) => Buffer.from(s).toString("base64");
+
+test("the files on a message are all read and checked, or the message is refused whole", async () => {
+  assert.deepEqual(webFiles(undefined), []);
+  assert.deepEqual(webFiles([]), []);
+  const got = webFiles([{ name: " notes.txt ", type: "text/plain", data: b64("hello") }, { name: "blob.bin", data: b64(Buffer.from([0, 1, 2])) }]);
+  assert.deepEqual(got.map((f) => [f.name, f.mimeType, f.size]), [["notes.txt", "text/plain", 5], ["blob.bin", undefined, 3]]);
+  assert.equal((await got[0]!.download(10)).toString(), "hello");
+  const ok = { name: "a.txt", data: b64("a") };
+  for (const [bad, why] of [
+    ["files", /could not be read/], [{ 0: ok }, /could not be read/], [[null], /could not be read/], [[{ data: b64("a") }], /could not be read/], [[{ name: "", data: b64("a") }], /could not be read/],
+    [[{ name: "x".repeat(201), data: b64("a") }], /could not be read/], [[{ name: "a.txt", data: 5 }], /could not be read/], [[{ name: "a.txt", type: 7, data: b64("a") }], /could not be read/],
+    [[{ name: "a.txt", data: "not base64!" }], /could not be read/], [[{ name: "a.txt", data: "YQ" }], /could not be read/], [[{ name: "a.txt", data: "data:text/plain;base64,YQ==" }], /could not be read/],
+    [[{ name: "a.txt", data: "" }], /a\.txt is empty/], [Array(WEB_FILES_MAX + 1).fill(ok), /At most 5 files/],
+    [[ok, { name: "big.bin", data: b64(Buffer.alloc(WEB_FILES_BYTES)) }], /too large/],
+  ] as Array<[unknown, RegExp]>) assert.throws(() => webFiles(bad), (e: unknown) => e instanceof WebFilesError && why.test(e.message), JSON.stringify(bad).slice(0, 60));
+});
+
+test("a file sent from the app is saved like any channel's upload, and only from Paul's own signed-in browser", async () => {
+  const cookie = await session();
+  const dir = path.join(process.env.DATA_DIR!, "uploads");
+  const saved = () => (fs.existsSync(dir) ? fs.readdirSync(dir) : []);
+  const files = [{ name: "../../etc/Stock list.csv", type: "text/csv", data: b64("name,price\nEpimax,6.49\n") }];
+  const before = saved().length;
+
+  // Not signed in: a large body is never even read, and nothing is saved from a small one either.
+  const big = await postChat({ text: "x", files: [{ name: "big.bin", data: b64(Buffer.alloc(400_000)) }] });
+  assert.ok([401, 413].includes(big.status), `unsigned large body: ${big.status}`);
+  assert.equal((await postChat({ text: "here", files })).status, 401);
+  assert.equal((await postChat({ text: "here", files }, cookie, { origin: "https://evil.example" })).status, 403);
+  // Signed in, but the files are not what the app sends, or the caption is an approval word.
+  assert.equal((await postChat({ text: "here", files: [{ name: "a.txt", data: "not base64!" }] }, cookie)).status, 400);
+  assert.equal((await postChat({ text: "", files: [] }, cookie)).status, 400);
+  assert.equal((await postChat({ text: "send 9b80e7", files }, cookie)).status, 202);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(saved().length, before, "none of those saved anything");
+  assert.equal(chat.view().messages.at(-1)!.text, WEB_APPROVAL_REFUSAL);
+
+  chiefSays = "It lists Epimax at 6.49.";
+  chiefAsked.length = 0;
+  try {
+    // A body far over the app-wide 100 KB limit is read for a signed-in browser.
+    const pad = { name: "padding.txt", type: "text/plain", data: b64("p".repeat(300_000)) };
+    assert.equal((await postChat({ text: "What does this say?", files: [...files, pad] }, cookie, { origin: "https://workforce.example", "sec-fetch-site": "same-origin" })).status, 202);
+    for (let i = 0; i < 200 && chiefAsked.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    await settled();
+    // Saved in the private uploads directory under a sanitised name, owner-only: the name cannot climb out of it.
+    const now = saved();
+    assert.equal(now.length, before + 2);
+    const csv = now.find((n) => n.endsWith(".csv"))!;
+    assert.match(csv, /^\d{4}-\d{2}-\d{2}-[\w .-]*Stock[\w .-]*\.csv$/);
+    assert.ok(!csv.includes("/") && !csv.includes(".."));
+    assert.equal(fs.readFileSync(path.join(dir, csv), "utf8"), "name,price\nEpimax,6.49\n");
+    assert.equal(fs.statSync(path.join(dir, csv)).mode & 0o777, 0o600);
+    // The chief is told what arrived the way it is for any channel, with Paul's words as the caption.
+    assert.equal(chiefAsked.length, 1);
+    assert.match(chiefAsked[0]!, /Paul sent 2 file\(s\) with this message\. They are saved privately under /);
+    assert.match(chiefAsked[0]!, /Paul's message: What does this say\?$/);
+    // The transcript keeps his words and the files' names, never their contents.
+    const view = await chatView(cookie);
+    const mine = (view.messages as Array<{ from: string; text?: string; files?: string[] }>).filter((m) => m.from === "paul").at(-1)!;
+    assert.deepEqual([mine.text, mine.files], ["What does this say?", ["../../etc/Stock list.csv", "padding.txt"]]);
+    assert.ok(!JSON.stringify(view).includes("Epimax,6.49"));
+    assert.match(view.messages.at(-1)!.html!, /It lists Epimax at 6\.49/);
+
+    // Files with no words, and files in a job's thread.
+    const job = store.updateJob(store.createJob("research", "Check stock.", PAUL, "product", PAUL, { title: "Stock" } as never).id, { status: "done", finishedAt: iso(5) });
+    chiefAsked.length = 0;
+    assert.equal((await postChat({ text: "", files: [{ name: "shot.txt", data: b64("a screenshot, say") }], thread: `job:${job.id}` }, cookie)).status, 202);
+    for (let i = 0; i < 200 && chat.view(`web:job:${job.id}`).messages.at(-1)?.from !== "clearops"; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(saved().length, before + 3);
+    assert.match(chiefAsked.at(-1)!, /^This message is in the thread of job /);
+    assert.deepEqual(chat.view(`web:job:${job.id}`).messages[0]!.files, ["shot.txt"]);
+  } finally {
+    chiefSays = undefined;
+    for (const n of saved().slice(before)) fs.rmSync(path.join(dir, n), { recursive: true, force: true });
   }
 });
 
