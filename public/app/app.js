@@ -135,7 +135,7 @@ const state = {
   historyLoading: false,
   job: undefined,
   jobRaw: "",
-  /** The pull request being reviewed: { id, data, loading, error, open } for one job at a time. */
+  /** The pull request being reviewed: { key, data, loading, error, open }, one at a time. */
   pull: undefined,
   jobMissing: false,
   problem: undefined,
@@ -143,7 +143,9 @@ const state = {
 
 const route = () => {
   const m = /^#\/job\/([A-Za-z0-9_-]{1,64})$/.exec(location.hash);
-  return m ? { name: "job", id: m[1] } : { name: "board" };
+  if (m) return { name: "job", id: m[1] };
+  const p = /^#\/pull\/([A-Za-z0-9._-]{1,64})\/([1-9]\d{0,8})$/.exec(location.hash);
+  return p ? { name: "pull", repo: p[1], number: Number(p[2]) } : { name: "board" };
 };
 
 async function getJson(path) {
@@ -348,6 +350,7 @@ function statusView(board, now) {
     "div",
     { class: "cols" },
     column("wait", "Waiting on me", [...board.waiting.map((w) => waitingCard(w, now)), ...by("waiting").map((j) => jobCard(j, now))], "Nothing needs you."),
+    pullsColumn(board, now),
     column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),
     column("", "Queued", by("queued").map((j) => jobCard(j, now)), "The queue is empty."),
     column("ok", "Confirmed done", met.cards, "Nothing in the last two days is confirmed as done.", met.extra),
@@ -544,15 +547,18 @@ function jobActions(detail) {
 
 /* ---------- A job's pull request: review and merge ---------- */
 
-/** Asks GitHub, through the service, for the job's pull request as it is now. */
-async function loadPull(id) {
-  const before = state.pull?.id === id ? state.pull : undefined;
-  state.pull = { id, data: before?.data, open: before?.open ?? new Set(), loading: true, error: undefined };
+const pullKey = (repo, number) => `${repo}/${number}`;
+
+/** Asks GitHub, through the service, for a pull request as it is now. */
+async function loadPull(repo, number) {
+  const key = pullKey(repo, number);
+  const before = state.pull?.key === key ? state.pull : undefined;
+  state.pull = { key, data: before?.data, open: before?.open ?? new Set(), loading: true, error: undefined };
   draw();
   let data;
   let error;
   try {
-    const res = await fetch(`${API}/jobs/${id}/pull`, { headers: { accept: "application/json" }, credentials: "same-origin", cache: "no-store" });
+    const res = await fetch(`${API}/pulls/${encodeURIComponent(repo)}/${number}`, { headers: { accept: "application/json" }, credentials: "same-origin", cache: "no-store" });
     if (res.status === 401) return void location.assign(SIGN_IN);
     const body = await res.json().catch(() => ({}));
     if (res.ok) data = body;
@@ -560,8 +566,8 @@ async function loadPull(id) {
   } catch {
     error = "The service could not be reached.";
   }
-  if (state.pull?.id !== id) return;
-  state.pull = { id, data: data ?? state.pull.data, open: state.pull.open, loading: false, error };
+  if (state.pull?.key !== key) return;
+  state.pull = { key, data: data ?? state.pull.data, open: state.pull.open, loading: false, error };
   draw();
 }
 
@@ -587,20 +593,22 @@ function pullFile(p, f) {
   );
 }
 
-function pullPane(detail) {
-  const id = detail.job.id;
-  const p = state.pull?.id === id ? state.pull : undefined;
+/** One pull request of a managed repository. `wrote` is the repository as a worker mistyped it in its report. */
+function pullPane({ repo, number, wrote }) {
+  const p = state.pull?.key === pullKey(repo, number) ? state.pull : undefined;
   const busy = state.busy !== undefined;
   const head = (extra) => h("div", { class: "pane-head" }, h("h2", {}, "Pull request"), extra ?? null);
-  if (!p) return h("section", { class: "pane", "aria-label": "Pull request" }, head(), h("div", { class: "links" }, h("button", { class: "btn", type: "button", onclick: () => void loadPull(id) }, "Review it here")));
+  const slip = wrote ? h("p", { class: "muted" }, `The report wrote its address as ${wrote}. This is #${number} in the repository the job works on.`) : null;
+  if (!p) return h("section", { class: "pane", "aria-label": "Pull request" }, head(), slip, h("div", { class: "links" }, h("button", { class: "btn", type: "button", onclick: () => void loadPull(repo, number) }, "Review it here")));
   const v = p.data;
   if (!v) {
     return h(
       "section",
       { class: "pane", "aria-label": "Pull request" },
       head(),
+      slip,
       p.loading ? h("p", { class: "muted" }, "Asking GitHub.") : h("div", { class: "banner bad", role: "status" }, p.error),
-      p.loading ? null : h("div", { class: "links" }, h("button", { class: "btn", type: "button", onclick: () => void loadPull(id) }, "Try again")),
+      p.loading ? null : h("div", { class: "links" }, h("button", { class: "btn", type: "button", onclick: () => void loadPull(repo, number) }, "Try again")),
     );
   }
   const stateTag = v.state === "merged" ? h("span", { class: "tag ok" }, icon("check", 12), "Merged") : v.state === "closed" ? h("span", { class: "tag bad" }, "Closed") : v.draft ? h("span", { class: "tag" }, "Draft") : h("span", { class: "tag run" }, "Open");
@@ -612,8 +620,9 @@ function pullPane(detail) {
           h(
             "div",
             { class: "links" },
-            h("button", { class: "btn primary", type: "button", disabled: busy || p.loading || !!v.blocked, onclick: () => void act(`merge:${id}`, `/jobs/${id}/merge`, { sha: v.head }, () => void loadPull(id)) }, "Merge"),
-            h("button", { class: "btn", type: "button", disabled: busy || p.loading, onclick: () => void loadPull(id) }, p.loading ? "Looking" : "Look again"),
+            h("button", { class: "btn primary", type: "button", disabled: busy || p.loading || !!v.blocked, onclick: () => void act(`merge:${p.key}`, `/pulls/${encodeURIComponent(repo)}/${number}/merge`, { sha: v.head }, () => void loadPull(repo, number)) }, "Merge"),
+            h("button", { class: "btn", type: "button", disabled: busy || p.loading, onclick: () => void loadPull(repo, number) }, p.loading ? "Looking" : "Look again"),
+            h("a", { class: "btn", href: v.url, rel: "noopener noreferrer", target: "_blank" }, icon("link"), "On GitHub"),
           ),
           v.blocked ? h("p", { class: "prose" }, v.blocked) : h("p", { class: "prose muted" }, `Merges ${v.branch} into ${v.base} at commit ${v.head.slice(0, 7)}, the one shown here.${v.redeploys ? " Merging redeploys ClearOps once no job is running." : ""}`),
         )
@@ -622,6 +631,7 @@ function pullPane(detail) {
     "section",
     { class: "pane pull", "aria-label": "Pull request" },
     head(stateTag),
+    slip,
     h("div", { class: "block" }, h("p", { class: "pull-title" }, `#${v.number} ${v.title}`), h("p", { class: "muted" }, `${v.repository} · ${v.branch} into ${v.base} · by ${v.author} · ${v.commits} ${v.commits === 1 ? "commit" : "commits"}`)),
     p.error ? h("div", { class: "banner bad", role: "status" }, `Not up to date. ${p.error}`) : null,
     h(
@@ -642,6 +652,35 @@ function pullPane(detail) {
       v.files.map((f) => pullFile(p, f)),
     ),
   );
+}
+
+/** A pull request on a page of its own, opened from the board's list. */
+function pullPage(r) {
+  return h(
+    "main",
+    { class: "page" },
+    h("div", { class: "job-head" }, h("a", { class: "btn", href: "#/" }, icon("back"), "Board")),
+    noticeBar(),
+    pullPane({ repo: r.repo, number: r.number }),
+  );
+}
+
+function pullCard(pr, now) {
+  return h(
+    "a",
+    { class: "card", href: `#/pull/${pr.repo}/${pr.number}` },
+    h("div", { class: "card-main" }, h("div", { class: "card-title" }, `#${pr.number} ${pr.title}`), h("div", { class: "card-sub" }, [pr.repository, pr.branch, `by ${pr.author}`].filter(Boolean).join(" · "))),
+    h("div", { class: "card-line" }, h("span", {}, `${pr.draft ? "Draft. " : ""}Opened ${ago(pr.openedAt, now)}. Tap to review.`)),
+  );
+}
+
+/** Every open pull request in the managed repositories, as GitHub lists them: not through any job. */
+function pullsColumn(board, now, limit) {
+  const all = board.pulls ?? [];
+  const shown = limit ? all.slice(0, limit) : all;
+  const unread = board.pullsUnread?.length ? h("div", { class: "more" }, `GitHub would not show: ${board.pullsUnread.join(", ")}.`) : null;
+  const more = all.length > shown.length ? h("div", { class: "more" }, `${all.length - shown.length} more on the board.`) : null;
+  return column("run", "Open pull requests", shown.map((pr) => pullCard(pr, now)), board.pullsLoading ? "Asking GitHub." : "None are open.", { hidden: all.length - shown.length, node: unread || more ? h("div", {}, more, unread) : null });
 }
 
 function jobPage() {
@@ -737,7 +776,7 @@ function jobPage() {
     jobActions(detail),
     h("div", { class: "stats" }, cost, model, steps, time),
     // Above the trace, not below it: a long trace on a phone hid it (19 Nov 2026).
-    detail.actions?.review ? pullPane(detail) : null,
+    detail.pull ? pullPane(detail.pull) : null,
     h("div", { class: "panes" }, about, trace),
     output,
   );
@@ -761,6 +800,7 @@ function besideBoard() {
     board.paused ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "The queues are held.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Resume")) : null,
     board.spend.capReached ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Today's cap is reached.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
     column("wait", "Waiting on me", [...board.waiting.map((w) => waitingCard(w, now)), ...by("waiting").map((j) => jobCard(j, now))], "Nothing needs you."),
+    pullsColumn(board, now, DONE_SHOWN_BESIDE),
     column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),
     column("", "Queued", by("queued").map((j) => jobCard(j, now)), "The queue is empty."),
     column("ok", "Confirmed done", met.cards, "Nothing is confirmed as done.", met.extra),
@@ -907,12 +947,12 @@ narrow.addEventListener("change", () => draw());
 
 function draw() {
   const r = route();
-  document.title = r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : "ClearOps";
+  document.title = r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
   if (!shellEl.isConnected) root.replaceChildren(shellEl);
   headerEl.replaceChildren(header(state.board));
-  if (r.name === "job") {
+  if (r.name === "job" || r.name === "pull") {
     shellEl.className = "shell";
-    bodyEl.replaceChildren(jobPage());
+    bodyEl.replaceChildren(r.name === "job" ? jobPage() : pullPage(r));
     return;
   }
   const mode = layout();
@@ -1051,11 +1091,21 @@ async function tick() {
   const r = route();
   let wait = BOARD_EVERY_MS;
   if (!document.hidden) {
-    const results = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : false]);
-    if (results.some(Boolean)) draw();
+    const [boardChanged, jobChanged] = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : false]);
+    // Away from the board, a new reading of the board only refreshes the header: redrawing the page
+    // under someone reading a diff would lose their place.
+    if (r.name === "board" ? boardChanged : jobChanged) draw();
+    else if (boardChanged) headerEl.replaceChildren(header(state.board));
+    if (r.name === "pull") wait = JOB_IDLE_EVERY_MS;
     if (r.name === "job") wait = state.job && (state.job.job.status === "running" || state.job.job.status === "queued") ? JOB_LIVE_EVERY_MS : JOB_IDLE_EVERY_MS;
   }
   timer = setTimeout(tick, wait);
+}
+
+/** A pull request opened from the list is fetched straight away: opening it is the ask. */
+function openPullRoute() {
+  const r = route();
+  if (r.name === "pull" && state.pull?.key !== pullKey(r.repo, r.number)) void loadPull(r.repo, r.number);
 }
 
 window.addEventListener("hashchange", () => {
@@ -1067,6 +1117,7 @@ window.addEventListener("hashchange", () => {
   window.scrollTo(0, 0);
   draw();
   void tick();
+  openPullRoute();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
@@ -1077,3 +1128,4 @@ document.addEventListener("visibilitychange", () => {
 draw();
 void tick();
 void chatTick();
+openPullRoute();

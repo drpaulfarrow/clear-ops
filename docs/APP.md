@@ -58,19 +58,25 @@ Three invariant tests said nothing but the orchestrator and a gate itself may ap
 
 ## What slice 4 adds: reviewing and merging a pull request (`src/app-pulls.ts`)
 
-A job with a pull request has a Pull request panel on its page, above the trace. Review it here asks GitHub for it as it is now: title, branch, author, description, every check on its head commit, and each changed file with its changes, opened one file at a time. `docs/app/pull.png` shows it with a made-up pull request. Merge is one tap, and it is the only place the service itself merges anything. No model is involved.
+The board has an Open pull requests column: every open pull request in the repositories ClearOps manages, newest first, read from GitHub itself (`docs/app/pulls.png`). Tapping one opens it on a page of its own: title, branch, author, description, every check on its head commit, and each changed file with its changes, opened one file at a time (`docs/app/pull.png`, a made-up pull request). Merge is one tap, and it is the only place the service itself merges anything. No model is involved. A job tied to a pull request has the same panel on its own page, above the trace.
 
-- **Only the job's own pull request, in the job's own repository.** A job's `pr` is often read from its report, which is a model's words. If it is not in the managed repository the job works on, it is refused before GitHub is asked anything.
+The first version (18 Nov 2026) reached a pull request only through a job, by the address the worker typed in its report. Workers mistype that address or name another pull request first, and Paul could not find the two that were open (19 Nov 2026). The list is now GitHub's own and does not depend on any job.
+
+- **Only a managed repository, by its alias, and a number.** `/app/api/pulls/<alias>/<number>`. The alias must be exactly one ClearOps manages. No address, owner or repository name is taken from a request.
+- **The list never holds up a page.** The board answers from the last reading and reads again in the background, at most once a minute for each repository. A repository GitHub would not show is named under the list, so "none open" is never claimed for it.
 - **The commit Paul was shown.** The tap carries the head commit of the view. The service looks again first and refuses if new commits were pushed, and GitHub is given the same commit so it refuses too.
 - **Nothing blocked is merged.** Closed, a draft, in conflict, a check failed or still running, or GitHub not yet sure it can merge: the button is off and the panel says why. Look again asks GitHub afresh. Branch protection stays the backstop, and GitHub's own refusal is shown as said.
 - **One write only.** A merge commit, as Paul's own merges are. It never squashes, rebases, pushes, approves, comments, closes or deletes a branch.
-- **From this site's own script, signed in.** The same check as every other action in the app. What was merged is said in the app's chat and where the job began.
+- **From this site's own script, signed in.** The same check as every other action in the app. What was merged is said in the app's chat.
 - **Another party's text.** Titles, descriptions and diffs are cut to size (100 files, 20,000 characters a file, 300,000 in all), have secrets redacted, and are shown as plain text, never as HTML.
 
 On this repository a merge redeploys the service once no job is running, and the panel says so. Not here yet: asking for changes, commenting, or merging with a check still red. Those are done on GitHub.
 
+### A job and its pull request
+A job is tied to a pull request only inside the repository the job works on (`forJob`). When its report names that repository under another owner (`dpaulfarrow/clear-ops` for `drpaulfarrow/clear-ops`), the owner is taken to be a slip: the job's link, its panel and what GitHub is asked all use the real repository, and the panel says what the report wrote. A pull request in any other repository is not the job's and gets no panel. When GitHub answers "not found" for the address a job names, the job no longer reads as waiting on Paul: it says GitHub does not show that pull request.
+
 ### What this changes in the rules
-"Only the maintainer merges" was true of everything in the service. It is still true of every agent. The one addition is Paul's own tap, which has its own invariant test, and `CLAUDE.md` gains one clause saying so. The engineer and maintainer denials are untouched.
+"Only the maintainer merges" was true of everything in the service. It is still true of every agent. The one addition is Paul's own tap, which has its own invariant test, and `CLAUDE.md` has one clause saying so. The engineer and maintainer denials are untouched. On 19 Nov 2026, on Paul's say, the tap went from "a job's own pull request" to "any open pull request in a repository ClearOps manages".
 
 ## Still to come
 

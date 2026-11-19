@@ -1,15 +1,23 @@
 /**
- * Reviewing and merging a job's pull request from the web app (docs/APP.md).
+ * The open pull requests of the repositories ClearOps manages, shown in the web app and merged on
+ * Paul's own tap (docs/APP.md).
  *
  * Paul asked to review and merge from the app instead of leaving for GitHub. This is the one place
  * the service itself merges anything. It is not an agent and no model is involved: the app shows him
- * the pull request as GitHub holds it, and his own tap on Merge is carried here with the exact commit
+ * a pull request as GitHub holds it, and his own tap on Merge is carried here with the exact commit
  * he was looking at.
  *
+ * It works from the repositories, not from jobs. The first version went through a job's `pr`, which
+ * is the address a worker typed in its report: workers mistype it (`dpaulfarrow` for `drpaulfarrow`,
+ * 19 Nov 2026) or name another pull request first, so Paul could not find the two that were open.
+ * The list here is GitHub's own.
+ *
  * What keeps it narrow:
- *  - Only a job's own `pr`, of exactly the shape `https://github.com/<owner>/<repo>/pull/<n>`, and only
- *    when it is in the managed repository that job works on. A job's `pr` is often read from its
- *    report, which is a model's words, so an address anywhere else is refused before GitHub is asked.
+ *  - Only a repository ClearOps manages, named by its alias and matched exactly, and a pull request
+ *    named by its number. No address, owner or repository name is ever taken from a request.
+ *  - A job is tied to a pull request only inside the repository the job itself works on. When the
+ *    address in its report names that repository under another owner, the owner is taken to be a
+ *    slip and the app says so; any other repository is left alone.
  *  - A merge names the head commit Paul was shown. If the pull request has moved on, the service
  *    refuses, and GitHub is given the same commit so it refuses too.
  *  - Nothing is merged that is closed, a draft, in conflict, or has a check that failed or is still
@@ -20,6 +28,8 @@
  *    is sent to the app as plain text, never as HTML.
  *  - The credential is the one the service already holds for that repository. It goes in a header to
  *    api.github.com and nowhere else.
+ *  - The list never holds up a page: it answers from what it last read and reads again in the
+ *    background, at most once a minute for each repository.
  */
 import { shortText } from "./messages.js";
 import { redact } from "./repos.js";
@@ -33,7 +43,42 @@ export const PULL_FILES_MAX = 100;
 /** The most of one file's changes, and of all of them together, sent to the app. */
 export const PULL_PATCH_MAX = 20_000;
 export const PULL_PATCHES_MAX = 300_000;
+/** How many open pull requests of one repository are listed. */
+export const PULL_LIST_MAX = 30;
+/** How long a repository's list is good for before it is read again. */
+export const PULL_LIST_FRESH_MS = 60_000;
 const BODY_MAX = 6_000;
+
+/** A repository ClearOps manages, as this module needs it. */
+export interface PullRepo {
+  /** The alias jobs and the app name it by ("self", "product", ...). */
+  alias: string;
+  /** "owner/name" on GitHub. */
+  slug: string;
+  /** What Paul calls it. */
+  name: string;
+}
+
+/** The pull request a job is tied to, inside the repository the job works on. */
+export interface JobPull {
+  repo: string;
+  number: number;
+  url: string;
+  /** The repository as the worker wrote it, when its owner was not the real one. */
+  wrote?: string;
+}
+
+/** One open pull request in the list. */
+export interface PullSummary {
+  repo: string;
+  repository: string;
+  number: number;
+  title: string;
+  author: string;
+  branch: string;
+  draft: boolean;
+  openedAt: string;
+}
 
 export interface PullCheck {
   name: string;
@@ -54,6 +99,7 @@ export interface PullFile {
 
 export interface PullView {
   url: string;
+  repo: string;
   repository: string;
   number: number;
   title: string;
@@ -85,21 +131,24 @@ export class PullError extends Error {
 }
 
 export interface AppPullsOptions {
-  /** The managed repository a job works on, as "owner/name", or undefined when it has none. */
-  slugOf: (job: Job) => string | undefined;
+  /** The repositories ClearOps manages that are on GitHub. */
+  repos: () => PullRepo[];
+  /** The alias of the repository a job works on. */
+  repoOf: (job: Job) => string | undefined;
   /** The credential the service holds for a managed repository, or undefined when it has none. */
-  token: (slug: string) => Promise<string | undefined> | string | undefined;
-  /** The repository this service is deployed from, so the app can say a merge redeploys it. */
-  selfSlug?: string;
+  token: (repo: PullRepo) => Promise<string | undefined> | string | undefined;
+  /** The alias of the repository this service is deployed from, so the app can say a merge redeploys it. */
+  selfAlias?: string;
   fetch?: typeof fetch;
+  now?: () => number;
 }
 
 interface Target {
+  repo: PullRepo;
   owner: string;
-  repo: string;
+  name: string;
   number: number;
   url: string;
-  slug: string;
 }
 
 interface RawPull {
@@ -114,6 +163,7 @@ interface RawPull {
   additions?: unknown;
   deletions?: unknown;
   changed_files?: unknown;
+  created_at?: unknown;
   user?: { login?: unknown };
   head?: { sha?: unknown; ref?: unknown };
   base?: { ref?: unknown };
@@ -121,66 +171,123 @@ interface RawPull {
 
 const text = (v: unknown, max: number): string => (typeof v === "string" ? shortText(redact(v), max) : "");
 const count = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+const SLUG = /^([\w.-]+)\/([\w.-]+)$/;
+const dots = (s: string) => /^\.+$/.test(s);
 
 export class AppPulls {
   private readonly o: AppPullsOptions;
   private readonly fetch: typeof fetch;
+  private readonly now: () => number;
   /** Pull requests with a merge in flight, so two taps are one merge. */
   private merging = new Set<string>();
+  /** Each repository's open pull requests as last read, by alias. */
+  private lists = new Map<string, { at: number; pulls?: PullSummary[]; failed?: boolean }>();
+  private reading = new Set<string>();
 
   constructor(o: AppPullsOptions) {
     this.o = o;
     this.fetch = o.fetch ?? fetch;
+    this.now = o.now ?? Date.now;
   }
 
-  /** Whether a job has a pull request this could show at all. The repository is checked when it is asked for. */
-  static has(job: Pick<Job, "pr">): boolean {
-    return !!job.pr && PR_URL.test(job.pr);
+  /**
+   * The pull request a job is tied to, or undefined. No network: it reads the address in the job's
+   * `pr` and keeps it only inside the repository the job works on, whatever owner the worker wrote.
+   */
+  forJob(job: Job): JobPull | undefined {
+    const m = job.pr ? PR_URL.exec(job.pr) : null;
+    if (!m) return undefined;
+    const [, owner, name, number] = m;
+    const alias = this.o.repoOf(job);
+    const repo = alias ? this.managed(alias) : undefined;
+    const real = repo ? SLUG.exec(repo.slug) : null;
+    if (!repo || !real || real[2]!.toLowerCase() !== name!.toLowerCase()) return undefined;
+    const n = Number(number);
+    if (!Number.isSafeInteger(n) || n < 1) return undefined;
+    const sameOwner = real[1]!.toLowerCase() === owner!.toLowerCase();
+    return { repo: repo.alias, number: n, url: `https://github.com/${repo.slug}/pull/${n}`, ...(sameOwner ? {} : { wrote: `${owner}/${name}` }) };
+  }
+
+  /**
+   * Every open pull request in the managed repositories, newest first, as last read. Never waits:
+   * a repository not read in the last minute is read again in the background. `unread` names the
+   * repositories GitHub would not show, so an empty list is never mistaken for "none open".
+   */
+  open(): { pulls: PullSummary[]; unread: string[]; loading: boolean } {
+    const pulls: PullSummary[] = [];
+    const unread: string[] = [];
+    let loading = false;
+    for (const repo of this.o.repos()) {
+      if (!this.managed(repo.alias)) continue;
+      const seen = this.lists.get(repo.alias);
+      if ((!seen || this.now() - seen.at > PULL_LIST_FRESH_MS) && !this.reading.has(repo.alias)) {
+        this.reading.add(repo.alias);
+        void this.list(repo)
+          .then((got) => void this.lists.set(repo.alias, { at: this.now(), pulls: got }))
+          // A failed read keeps the last list and is marked, and is tried again after the same minute.
+          .catch(() => void this.lists.set(repo.alias, { at: this.now(), pulls: this.lists.get(repo.alias)?.pulls, failed: true }))
+          .then(() => void this.reading.delete(repo.alias));
+      }
+      if (!seen) loading = true;
+      else if (seen.failed) unread.push(repo.name);
+      if (seen?.pulls) pulls.push(...seen.pulls);
+    }
+    return { pulls: pulls.sort((a, b) => b.openedAt.localeCompare(a.openedAt)), unread, loading };
+  }
+
+  /** Resolves once no list is being read. For the tests. */
+  async settled(): Promise<void> {
+    while (this.reading.size) await new Promise((r) => setTimeout(r, 5));
   }
 
   /** The pull request as GitHub holds it now, with its checks and its changes. */
-  async view(job: Job): Promise<PullView> {
-    return this.load(job, true);
+  async view(alias: unknown, number: unknown): Promise<PullView> {
+    return this.load(this.target(alias, number), true);
   }
 
   /** Merges the pull request Paul was shown, if it is still that commit and nothing blocks it. */
-  async merge(job: Job, sha: unknown): Promise<{ text: string; url: string }> {
+  async merge(alias: unknown, number: unknown, sha: unknown): Promise<{ text: string; url: string }> {
     if (typeof sha !== "string" || !SHA.test(sha)) throw new PullError("refused", 400);
-    const t = this.target(job);
+    const t = this.target(alias, number);
     if (this.merging.has(t.url)) throw new PullError("It is already being merged.");
     this.merging.add(t.url);
     try {
-      const now = await this.load(job, false);
+      const now = await this.load(t, false);
       if (now.blocked) throw new PullError(`Not merged. ${now.blocked}`);
       if (now.head !== sha) throw new PullError("Not merged. New commits were pushed since you looked. Look at it again first.");
       const res = await this.github(t, `/pulls/${t.number}/merge`, { method: "PUT", body: JSON.stringify({ sha, merge_method: "merge" }) });
       if (!res.ok) throw new PullError(`Not merged. GitHub refused: ${await this.said(res)}`);
       const merged = ((await res.json().catch(() => ({}))) as { merged?: unknown }).merged === true;
       if (!merged) throw new PullError("GitHub did not confirm the merge. Look at it again.");
-      return { text: `Merged pull request #${t.number} on ${t.repo} from the app: ${now.title}.${now.redeploys ? " The service redeploys once no job is running." : ""}`, url: t.url };
+      // The list is read again at the next look, so the merged one leaves it.
+      this.lists.delete(t.repo.alias);
+      return { text: `Merged pull request #${t.number} on ${t.repo.name} from the app: ${now.title}.${now.redeploys ? " The service redeploys once no job is running." : ""}`, url: t.url };
     } finally {
       this.merging.delete(t.url);
     }
   }
 
-  /** The job's pull request, only when it is in the job's own managed repository. */
-  private target(job: Job): Target {
-    const m = job.pr ? PR_URL.exec(job.pr) : null;
-    if (!m) throw new PullError("This job has no pull request.", 404);
-    const [, owner, repo, number] = m;
-    const slug = `${owner}/${repo}`;
-    const own = this.o.slugOf(job);
-    if (!own || own.toLowerCase() !== slug.toLowerCase() || /^\.+$/.test(owner!) || /^\.+$/.test(repo!)) {
-      throw new PullError("This job's pull request is not in the repository the job works on, so it is not shown or merged here.", 404);
-    }
-    return { owner: owner!, repo: repo!, number: Number(number), url: job.pr!, slug };
+  /** A managed repository by its exact alias. Nothing else names one. */
+  private managed(alias: string): PullRepo | undefined {
+    const repo = this.o.repos().find((r) => r.alias === alias);
+    const m = repo ? SLUG.exec(repo.slug) : null;
+    return repo && m && !dots(m[1]!) && !dots(m[2]!) ? repo : undefined;
   }
 
-  private async github(t: Target, path: string, init: { method?: string; body?: string } = {}): Promise<Response> {
-    const token = await this.o.token(t.slug);
+  /** A pull request by a managed repository's alias and its own number, and by nothing else. */
+  private target(alias: unknown, number: unknown): Target {
+    const n = typeof number === "number" ? number : typeof number === "string" && /^[1-9]\d{0,8}$/.test(number) ? Number(number) : NaN;
+    const repo = typeof alias === "string" ? this.managed(alias) : undefined;
+    if (!repo || !Number.isSafeInteger(n) || n < 1) throw new PullError("There is no such pull request in a repository ClearOps manages.", 404);
+    const [, owner, name] = SLUG.exec(repo.slug)!;
+    return { repo, owner: owner!, name: name!, number: n, url: `https://github.com/${repo.slug}/pull/${n}` };
+  }
+
+  private async github(t: { repo: PullRepo; owner: string; name: string }, path: string, init: { method?: string; body?: string } = {}): Promise<Response> {
+    const token = await this.o.token(t.repo);
     if (!token) throw new PullError("The service holds no GitHub credential for that repository.", 503);
     try {
-      return await this.fetch(`https://api.github.com/repos/${t.owner}/${t.repo}${path}`, {
+      return await this.fetch(`https://api.github.com/repos/${t.owner}/${t.name}${path}`, {
         method: init.method ?? "GET",
         headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "user-agent": "clear-ops", ...(init.body ? { "content-type": "application/json" } : {}) },
         ...(init.body ? { body: init.body } : {}),
@@ -198,15 +305,26 @@ export class AppPulls {
     return shortText(redact(message), 200).replace(/[.\s]*$/, ".");
   }
 
-  private async read<T>(t: Target, path: string): Promise<T> {
+  private async read<T>(t: { repo: PullRepo; owner: string; name: string }, path: string): Promise<T> {
     const res = await this.github(t, path);
     if (res.status === 404) throw new PullError("GitHub cannot find that pull request with the service's credential.", 404);
     if (!res.ok) throw new PullError(`GitHub would not show it: ${await this.said(res)}`, 502);
     return (await res.json()) as T;
   }
 
-  private async load(job: Job, withFiles: boolean): Promise<PullView> {
-    const t = this.target(job);
+  /** One repository's open pull requests, newest first. */
+  private async list(repo: PullRepo): Promise<PullSummary[]> {
+    const [, owner, name] = SLUG.exec(repo.slug)!;
+    const raw = await this.read<RawPull[]>({ repo, owner: owner!, name: name! }, `/pulls?state=open&sort=created&direction=desc&per_page=${PULL_LIST_MAX}`);
+    return (Array.isArray(raw) ? raw : []).slice(0, PULL_LIST_MAX).flatMap((pr) => {
+      const number = count(pr.number);
+      const openedAt = typeof pr.created_at === "string" && Number.isFinite(Date.parse(pr.created_at)) ? pr.created_at : "";
+      if (!number || !openedAt) return [];
+      return [{ repo: repo.alias, repository: repo.name, number, title: text(pr.title, 200) || `Pull request #${number}`, author: text(pr.user?.login, 60) || "unknown", branch: text(pr.head?.ref, 120), draft: pr.draft === true, openedAt }];
+    });
+  }
+
+  private async load(t: Target, withFiles: boolean): Promise<PullView> {
     const pr = await this.read<RawPull>(t, `/pulls/${t.number}`);
     const head = typeof pr.head?.sha === "string" && SHA.test(pr.head.sha) ? pr.head.sha : "";
     if (!head) throw new PullError("GitHub's answer had no head commit.", 502);
@@ -232,7 +350,8 @@ export class AppPulls {
     const body = whole.length > BODY_MAX ? `${whole.slice(0, BODY_MAX).trimEnd()}…` : whole;
     const view: PullView = {
       url: t.url,
-      repository: t.slug,
+      repo: t.repo.alias,
+      repository: t.repo.slug,
       number: t.number,
       title: text(pr.title, 200) || `Pull request #${t.number}`,
       author: text(pr.user?.login, 60) || "unknown",
@@ -248,7 +367,7 @@ export class AppPulls {
       changedFiles: count(pr.changed_files),
       checks,
       files: shown,
-      redeploys: !!this.o.selfSlug && this.o.selfSlug.toLowerCase() === t.slug.toLowerCase(),
+      redeploys: !!this.o.selfAlias && this.o.selfAlias === t.repo.alias,
     };
     const blocked = blockedBy(view, pr.mergeable);
     return blocked ? { ...view, blocked } : view;

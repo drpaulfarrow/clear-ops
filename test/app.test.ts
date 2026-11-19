@@ -30,7 +30,7 @@ const { OutboundGate } = await import("../src/outbound.js");
 const { SignupGate } = await import("../src/signup-gate.js");
 const { seenHash } = await import("../src/app-data.js");
 const { PrStates, PR_STATE_CONCURRENCY } = await import("../src/pr-state.js");
-const { AppPulls, PullError, PULL_FILES_MAX, PULL_PATCH_MAX, PULL_PATCHES_MAX } = await import("../src/app-pulls.js");
+const { AppPulls, PullError, PULL_FILES_MAX, PULL_PATCH_MAX, PULL_PATCHES_MAX, PULL_LIST_MAX, PULL_LIST_FRESH_MS } = await import("../src/app-pulls.js");
 const { appAsset, APP_CSP } = await import("../src/app-pages.js");
 const { workerGithubEnv } = await import("../src/github-auth.js");
 const { tracesDir } = await import("../src/trace.js");
@@ -107,6 +107,8 @@ const pull = {
   checks: [] as Array<{ name: string; status: string; conclusion: string | null }>,
   files: [] as Array<Record<string, unknown>>,
   mergeAnswer: undefined as undefined | { status: number; body: unknown },
+  list: [] as Array<Record<string, unknown>>,
+  listAnswer: undefined as undefined | { status: number; body: unknown },
 };
 function resetPull() {
   pull.calls.length = 0;
@@ -114,6 +116,11 @@ function resetPull() {
   pull.checks = [{ name: "test", status: "completed", conclusion: "success" }, { name: "deploy", status: "completed", conclusion: "skipped" }];
   pull.files = [{ filename: "src/thing.ts", status: "modified", additions: 5, deletions: 1, patch: "@@ -1 +1,5 @@\n-old\n+new" }, { filename: "docs/pic.png", status: "added", additions: 0, deletions: 0 }];
   pull.mergeAnswer = undefined;
+  pull.listAnswer = undefined;
+  pull.list = [
+    { number: 12, title: "Add the thing", draft: false, created_at: "2026-11-18T12:00:00Z", user: { login: "clear-ops-bot" }, head: { ref: "clear/thing" } },
+    { number: 9, title: "An older one ghp_abcdefghijklmnopqrstuvwxyz0123456789", draft: true, created_at: "2026-11-17T09:00:00Z", user: { login: "someone" }, head: { ref: "old" } },
+  ];
 }
 resetPull();
 const pullFetch = (async (url: string | URL, init?: RequestInit) => {
@@ -126,11 +133,18 @@ const pullFetch = (async (url: string | URL, init?: RequestInit) => {
     pull.pr = { ...pull.pr, state: "closed", merged: true };
     return json({ merged: true });
   }
+  if (u.includes("/pulls?state=open")) return pull.listAnswer ? json(pull.listAnswer.body, pull.listAnswer.status) : json(u.includes("/site/") ? [] : pull.list);
   if (u.includes("/check-runs")) return json({ check_runs: pull.checks });
   if (u.includes("/files")) return json(pull.files);
   return json(pull.pr);
 }) as typeof fetch;
-const newPulls = () => new AppPulls({ slugOf: (job) => (job.target === "self" ? "drpaulfarrow/clear-ops" : job.target === "product" ? "Owner/Product" : undefined), token: (slug) => (slug.toLowerCase() === "owner/product" ? undefined : PULL_TOKEN), selfSlug: "drpaulfarrow/clear-ops", fetch: pullFetch });
+const PULL_REPOS = [
+  { alias: "self", slug: "drpaulfarrow/clear-ops", name: "workforce" },
+  { alias: "product", slug: "Owner/Product", name: "Clear Exchange" },
+  { alias: "site", slug: "drpaulfarrow/site", name: "site" },
+];
+const newPulls = (now: () => number = Date.now) =>
+  new AppPulls({ repos: () => PULL_REPOS, repoOf: (job) => (PULL_REPOS.some((r) => r.alias === job.target) ? job.target : undefined), token: (repo) => (repo.alias === "product" ? undefined : PULL_TOKEN), selfAlias: "self", fetch: pullFetch, now });
 const SELF_PR = "https://github.com/drpaulfarrow/clear-ops/pull/12";
 
 function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
@@ -520,6 +534,12 @@ test("GitHub is asked what became of a pull request: in the background, read-onl
   await prs.settled();
   assert.equal(asked.length, 0);
 
+  // GitHub's own "not found" is an answer, not a failure: the address names nothing the service can see.
+  answer = () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+  prs.get(pr(77));
+  await prs.settled();
+  assert.deepEqual(prs.info(pr(77)), { state: "missing" });
+
   // A page full of jobs does not become a flood.
   answer = () => body({ state: "open" });
   for (let n = 100; n < 140; n++) prs.get(pr(n));
@@ -659,7 +679,7 @@ test("one job comes with its trace as stored, and an output only where the repor
 test("five things under /app are not a GET, and the data module never writes", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const appRoutes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
-  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/jobs/:id/merge`"]);
+  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`"]);
   assert.match(appRoutes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some/, "one gate over everything under /app");
   const data = fs.readFileSync(new URL("../src/app-data.ts", import.meta.url), "utf8");
   assert.doesNotMatch(data, /\.(updateJob|createJob|importJob|setSetting|setCapDays|setQueueHold|writeOutput|put[A-Z]\w*|update[A-Z]\w*|create[A-Z]\w*|disableSchedule|addNote)\(/);
@@ -944,30 +964,75 @@ test("a job can be stopped or run again from the app, and nothing it was permitt
   }
 });
 
-/* ---------- A job's pull request: review and merge ---------- */
+/* ---------- Pull requests: the list from GitHub, review and merge ---------- */
 
-const prJob = (s: InstanceType<typeof Store>, pr: string | undefined, target = "self") =>
-  s.updateJob(s.createJob("engineer", "Add the thing.", PAUL, target as never, PAUL, { title: "Add the thing" } as never).id, { status: "done", finishedAt: iso(5), ...(pr ? { pr } : {}) } as never);
+const prJob = (s: InstanceType<typeof Store>, pr: string | undefined, target = "self", patch: Record<string, unknown> = {}) =>
+  s.updateJob(s.createJob("engineer", "Add the thing.", PAUL, target as never, PAUL, { title: "Add the thing" } as never).id, { status: "done", finishedAt: iso(5), ...(pr ? { pr } : {}), ...patch } as never);
+
+test("the open pull requests come from GitHub itself, for the managed repositories only, and never hold up a page", async () => {
+  resetPull();
+  let clock = 5_000_000;
+  const pulls = newPulls(() => clock);
+  // The first look answers at once with nothing yet, and reads in the background.
+  assert.deepEqual(pulls.open(), { pulls: [], unread: [], loading: true });
+  await pulls.settled();
+  const got = pulls.open();
+  assert.deepEqual(got.pulls.map((p) => [p.repo, p.repository, p.number, p.author, p.branch, p.draft, p.openedAt]), [
+    ["self", "workforce", 12, "clear-ops-bot", "clear/thing", false, "2026-11-18T12:00:00Z"],
+    ["self", "workforce", 9, "someone", "old", true, "2026-11-17T09:00:00Z"],
+  ]);
+  assert.ok(!JSON.stringify(got).includes("ghp_"), "a token in a title is redacted");
+  // A repository the service cannot read is named, so "none open" is not claimed for it.
+  assert.deepEqual([got.unread, got.loading], [["Clear Exchange"], false]);
+  // One read per repository it holds a credential for, to GitHub's own API, credential in a header.
+  assert.deepEqual(pull.calls.map((c) => `${c.method} ${c.url}`).sort(), ["drpaulfarrow/clear-ops", "drpaulfarrow/site"].map((r) => `GET https://api.github.com/repos/${r}/pulls?state=open&sort=created&direction=desc&per_page=${PULL_LIST_MAX}`));
+  assert.ok(pull.calls.every((c) => c.auth === `Bearer ${PULL_TOKEN}` && !c.url.includes(PULL_TOKEN)));
+
+  // Within the minute nothing is read again; after it, each repository once more.
+  pull.calls.length = 0;
+  clock += PULL_LIST_FRESH_MS - 1;
+  pulls.open();
+  await pulls.settled();
+  assert.equal(pull.calls.length, 0);
+  clock += 2;
+  pull.list = pull.list.slice(0, 1);
+  assert.equal(pulls.open().pulls.length, 2, "the last reading is shown while the next is fetched");
+  await pulls.settled();
+  assert.deepEqual(pulls.open().pulls.map((p) => p.number), [12]);
+  // A read that fails keeps the last list and says which repository it could not read.
+  clock += PULL_LIST_FRESH_MS + 1;
+  pull.listAnswer = { status: 500, body: { message: "boom" } };
+  pulls.open();
+  await pulls.settled();
+  const after = pulls.open();
+  assert.deepEqual([after.pulls.map((p) => p.number), after.unread.sort()], [[12], ["Clear Exchange", "site", "workforce"]]);
+
+  // The board carries the list as it is.
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-pull-")));
+  const board = appBoard({ store: s, queue: quietQueue, now, openPulls: () => ({ pulls: got.pulls, unread: got.unread, loading: false }) });
+  assert.deepEqual([board.pulls.map((p) => p.number), board.pullsUnread, board.pullsLoading], [[12, 9], ["Clear Exchange"], false]);
+  assert.deepEqual([appBoard({ store: s, queue: quietQueue, now }).pulls, appBoard({ store: s, queue: quietQueue, now }).pullsLoading], [[], false]);
+});
 
 test("a pull request is shown as GitHub holds it: read-only, cut to size, with nothing secret in it", async () => {
   resetPull();
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-pull-")));
   const pulls = newPulls();
   pull.pr = { ...pull.pr, title: "Add the thing ghp_abcdefghijklmnopqrstuvwxyz0123456789", body: `Line one.\r\n\r\n${"x".repeat(7000)}` };
   pull.files = [
     { filename: "src/thing.ts", status: "modified", additions: 5, deletions: 1, patch: `@@ -1 +1 @@\n+const key = "sk-live-abcdefghijklmnopqrstuvwxyz";\n${"+y\n".repeat(10_000)}` },
     ...Array.from({ length: 120 }, (_, i) => ({ filename: `src/f${i}.ts`, status: "added", additions: 1, deletions: 0, patch: `+${"z".repeat(5000)}` })),
   ];
-  const v = await pulls.view(prJob(s, SELF_PR));
-  assert.deepEqual({ url: v.url, repository: v.repository, number: v.number, author: v.author, state: v.state, draft: v.draft, head: v.head, branch: v.branch, base: v.base, commits: v.commits, redeploys: v.redeploys, blocked: v.blocked }, { url: SELF_PR, repository: "drpaulfarrow/clear-ops", number: 12, author: "clear-ops-bot", state: "open", draft: false, head: HEAD, branch: "clear/thing", base: "main", commits: 2, redeploys: true, blocked: undefined });
+  const v = await pulls.view("self", "12");
+  assert.deepEqual({ url: v.url, repo: v.repo, repository: v.repository, number: v.number, author: v.author, state: v.state, draft: v.draft, head: v.head, branch: v.branch, base: v.base, commits: v.commits, redeploys: v.redeploys, blocked: v.blocked }, { url: SELF_PR, repo: "self", repository: "drpaulfarrow/clear-ops", number: 12, author: "clear-ops-bot", state: "open", draft: false, head: HEAD, branch: "clear/thing", base: "main", commits: 2, redeploys: true, blocked: undefined });
+  assert.equal((await pulls.view("site", 3)).redeploys, false);
   assert.deepEqual(v.checks, [{ name: "test", state: "passed" }, { name: "deploy", state: "skipped" }]);
   assert.ok(!JSON.stringify(v).includes("ghp_") && !JSON.stringify(v).includes("sk-live-"), "tokens in a title or a diff are redacted");
   assert.ok(v.body!.startsWith("Line one.\n\nxxx") && v.body!.length <= 6001, "the description keeps its line breaks and is cut");
   assert.equal(v.files.length, PULL_FILES_MAX);
   assert.ok(v.files[0]!.patch!.length <= PULL_PATCH_MAX && v.files[0]!.cut === true);
   assert.ok(v.files.reduce((n, f) => n + (f.patch?.length ?? 0), 0) <= PULL_PATCHES_MAX, "all the changes together are capped");
-  // Three reads, all GETs to GitHub's own API for that repository, with the credential in a header.
-  assert.deepEqual(pull.calls.map((c) => `${c.method} ${c.url}`).sort(), [
+  // Three reads for it, all GETs to GitHub's own API for that repository, with the credential in a header.
+  assert.deepEqual(pull.calls.filter((c) => c.url.includes("/clear-ops/")).map((c) => `${c.method} ${c.url}`).sort(), [
     `GET https://api.github.com/repos/drpaulfarrow/clear-ops/commits/${HEAD}/check-runs?per_page=100`,
     "GET https://api.github.com/repos/drpaulfarrow/clear-ops/pulls/12",
     `GET https://api.github.com/repos/drpaulfarrow/clear-ops/pulls/12/files?per_page=${PULL_FILES_MAX}`,
@@ -976,35 +1041,74 @@ test("a pull request is shown as GitHub holds it: read-only, cut to size, with n
   assert.ok(!JSON.stringify(v).includes(PULL_TOKEN));
 });
 
-test("only a job's own pull request in the job's own repository is ever asked about", async () => {
+test("a pull request is named only by a managed repository's alias and its own number", async () => {
   resetPull();
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-pull-")));
   const pulls = newPulls();
-  const refusedBefore = async (job: ReturnType<typeof prJob>, status: number) => {
-    for (const run of [() => pulls.view(job), () => pulls.merge(job, HEAD)]) await assert.rejects(run, (e: unknown) => e instanceof PullError && e.status === status);
+  const refused = async (alias: unknown, number: unknown, status: number) => {
+    for (const run of [() => pulls.view(alias, number), () => pulls.merge(alias, number, HEAD)]) await assert.rejects(run, (e: unknown) => e instanceof PullError && e.status === status, `${String(alias)} ${String(number)}`);
   };
-  // A job's `pr` is often a model's words, read from its report: an address anywhere else goes nowhere.
-  await refusedBefore(prJob(s, "https://github.com/someone/else/pull/3"), 404);
-  await refusedBefore(prJob(s, SELF_PR, "site"), 404);
-  await refusedBefore(prJob(s, "https://github.com/drpaulfarrow/clear-ops/pull/12/files"), 404);
-  await refusedBefore(prJob(s, "https://evil.example/drpaulfarrow/clear-ops/pull/12"), 404);
-  await refusedBefore(prJob(s, "#12"), 404);
-  await refusedBefore(prJob(s, undefined), 404);
-  // A repository the service holds no credential for is not asked either.
-  await refusedBefore(prJob(s, "https://github.com/owner/product/pull/4", "product"), 503);
+  // Not an alias ClearOps has: an owner/name, an address, another spelling, nothing at all.
+  for (const alias of ["drpaulfarrow/clear-ops", "https://github.com/drpaulfarrow/clear-ops", "Self", "self ", "someone/else", "..", "", undefined, 7, {}]) await refused(alias, 12, 404);
+  // Not a pull request's number.
+  for (const number of ["0", "-1", "1.5", "12/files", "12?x=1", "1e3", " 12", "", undefined, 0, -3, 1.5, Number.NaN, {}]) await refused("self", number, 404);
+  // A managed repository the service holds no credential for is not asked either.
+  await refused("product", 4, 503);
   assert.equal(pull.calls.length, 0, "GitHub was never asked");
 });
 
-test("a merge is the commit Paul was shown, with nothing blocking it, and nothing else", async () => {
+test("a job is tied to a pull request only inside its own repository, whatever owner its report wrote", () => {
   const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-pull-")));
-  const job = prJob(s, SELF_PR);
+  const pulls = newPulls();
+  const of = (pr: string | undefined, target = "self") => pulls.forJob(prJob(s, pr, target));
+  assert.deepEqual(of(SELF_PR), { repo: "self", number: 12, url: SELF_PR });
+  assert.deepEqual(of("https://github.com/DrPaulFarrow/Clear-Ops/pull/12"), { repo: "self", number: 12, url: SELF_PR }, "case is not a difference");
+  // 19 Nov 2026: a worker wrote dpaulfarrow for drpaulfarrow. Same repository name, so the owner is a slip.
+  assert.deepEqual(of("https://github.com/dpaulfarrow/clear-ops/pull/108"), { repo: "self", number: 108, url: "https://github.com/drpaulfarrow/clear-ops/pull/108", wrote: "dpaulfarrow/clear-ops" });
+  // Another repository's pull request is not the job's, wherever it is.
+  for (const pr of ["https://github.com/drpaulfarrow/site/pull/3", "https://github.com/someone/else/pull/3", "https://github.com/drpaulfarrow/clear-ops/pull/12/files", "https://evil.example/drpaulfarrow/clear-ops/pull/12", "https://github.com/drpaulfarrow/clear-ops/pull/0", "#12", undefined]) assert.equal(of(pr), undefined, String(pr));
+  assert.equal(of(SELF_PR, "site"), undefined, "a job on another repository");
+  assert.equal(of(SELF_PR, "nowhere"), undefined, "a job on no managed repository");
+  assert.equal(pull.calls.filter((c) => c.method !== "GET").length, 0);
+});
+
+test("a job reads from its own repository's pull request, and never waits on one GitHub does not have", () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-pull-")));
+  const pulls = newPulls();
+  const real = "https://github.com/drpaulfarrow/clear-ops/pull/108";
+  const slip = prJob(s, "https://github.com/dpaulfarrow/clear-ops/pull/108", "self", { reviewOnly: true, createdAt: iso(30) });
+  const gone = prJob(s, "https://github.com/someone/else/pull/3", "self", { reviewOnly: true });
+  const unasked = prJob(s, "https://github.com/someone/else/pull/4", "self", { reviewOnly: true });
+  const asked: string[] = [];
+  const source = {
+    store: s,
+    queue: quietQueue,
+    now,
+    jobPull: (job: Parameters<typeof pulls.forJob>[0]) => pulls.forJob(job),
+    prState: (url: string) => (asked.push(url), url === real ? ({ state: "merged", openedAt: iso(600) } as const) : url.endsWith("/3") ? ({ state: "missing" } as const) : undefined),
+  };
+  const board = appBoard(source);
+  const of = (id: string) => board.jobs.find((j) => j.id === id)!;
+  // The mistyped owner: GitHub is asked about the real one, the card links to it, and it no longer waits on Paul.
+  assert.ok(asked.includes(real) && !asked.some((u) => u.includes("dpaulfarrow")));
+  assert.equal(of(slip.id).pr, real);
+  assert.deepEqual(of(slip.id).outcome, { state: "unconfirmed", text: "The pull request it worked on was merged. Nothing here confirms this job's own part.", by: "nobody" });
+  const detail = appJob(source, slip.id)!;
+  assert.deepEqual([detail.pull, detail.actions.review, detail.links], [{ repo: "self", number: 108, wrote: "dpaulfarrow/clear-ops" }, true, [{ what: "pull request", url: real }]]);
+  // An address GitHub does not have is not "open for you to review".
+  assert.deepEqual(of(gone.id).outcome, { state: "unconfirmed", text: "GitHub does not show the pull request this job names, so nothing here can check it.", by: "nobody" });
+  assert.equal(of(unasked.id).outcome!.state, "waiting", "until GitHub has answered it reads as before");
+  const other = appJob(source, gone.id)!;
+  assert.deepEqual([other.pull, other.actions.review], [undefined, false], "and there is no panel for a pull request outside the job's repository");
+});
+
+test("a merge is the commit Paul was shown, with nothing blocking it, and nothing else", async () => {
   const puts = () => pull.calls.filter((c) => c.method !== "GET");
   const blocked = async (set: () => void, words: RegExp) => {
     resetPull();
     set();
     const pulls = newPulls();
-    assert.match((await pulls.view(job)).blocked ?? "", words);
-    await assert.rejects(() => pulls.merge(job, HEAD), (e: unknown) => e instanceof PullError && /^Not merged\. /.test(e.message) && words.test(e.message));
+    assert.match((await pulls.view("self", 12)).blocked ?? "", words);
+    await assert.rejects(() => pulls.merge("self", 12, HEAD), (e: unknown) => e instanceof PullError && /^Not merged\. /.test(e.message) && words.test(e.message));
     assert.equal(puts().length, 0, "nothing was sent to GitHub but reads");
   };
   await blocked(() => void (pull.pr = { ...pull.pr, state: "closed", merged: true }), /already merged/);
@@ -1018,68 +1122,80 @@ test("a merge is the commit Paul was shown, with nothing blocking it, and nothin
   // A commit he was not shown, or anything that is not a commit, is refused before GitHub is asked to merge.
   resetPull();
   const pulls = newPulls();
-  await assert.rejects(() => pulls.merge(job, "b".repeat(40)), /New commits were pushed since you looked/);
-  for (const bad of [undefined, "", "main", HEAD.slice(0, 7), HEAD.toUpperCase(), { sha: HEAD }, `${HEAD} `]) await assert.rejects(() => pulls.merge(job, bad), (e: unknown) => e instanceof PullError && e.status === 400);
+  await assert.rejects(() => pulls.merge("self", 12, "b".repeat(40)), /New commits were pushed since you looked/);
+  for (const bad of [undefined, "", "main", HEAD.slice(0, 7), HEAD.toUpperCase(), { sha: HEAD }, `${HEAD} `]) await assert.rejects(() => pulls.merge("self", 12, bad), (e: unknown) => e instanceof PullError && e.status === 400);
   assert.equal(puts().length, 0);
 
   // The real thing: one PUT, naming that commit, as a merge commit. No branch is deleted, nothing else is written.
-  const done = await pulls.merge(job, HEAD);
-  assert.deepEqual(done, { text: "Merged pull request #12 on clear-ops from the app: Add the thing. The service redeploys once no job is running.", url: SELF_PR });
+  pulls.open();
+  await pulls.settled();
+  assert.deepEqual(pulls.open().pulls.map((p) => p.number), [12, 9]);
+  const done = await pulls.merge("self", "12", HEAD);
+  assert.deepEqual(done, { text: "Merged pull request #12 on workforce from the app: Add the thing. The service redeploys once no job is running.", url: SELF_PR });
   assert.deepEqual(puts().map((c) => [c.method, c.url, c.body]), [["PUT", "https://api.github.com/repos/drpaulfarrow/clear-ops/pulls/12/merge", JSON.stringify({ sha: HEAD, merge_method: "merge" })]]);
-  await assert.rejects(() => pulls.merge(job, HEAD), /already merged/);
+  await assert.rejects(() => pulls.merge("self", 12, HEAD), /already merged/);
+  // The list is read afresh after a merge, so the merged one leaves it.
+  pull.list = pull.list.filter((p) => p.number !== 12);
+  pulls.open();
+  await pulls.settled();
+  assert.deepEqual(pulls.open().pulls.map((p) => p.number), [9]);
 
   // GitHub's own refusal (branch protection, say) is passed on as said, and is not a merge.
   resetPull();
   pull.mergeAnswer = { status: 405, body: { message: "At least 1 approving review is required by reviewers with write access" } };
-  await assert.rejects(() => newPulls().merge(job, HEAD), /Not merged\. GitHub refused: At least 1 approving review is required by reviewers with write access\.$/);
+  await assert.rejects(() => newPulls().merge("self", 12, HEAD), /Not merged\. GitHub refused: At least 1 approving review is required by reviewers with write access\.$/);
   resetPull();
   pull.mergeAnswer = { status: 200, body: { merged: false } };
-  await assert.rejects(() => newPulls().merge(job, HEAD), /did not confirm/);
+  await assert.rejects(() => newPulls().merge("self", 12, HEAD), /did not confirm/);
 
   // Two taps are one merge.
   resetPull();
   const twice = newPulls();
-  const results = await Promise.allSettled([twice.merge(job, HEAD), twice.merge(job, HEAD)]);
+  const results = await Promise.allSettled([twice.merge("self", 12, HEAD), twice.merge("self", 12, HEAD)]);
   assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
   assert.equal(puts().length, 1);
 });
 
-test("the app shows a pull request to Paul only, and merges on his own tap from this site's own script", async () => {
+test("the app shows pull requests to Paul only, and merges on his own tap from this site's own script", async () => {
   resetPull();
   const cookie = await session();
-  const job = prJob(store, SELF_PR);
-  store.updateJob(job.id, { replyTo: PAUL });
-  const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${job.id}`, cookie))) as { actions: { review: boolean } };
-  assert.equal(detail.actions.review, true);
+  // The board lists what GitHub lists, once it has been read.
+  await get(`${APP_PATH}/api/board`, cookie);
+  await new Promise((r) => setTimeout(r, 60));
+  const board = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as { pulls: Array<{ repo: string; number: number }>; pullsUnread: string[] };
+  assert.deepEqual([board.pulls.map((p) => `${p.repo}#${p.number}`), board.pullsUnread], [["self#12", "self#9"], ["Clear Exchange"]]);
+  const job = prJob(store, "https://github.com/dpaulfarrow/clear-ops/pull/12");
+  const detail = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${job.id}`, cookie))) as { actions: { review: boolean }; pull?: unknown };
+  assert.deepEqual([detail.actions.review, detail.pull], [true, { repo: "self", number: 12, wrote: "dpaulfarrow/clear-ops" }]);
 
-  assert.equal((await get(`${APP_PATH}/api/jobs/${job.id}/pull`)).status, 401);
+  pull.calls.length = 0;
+  assert.equal((await get(`${APP_PATH}/api/pulls/self/12`)).status, 401);
   assert.equal(pull.calls.length, 0);
-  const shown = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${job.id}/pull`, cookie))) as { head: string; title: string; blocked?: string };
+  const shown = JSON.parse(await text(await get(`${APP_PATH}/api/pulls/self/12`, cookie))) as { head: string; title: string; blocked?: string };
   assert.deepEqual([shown.head, shown.title, shown.blocked], [HEAD, "Add the thing", undefined]);
-  assert.equal((await get(`${APP_PATH}/api/jobs/nope/pull`, cookie)).status, 404);
-  assert.equal((await get(`${APP_PATH}/api/jobs/${prJob(store, "https://github.com/someone/else/pull/3").id}/pull`, cookie)).status, 404);
+  for (const p of ["/pulls/nowhere/12", "/pulls/self/0", "/pulls/self/abc", "/pulls/drpaulfarrow%2Fclear-ops/12", "/pulls/Self/12"]) assert.equal((await get(`${APP_PATH}/api${p}`, cookie)).status, 404, p);
 
   // Not signed in, another site's page, a form, a wrong commit: none of them merges.
   const merges = () => pull.calls.filter((c) => c.method === "PUT").length;
-  assert.equal((await postApi(`/jobs/${job.id}/merge`, { sha: HEAD })).status, 401);
-  assert.equal((await postApi(`/jobs/${job.id}/merge`, { sha: HEAD }, cookie, { origin: "https://evil.example" })).status, 403);
-  assert.equal((await postApi(`/jobs/${job.id}/merge`, { sha: HEAD }, cookie, { "sec-fetch-site": "cross-site" })).status, 403);
-  assert.equal((await fetch(`${base}${APP_PATH}/api/jobs/${job.id}/merge`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: `sha=${HEAD}` })).status, 403);
-  assert.equal((await postApi(`/jobs/${job.id}/merge`, {}, cookie)).status, 400);
-  assert.equal((await postApi(`/jobs/${job.id}/merge`, { sha: "b".repeat(40) }, cookie)).status, 409);
-  assert.equal((await postApi("/jobs/nope/merge", { sha: HEAD }, cookie)).status, 404);
+  assert.equal((await postApi("/pulls/self/12/merge", { sha: HEAD })).status, 401);
+  assert.equal((await postApi("/pulls/self/12/merge", { sha: HEAD }, cookie, { origin: "https://evil.example" })).status, 403);
+  assert.equal((await postApi("/pulls/self/12/merge", { sha: HEAD }, cookie, { "sec-fetch-site": "cross-site" })).status, 403);
+  assert.equal((await fetch(`${base}${APP_PATH}/api/pulls/self/12/merge`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: `sha=${HEAD}` })).status, 403);
+  assert.equal((await postApi("/pulls/self/12/merge", {}, cookie)).status, 400);
+  assert.equal((await postApi("/pulls/self/12/merge", { sha: "b".repeat(40) }, cookie)).status, 409);
+  assert.equal((await postApi("/pulls/nowhere/12/merge", { sha: HEAD }, cookie)).status, 404);
+  assert.equal((await postApi("/pulls/self/12/merge", { sha: HEAD, repo: "site", url: "https://github.com/someone/else/pull/1" }, cookie, { origin: "https://evil.example" })).status, 403);
   assert.equal(merges(), 0);
 
-  // His tap: merged once, and said in the app's chat and where the job began.
-  elsewhere.length = 0;
-  const res = await postApi(`/jobs/${job.id}/merge`, { sha: HEAD }, cookie, { origin: "https://workforce.example", "sec-fetch-site": "same-origin" });
-  const said = "Merged pull request #12 on clear-ops from the app: Add the thing. The service redeploys once no job is running.";
+  // His tap: merged once, and said in the app's chat.
+  const res = await postApi("/pulls/self/12/merge", { sha: HEAD }, cookie, { origin: "https://workforce.example", "sec-fetch-site": "same-origin" });
+  const said = "Merged pull request #12 on workforce from the app: Add the thing. The service redeploys once no job is running.";
   assert.deepEqual([res.status, await res.json()], [200, { ok: true, text: said }]);
   assert.equal(merges(), 1);
+  assert.deepEqual(pull.calls.filter((c) => c.method === "PUT").map((c) => c.url), ["https://api.github.com/repos/drpaulfarrow/clear-ops/pulls/12/merge"]);
   await settled();
   assert.ok((await chatView(cookie)).messages.some((m) => m.text === said || m.html?.includes("Merged pull request #12")));
-  assert.deepEqual(elsewhere.filter((m) => m.text === said).map((m) => m.to), [PAUL]);
-  assert.equal((await postApi(`/jobs/${job.id}/merge`, { sha: HEAD }, cookie)).status, 409, "a second tap finds it already merged");
+  assert.equal((await postApi("/pulls/self/12/merge", { sha: HEAD }, cookie)).status, 409, "a second tap finds it already merged");
   assert.equal(merges(), 1);
 });
 

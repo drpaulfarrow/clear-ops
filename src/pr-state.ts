@@ -12,13 +12,15 @@
  *  - `get` never waits. It answers from what is already known and, when that is missing or old, asks
  *    in the background, a few at a time, so a page is never held up by GitHub.
  *  - A merged pull request stays merged, so it is asked once. An open one is asked again after a few
- *    minutes, a closed one after an hour, and a failed request is left alone for ten minutes.
+ *    minutes, a closed one after an hour, and a failed request or one GitHub cannot find is left
+ *    alone for ten minutes.
  *  - It also keeps when the pull request was opened, so the app can tell the job that opened it from
  *    jobs that only diagnosed, reviewed or pushed to it (src/app-data.ts).
  *  - Only an address of exactly the shape `https://github.com/<owner>/<repo>/pull/<n>` is ever asked
  *    about, and the token goes in a header to api.github.com and nowhere else.
  */
-export type PrState = "open" | "merged" | "closed";
+/** `missing` is GitHub's own "not found": the address names nothing the service can see. */
+export type PrState = "open" | "merged" | "closed" | "missing";
 
 /** What GitHub says of a pull request: its state, and when it was opened. */
 export interface PrInfo {
@@ -119,6 +121,7 @@ export class PrStates {
       headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "user-agent": "clear-ops" },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
+    if (res.status === 404) return { state: "missing" };
     if (!res.ok) return undefined;
     const body = (await res.json()) as { state?: unknown; merged?: unknown; created_at?: unknown };
     const state: PrState | undefined = body.merged === true ? "merged" : body.state === "open" ? "open" : body.state === "closed" ? "closed" : undefined;
