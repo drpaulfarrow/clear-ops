@@ -293,3 +293,10 @@ a.card:hover{background:var(--raised);color:var(--text)}
 /* ---------- A thread on a job's or a pull request's page ---------- */
 .thread-log{display:flex;flex-direction:column;gap:12px;max-height:46vh;overflow-y:auto;padding:4px 2px 12px}
 .thread .composer{margin-top:4px}
+
+/* ---------- The Spend page ---------- */
+a.spend{text-decoration:none;color:inherit}
+.setting{display:flex;flex-direction:column;gap:8px;padding:14px 0;border-top:1px solid var(--line)}
+.setting-name{font-weight:600}
+.pick.money{width:110px}
+.row.plain{cursor:default}

@@ -37,6 +37,7 @@ import { realCost } from "./worker-stats.js";
 import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
 import type { PrInfo } from "./pr-state.js";
+import { liveView, type LiveView } from "./live-settings.js";
 import type { JobPull, PullSummary } from "./app-pulls.js";
 import type { DnsAction, Job, OutboundAction, PurchaseAction, SignupAction, Store } from "./store.js";
 import type { UptimeReport } from "./uptime.js";
@@ -429,6 +430,72 @@ function spendOf(source: AppSource, now: number): AppSpend {
     ...(cap !== undefined ? { capUsd: cap } : {}),
     capReached: source.queue.capReached(),
     capLifted: source.store.capDays().liftedOn === londonYmd(new Date(now)),
+  };
+}
+
+/** One line of where today's money went: an agent or a project, its jobs' own figures added up. */
+export interface AppSpendGroup {
+  name: string;
+  usd: number;
+  jobs: number;
+}
+
+export interface AppSpendPage {
+  generatedAt: string;
+  spend: AppSpend;
+  /** Jobs that finished today and have the provider's own figure, dearest first. */
+  jobs: Array<{ id: string; title: string; kind: string; who: string; repositoryName: string; costUsd: number }>;
+  byAgent: AppSpendGroup[];
+  byProject: AppSpendGroup[];
+  /** Those jobs' figures added up. */
+  attributedUsd: number;
+  /** Today's total less that, when today's total is the provider's own: the chief's replies and every job with no figure of its own. */
+  unattributedUsd?: number;
+  /** Jobs that finished today with no figure of their own. */
+  withoutFigure: number;
+  settings: LiveView;
+}
+
+/** How many of today's jobs the Spend page lists. */
+export const APP_SPEND_JOBS = 30;
+
+/**
+ * The Spend page: today's figure, where the store can say it went, and the settings Paul may change.
+ * Every amount is the provider's own or is not shown. A job's figure is its whole cost, counted on the
+ * day it finished, so a job that ran over midnight is counted once, on the later day.
+ */
+export function appSpend(source: AppSource): AppSpendPage {
+  const now = source.now ?? Date.now();
+  const today = londonYmd(new Date(now));
+  const spend = spendOf(source, now);
+  const finished = source.store.allJobs().filter((j) => isFinished(j) && j.finishedAt && londonYmd(new Date(j.finishedAt)) === today);
+  const priced = finished.flatMap((j) => {
+    const usd = realCost(j);
+    return usd === undefined ? [] : [{ job: j, usd }];
+  });
+  const group = (key: (j: Job) => string): AppSpendGroup[] => {
+    const by = new Map<string, AppSpendGroup>();
+    for (const { job, usd } of priced) {
+      const name = key(job);
+      const g = by.get(name) ?? { name, usd: 0, jobs: 0 };
+      by.set(name, { name, usd: g.usd + usd, jobs: g.jobs + 1 });
+    }
+    return [...by.values()].sort((a, b) => b.usd - a.usd);
+  };
+  const attributed = priced.reduce((n, p) => n + p.usd, 0);
+  return {
+    generatedAt: new Date(now).toISOString(),
+    spend,
+    jobs: priced
+      .sort((a, b) => b.usd - a.usd)
+      .slice(0, APP_SPEND_JOBS)
+      .map(({ job, usd }) => ({ id: job.id, title: jobTitle(job), kind: job.kind, who: kindName(job.kind), repositoryName: repoLabel(lockKey(job) ?? job.target ?? "product"), costUsd: usd })),
+    byAgent: group((j) => kindName(j.kind)),
+    byProject: group((j) => repoLabel(lockKey(j) ?? j.target ?? "product")),
+    attributedUsd: attributed,
+    ...(spend.usd !== undefined && spend.usd >= attributed ? { unattributedUsd: spend.usd - attributed } : {}),
+    withoutFigure: finished.length - priced.length,
+    settings: liveView(source.store),
   };
 }
 

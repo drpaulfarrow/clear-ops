@@ -31,6 +31,9 @@ const { SignupGate } = await import("../src/signup-gate.js");
 const { seenHash } = await import("../src/app-data.js");
 const { PrStates, PR_STATE_CONCURRENCY } = await import("../src/pr-state.js");
 const { AppPulls, PullError, PULL_FILES_MAX, PULL_PATCH_MAX, PULL_PATCHES_MAX, PULL_LIST_MAX, PULL_LIST_FRESH_MS } = await import("../src/app-pulls.js");
+const { applyLive, setLive, liveView, LiveSettingError, LIVE_CAP_MIN, LIVE_CAP_MAX } = await import("../src/live-settings.js");
+const { config } = await import("../src/config.js");
+const { appSpend } = await import("../src/app-data.js");
 const { appAsset, APP_CSP } = await import("../src/app-pages.js");
 const { workerGithubEnv } = await import("../src/github-auth.js");
 const { tracesDir } = await import("../src/trace.js");
@@ -677,10 +680,10 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal(typeof board.health.headline, "string");
 });
 
-test("five things under /app are not a GET, and the data module never writes", () => {
+test("six things under /app are not a GET, and the data module never writes", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const appRoutes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
-  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`"]);
+  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`", "post `${APP_PATH}/api/settings`"]);
   assert.match(appRoutes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some/, "one gate over everything under /app");
   const data = fs.readFileSync(new URL("../src/app-data.ts", import.meta.url), "utf8");
   assert.doesNotMatch(data, /\.(updateJob|createJob|importJob|setSetting|setCapDays|setQueueHold|writeOutput|put[A-Z]\w*|update[A-Z]\w*|create[A-Z]\w*|disableSchedule|addNote)\(/);
@@ -962,6 +965,114 @@ test("a job can be stopped or run again from the app, and nothing it was permitt
     for (let i = 0; i < 200 && store.getJob(jobId)!.status !== "done" && store.getJob(jobId)!.status !== "failed"; i++) await new Promise((r) => setTimeout(r, 10));
   } finally {
     chiefSays = undefined;
+  }
+});
+
+/* ---------- Spend: where it went, and the settings Paul may change ---------- */
+
+test("the Spend page adds up only the provider's own figures, on the day a job finished", () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-spend-")));
+  const done = (kind: string, title: string, target: string, minsAgo: number, usage?: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, target as never, PAUL, { title } as never).id, { status: "done", startedAt: iso(minsAgo + 10), finishedAt: iso(minsAgo), ...(usage ? { usage } : {}), ...extra } as never);
+  const a = done("engineer", "Dear one", "self", 30, { costUsd: 3.5, costSource: "provider" });
+  done("engineer", "Cheap one", "product", 60, { costUsd: 0.5, costSource: "provider" });
+  done("maintain", "Review: Dear one", "self", 20, { costUsd: 1, costSource: "provider" });
+  // No figure of its own, the SDK's estimate, and yesterday's job: none of them is counted.
+  done("research", "No figure", "product", 40);
+  done("research", "Estimate only", "product", 45, { costUsd: 9, costSource: "estimate" }, { costUsd: 12 });
+  done("engineer", "Yesterday", "self", 60 * 30, { costUsd: 7, costSource: "provider" });
+  const queue = { ...quietQueue, spendState: () => ({ usd: 6.25, source: "provider" as const, asOf: now }) };
+  const page = appSpend({ store: s, queue, now });
+  assert.deepEqual(page.jobs.map((j) => [j.title, j.costUsd]), [["Dear one", 3.5], ["Review: Dear one", 1], ["Cheap one", 0.5]]);
+  assert.equal(page.jobs[0]!.id, a.id);
+  assert.deepEqual(page.byAgent, [{ name: "engineer", usd: 4, jobs: 2 }, { name: "maintainer", usd: 1, jobs: 1 }]);
+  assert.deepEqual(page.byProject, [{ name: "workforce", usd: 4.5, jobs: 2 }, { name: "Clear Exchange", usd: 0.5, jobs: 1 }]);
+  assert.deepEqual([page.attributedUsd, page.unattributedUsd, page.withoutFigure], [5, 1.25, 2]);
+  assert.ok(!page.jobs.some((j) => ["Estimate only", "No figure", "Yesterday"].includes(j.title)), "a job with only the SDK's estimate, with nothing, or from another day is not on the page");
+  // With no provider reading for the day the estimate is not shown and nothing is subtracted from it;
+  // and when the jobs' own figures come to more than the day's reading, no remainder is claimed.
+  const blind = appSpend({ store: s, queue: { ...quietQueue, spendState: () => ({ usd: 40, source: "estimate" as const, note: "OpenRouter could not be read" }) }, now });
+  assert.deepEqual([blind.spend.usd, blind.unattributedUsd, blind.attributedUsd], [undefined, undefined, 5]);
+  assert.equal(appSpend({ store: s, queue: { ...quietQueue, spendState: () => ({ usd: 2, source: "provider" as const, asOf: now }) }, now }).unattributedUsd, undefined);
+});
+
+test("a cap or a role's model changed from the app is laid over the deploy's own, within fixed bounds, and can be put back", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-app-live-"));
+  const s = new Store(dir);
+  const before = { daily: config.dailyBudgetUsd, engineer: config.engineerBudgetUsd, job: config.jobBudgetUsd, models: { ...config.models } };
+  try {
+    // Nothing set: nothing in the service's settings is touched.
+    applyLive(s);
+    assert.deepEqual([config.dailyBudgetUsd, config.engineerBudgetUsd, config.jobBudgetUsd, { ...config.models }], [before.daily, before.engineer, before.job, before.models]);
+    assert.ok(liveView(s).caps.every((c) => !c.changed) && liveView(s).roles.every((r) => !r.changed));
+
+    assert.equal(setLive(s, "dailyBudgetUsd", 12.345), "The daily cap is now $12.35. Changed from the app.");
+    assert.equal(config.dailyBudgetUsd, 12.35);
+    assert.match(setLive(s, "model:engineer", "haiku"), /^Engineers now run on haiku/);
+    assert.equal(config.models.engineer, "haiku");
+    assert.deepEqual(liveView(s).caps.find((c) => c.key === "dailyBudgetUsd"), { key: "dailyBudgetUsd", name: "The daily cap", usd: 12.35, changed: true, min: LIVE_CAP_MIN, max: LIVE_CAP_MAX });
+    assert.equal(liveView(s).roles.find((r) => r.key === "model:engineer")!.changed, true);
+
+    // It is kept: a restart finds it in the store and lays it over the deploy's own again.
+    config.dailyBudgetUsd = before.daily;
+    config.models.engineer = before.models.engineer;
+    applyLive(new Store(dir));
+    assert.deepEqual([config.dailyBudgetUsd, config.models.engineer], [12.35, "haiku"]);
+
+    // Anything else is refused and changes nothing: an amount out of bounds or not an amount, a model
+    // that is not one of the deploy's aliases, a setting that is not one of the seven.
+    const held = JSON.stringify(s.settings().live);
+    for (const [key, value] of [
+      ["dailyBudgetUsd", 0], ["dailyBudgetUsd", -5], ["dailyBudgetUsd", LIVE_CAP_MAX + 0.01], ["dailyBudgetUsd", "20"], ["dailyBudgetUsd", Number.NaN], ["dailyBudgetUsd", Infinity], ["dailyBudgetUsd", undefined], ["dailyBudgetUsd", {}],
+      ["model:engineer", "anthropic/claude-opus-5.5"], ["model:engineer", "gpt"], ["model:engineer", 3], ["model:ea", "haiku"], ["model:design", "haiku"], ["model:", "haiku"],
+      ["sdkRunawayBudgetUsd", 5], ["deepResearchBudgetUsd", 5], ["selfMerge", "maintainer"], ["models", { chief: "opus" }], ["__proto__", 1], ["constructor", 1], [undefined, 1], [{}, 1],
+    ] as Array<[unknown, unknown]>) assert.throws(() => setLive(s, key, value), LiveSettingError, `${String(key)} = ${String(value)}`);
+    assert.equal(JSON.stringify(s.settings().live), held);
+    assert.deepEqual([config.dailyBudgetUsd, config.models.engineer, config.models.ea, config.sdkRunawayBudgetUsd > 0, config.selfMerge], [12.35, "haiku", before.models.ea, true, "paul"]);
+
+    // Put back: the deploy's own value returns, and the store no longer holds the setting.
+    assert.match(setLive(s, "dailyBudgetUsd", null), /^The daily cap is back to the deploy's own setting: /);
+    assert.match(setLive(s, "model:engineer", null), /^Engineers are back on the deploy's own model: /);
+    assert.deepEqual([config.dailyBudgetUsd, config.models.engineer, s.settings().live], [before.daily, before.models.engineer, {}]);
+  } finally {
+    s.setSetting("live", {});
+    applyLive(s);
+    config.dailyBudgetUsd = before.daily;
+    config.engineerBudgetUsd = before.engineer;
+    config.jobBudgetUsd = before.job;
+    Object.assign(config.models, before.models);
+  }
+});
+
+test("only Paul's own tap in the app changes a setting, and it is said in the chat", async () => {
+  const cookie = await session();
+  const before = { daily: config.dailyBudgetUsd, chief: config.models.chief };
+  try {
+    assert.equal((await get(`${APP_PATH}/api/spend`)).status, 401);
+    const page = JSON.parse(await text(await get(`${APP_PATH}/api/spend`, cookie))) as { settings: { caps: Array<{ key: string }>; roles: Array<{ key: string }>; choices: unknown[] }; byAgent: unknown[] };
+    assert.deepEqual([page.settings.caps.map((c) => c.key), page.settings.roles.map((r) => r.key)], [["dailyBudgetUsd", "engineerBudgetUsd", "jobBudgetUsd"], ["model:chief", "model:worker", "model:engineer", "model:maintainer"]]);
+    assert.equal((await postApi("/settings", { key: "dailyBudgetUsd", value: 15 })).status, 401);
+    assert.equal((await postApi("/settings", { key: "dailyBudgetUsd", value: 15 }, cookie, { origin: "https://evil.example" })).status, 403);
+    assert.equal((await postApi("/settings", { key: "dailyBudgetUsd", value: 15 }, cookie, { "sec-fetch-site": "cross-site" })).status, 403);
+    assert.equal((await fetch(`${base}${APP_PATH}/api/settings`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: "key=dailyBudgetUsd&value=15" })).status, 403);
+    assert.equal((await postApi("/settings", { key: "dailyBudgetUsd", value: 99999 }, cookie)).status, 400);
+    assert.equal((await postApi("/settings", { key: "selfMerge", value: "maintainer" }, cookie)).status, 400);
+    assert.equal(config.dailyBudgetUsd, before.daily, "none of those changed anything");
+
+    const res = await postApi("/settings", { key: "dailyBudgetUsd", value: 15 }, cookie, { origin: "https://workforce.example", "sec-fetch-site": "same-origin" });
+    assert.deepEqual([res.status, await res.json()], [200, { ok: true, text: "The daily cap is now $15.00. Changed from the app." }]);
+    assert.equal(config.dailyBudgetUsd, 15);
+    await settled();
+    assert.ok(chat.view().messages.some((m) => m.text === "The daily cap is now $15.00. Changed from the app."));
+    const board = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as { spend: { capUsd?: number } };
+    assert.equal(board.spend.capUsd, 15, "the header shows the new cap");
+    assert.equal((await postApi("/settings", { key: "dailyBudgetUsd", value: null }, cookie)).status, 200);
+    assert.equal(config.dailyBudgetUsd, before.daily);
+  } finally {
+    store.setSetting("live", {});
+    applyLive(store);
+    config.dailyBudgetUsd = before.daily;
+    config.models.chief = before.chief;
   }
 });
 

@@ -48,10 +48,11 @@ import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
-import { appBoard, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
+import { appBoard, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
 import { mintAppApproval } from "./app-approver.js";
 import { PrStates } from "./pr-state.js";
 import { AppPulls, PullError } from "./app-pulls.js";
+import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
@@ -177,6 +178,9 @@ export function buildApp(given: AppDeps) {
   // every other address goes to the messenger exactly as it was given (src/web-chat.ts).
   const chat = given.webChat ?? serviceWebChat;
   const deps: AppDeps = { ...given, messenger: routeWeb(given.messenger, chat) };
+  // What Paul changed from the app's Spend page (src/live-settings.ts) is laid over the deploy's own
+  // settings before anything here reads them.
+  applyLive(deps.store);
   // Paul's login vault and the card vault: the service's own singletons, unless a test injects ones with
   // a pinned clock, which is how the one-time links' expiry is exercised through the pages themselves.
   const loginVault = deps.vault ?? vault;
@@ -966,6 +970,25 @@ export function buildApp(given: AppDeps) {
       res.json({ ok: true, text: done.text });
     } catch (err) {
       res.status(err instanceof PullError ? err.status : 502).json({ error: err instanceof PullError ? err.message : "That could not be done just now." });
+    }
+  });
+  // The Spend page: today's figure, where the store can say it went, and the settings Paul may change.
+  app.get(`${APP_PATH}/api/spend`, (_req, res) => {
+    appHeaders(res);
+    res.json(appSpend(appSource()));
+  });
+  // One setting changed from the Spend page (src/live-settings.ts): a cap or a role's model, or either
+  // put back to the deploy's own. Paul's own tap, from this site's own script; nothing else writes these.
+  app.post(`${APP_PATH}/api/settings`, (req, res) => {
+    appHeaders(res);
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
+    const body = (req.body ?? {}) as { key?: unknown; value?: unknown };
+    try {
+      const text = setLive(deps.store, body.key, body.value);
+      tell(text);
+      res.json({ ok: true, text });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof LiveSettingError ? err.message : "That could not be changed." });
     }
   });
   app.get(`${APP_PATH}/api/jobs/:id`, (req, res) => {

@@ -135,6 +135,10 @@ const state = {
   historyLoading: false,
   job: undefined,
   jobRaw: "",
+  /** The Spend page as last read, and what is typed into each cap's box. */
+  spend: undefined,
+  spendRaw: "",
+  spendDraft: {},
   /** The thread on the page being looked at: { key, view, raw, problem, sending }. One at a time. */
   thread: undefined,
   /** The pull request being reviewed: { key, data, loading, error, open }, one at a time. */
@@ -146,6 +150,7 @@ const state = {
 const route = () => {
   const m = /^#\/job\/([A-Za-z0-9_-]{1,64})$/.exec(location.hash);
   if (m) return { name: "job", id: m[1] };
+  if (location.hash === "#/spend") return { name: "spend" };
   const p = /^#\/pull\/([A-Za-z0-9._-]{1,64})\/([1-9]\d{0,8})$/.exec(location.hash);
   return p ? { name: "pull", repo: p[1], number: Number(p[2]) } : { name: "board" };
 };
@@ -196,7 +201,7 @@ async function act(key, path, body, after) {
   state.busy = undefined;
   state.boardRaw = "";
   state.jobRaw = "";
-  await Promise.all([refreshBoard(), route().name === "job" ? refreshJob(route().id) : false]);
+  await Promise.all([refreshBoard(), route().name === "job" ? refreshJob(route().id) : route().name === "spend" ? refreshSpend() : false]);
   draw();
   void chatTick();
 }
@@ -306,8 +311,8 @@ function header(board) {
     if (pct !== undefined) fill.style.width = `${pct}%`;
     const figure = s.usd === undefined ? "No figure" : s.capUsd !== undefined ? `${money(s.usd)} of ${money(s.capUsd)}` : money(s.usd);
     spend = h(
-      "div",
-      { class: `spend ${s.capReached ? "capped" : ""}`, title: s.note },
+      "a",
+      { class: `spend ${s.capReached ? "capped" : ""}`, title: s.note, href: "#/spend", "aria-label": "Spend today. Open the spend page." },
       h(
         "div",
         { class: "spend-fig" },
@@ -678,6 +683,103 @@ function pullPane({ repo, number, wrote }) {
       v.files.map((f) => pullFile(p, f)),
     ),
   );
+}
+
+/* ---------- Spend: today's figure, where it went, and the settings Paul may change ---------- */
+
+async function refreshSpend() {
+  try {
+    const text = await getJson("/spend");
+    const changed = text !== state.spendRaw;
+    state.spendRaw = text;
+    state.spend = JSON.parse(text);
+    return changed;
+  } catch {
+    return false;
+  }
+}
+
+/** One setting, one request. `value` null puts the deploy's own setting back. */
+const setSetting = (key, value) => act(`setting:${key}`, "/settings", { key, value }, () => { delete state.spendDraft[key]; void refreshSpend().then(draw); });
+
+function capRow(c) {
+  const busy = state.busy !== undefined;
+  const draft = state.spendDraft[c.key];
+  const box = h("input", { class: "pick money", type: "number", inputmode: "decimal", min: String(c.min), max: String(c.max), step: "0.5", id: `cap-${c.key}`, value: draft ?? (c.usd !== undefined ? String(c.usd) : ""), placeholder: "Off", oninput: (e) => { state.spendDraft[c.key] = e.target.value; } });
+  const save = () => {
+    const n = Number(box.value);
+    if (!box.value.trim() || !Number.isFinite(n)) return void (say("Type an amount in dollars.", true), draw());
+    void setSetting(c.key, n);
+  };
+  return h(
+    "div",
+    { class: "setting" },
+    h("label", { class: "setting-name", for: `cap-${c.key}` }, c.name),
+    h("div", { class: "links" }, h("span", { class: "muted" }, "$"), box, h("button", { class: "btn", type: "button", disabled: busy, onclick: save }, "Set"), c.changed ? h("button", { class: "btn quiet", type: "button", disabled: busy, onclick: () => void setSetting(c.key, null) }, "Back to the deploy's own") : null),
+    h("p", { class: "muted" }, c.usd === undefined ? "Off: no cap of this kind is set." : c.changed ? "Changed from the app." : "The deploy's own setting."),
+  );
+}
+
+function roleRow(r, choices) {
+  const busy = state.busy !== undefined;
+  // The choices are the aliases this deploy maps to a model. A role set to something else in the
+  // deploy's own settings is shown as it is, and can be moved onto one of them.
+  const known = choices.some((c) => c.model === r.model);
+  const select = h(
+    "select",
+    { class: "pick", id: `role-${r.key}`, disabled: busy, onchange: (e) => void setSetting(r.key, e.target.value) },
+    known ? null : h("option", { value: "", selected: true, disabled: true }, modelName(r.model)),
+    choices.map((c) => h("option", { value: c.alias, selected: c.model === r.model }, `${modelName(c.model)} (${c.alias})`)),
+  );
+  return h(
+    "div",
+    { class: "setting" },
+    h("label", { class: "setting-name", for: `role-${r.key}` }, r.name),
+    h("div", { class: "links" }, select, r.changed ? h("button", { class: "btn quiet", type: "button", disabled: busy, onclick: () => void setSetting(r.key, null) }, "Back to the deploy's own") : null),
+    r.changed ? h("p", { class: "muted" }, "Changed from the app.") : null,
+  );
+}
+
+function spendGroup(title, groups) {
+  return h(
+    "div",
+    { class: "block" },
+    h("h3", {}, title),
+    groups.length ? h("div", { class: "rows" }, groups.map((g) => h("div", { class: "row plain" }, h("div", { class: "row-main" }, h("div", { class: "card-title" }, g.name), h("div", { class: "card-sub" }, `${g.jobs} ${g.jobs === 1 ? "job" : "jobs"}`)), h("div", { class: "row-right" }, h("span", { class: "card-cost num" }, money(g.usd)))))) : h("p", { class: "muted" }, "Nothing with a figure of its own yet today."),
+  );
+}
+
+function spendPage() {
+  const page = state.spend;
+  const back = h("div", { class: "job-head" }, h("a", { class: "btn", href: "#/" }, icon("back"), "Board"), h("div", { class: "job-id" }, h("div", { class: "job-title" }, h("h1", {}, "Spend"))));
+  if (!page) return h("main", { class: "page" }, back, h("p", { class: "muted" }, "Loading."));
+  const s = page.spend;
+  const today = h(
+    "section",
+    { class: "pane", "aria-label": "Today" },
+    h("h2", {}, "Today"),
+    h("div", { class: "stats" }, stat("Spent", s.usd !== undefined ? money(s.usd) : h("small", {}, "No figure"), s.note), stat("Daily cap", s.capUsd !== undefined ? money(s.capUsd) : h("small", {}, "Off"), s.capReached ? "Reached. New jobs wait until tomorrow." : s.capLifted ? "Lifted for today." : undefined)),
+    s.capReached ? h("div", { class: "links" }, h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
+  );
+  const went = h(
+    "section",
+    { class: "pane", "aria-label": "Where it went" },
+    h("h2", {}, "Where it went today"),
+    h("p", { class: "muted" }, "Only jobs with the provider's own figure are counted, on the day they finished. A job has one only when it runs under a per-job cap, because that is when each of its calls is priced. Setting a cap on other jobs below gives them one too."),
+    spendGroup("By agent", page.byAgent),
+    spendGroup("By project", page.byProject),
+    h(
+      "div",
+      { class: "block" },
+      h("h3", {}, "The rest"),
+      h("p", { class: "prose" }, page.unattributedUsd !== undefined ? `${money(page.unattributedUsd)} of today is not tied to a job here: the chief's own replies, and jobs with no figure of their own.` : "Today's total cannot be split further from what the store holds."),
+      page.withoutFigure ? h("p", { class: "muted" }, `${page.withoutFigure} ${page.withoutFigure === 1 ? "job" : "jobs"} finished today with no figure of ${page.withoutFigure === 1 ? "its" : "their"} own.`) : null,
+    ),
+    page.jobs.length ? h("div", { class: "block" }, h("h3", {}, "Jobs, dearest first"), h("div", { class: "rows" }, page.jobs.map((j) => h("a", { class: "row", href: `#/job/${j.id}` }, avatar(j.kind, "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, j.title), h("div", { class: "card-sub" }, `${j.who} · ${j.repositoryName}`)), h("div", { class: "row-right" }, h("span", { class: "card-cost num" }, money(j.costUsd))))))) : null,
+  );
+  const caps = h("section", { class: "pane", "aria-label": "Caps" }, h("h2", {}, "Caps"), h("p", { class: "muted" }, "A change applies at once and stays until you change it back. A job already running keeps the cap it started with."), page.settings.caps.map(capRow));
+  const models = h("section", { class: "pane", "aria-label": "Models" }, h("h2", {}, "Models"), h("p", { class: "muted" }, "Which model each role runs on. It applies to the next run. The assistant for mail and calendar always runs on Claude and is not here."), page.settings.roles.map((r) => roleRow(r, page.settings.choices)));
+  return h("main", { class: "page" }, back, noticeBar(), today, went, caps, models);
 }
 
 /* ---------- Threads: talking to the chief about one job or one pull request ---------- */
@@ -1114,7 +1216,7 @@ narrow.addEventListener("change", () => draw());
 
 function draw() {
   const r = route();
-  document.title = r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
+  document.title = r.name === "spend" ? "Spend · ClearOps" : r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
   if (!shellEl.isConnected) root.replaceChildren(shellEl);
   headerEl.replaceChildren(header(state.board));
   if (r.name === "job" || r.name === "pull") {
@@ -1130,6 +1232,14 @@ function draw() {
       threadInput.focus({ preventScroll: true });
       threadInput.setSelectionRange(caret[0], caret[1]);
     }
+    return;
+  }
+  if (r.name === "spend") {
+    shellEl.className = "shell";
+    // A box being typed in keeps the caret across a redraw.
+    const active = document.activeElement?.id?.startsWith("cap-") ? document.activeElement.id : undefined;
+    bodyEl.replaceChildren(spendPage());
+    if (active) document.getElementById(active)?.focus({ preventScroll: true });
     return;
   }
   const mode = layout();
@@ -1268,12 +1378,12 @@ async function tick() {
   const r = route();
   let wait = BOARD_EVERY_MS;
   if (!document.hidden) {
-    const [boardChanged, jobChanged] = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : false]);
+    const [boardChanged, jobChanged] = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : r.name === "spend" ? refreshSpend() : false]);
     // Away from the board, a new reading of the board only refreshes the header: redrawing the page
     // under someone reading a diff would lose their place.
     if (r.name === "board" ? boardChanged : jobChanged) draw();
     else if (boardChanged) headerEl.replaceChildren(header(state.board));
-    if (r.name === "pull") wait = JOB_IDLE_EVERY_MS;
+    if (r.name === "pull" || r.name === "spend") wait = JOB_IDLE_EVERY_MS;
     if (r.name === "job") wait = state.job && (state.job.job.status === "running" || state.job.job.status === "queued") ? JOB_LIVE_EVERY_MS : JOB_IDLE_EVERY_MS;
   }
   timer = setTimeout(tick, wait);
