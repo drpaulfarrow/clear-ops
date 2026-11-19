@@ -346,6 +346,10 @@ test("the chief knows the design worker and can start the design loop with start
   assert.equal(job.designRound, 1);
   const chief = calls.find((c) => c.prompt.startsWith("design loop:"))!;
   assert.match(chief.systemPrompt, /design is the brand and design director/);
+  // It knows a design job's pictures are shown where the job reports, the app included (19 Nov 2026), so
+  // it does not tell Paul a chat cannot show them, and it knows how to ask for something to look at.
+  assert.match(chief.systemPrompt, /A design job's pictures reach Paul: [^.]*shown in the conversation the job reports to, in the app as in Discord and Telegram\./);
+  assert.match(chief.systemPrompt, /never tell him a chat cannot show a job's pictures, and when he wants to see something rather than read about it, say so in the brief: ask the designer to draw it as an HTML board, capture it and include the pictures\./);
   assert.match(chief.systemPrompt, /continueLoop/);
   const call = await (async () => {
     await waitFor(() => calls.some((c) => c.systemPrompt.startsWith("You are the brand and design director")));
