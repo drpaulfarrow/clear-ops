@@ -46,6 +46,7 @@ import { BOARD_PATH, boardData, boardToken, boardTokenValid, refusedPage, render
 import { PASSWORD_PATH, SIGN_IN_PATH, SIGN_OUT_PATH, noPasswordPage, passwordPage, passwordSavedPage, signIn as pageSignIn, signInPage, SignInError } from "./sign-in.js";
 import type { SignIn } from "./sign-in.js";
 import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
+import { beatFor } from "./beats.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
 import { appBoard, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
@@ -671,7 +672,7 @@ export function buildApp(given: AppDeps) {
 
   /**
    * The reports view: every saved job output as a page Paul can read on his phone, at a stable
-   * address. Two GET routes behind the same long-lived token /reports prints in chat, and nothing
+   * address. GET routes behind the same long-lived token /reports prints in chat, and nothing
    * else: no model call, no form and no write of any kind. Which outputs exist is decided by the same
    * rules as the copy in the private outputs repository (src/output-folders.ts), so an assistant, CV
    * or upload-derived output is not here either. The Markdown is rendered by src/reports.ts, which
@@ -711,6 +712,35 @@ export function buildApp(given: AppDeps) {
     }
     reportHeaders(res, PAGE_CSP);
     res.type("html").send(renderReportPage(report.entry, report.markdown ?? "", token));
+  });
+
+  /**
+   * One saved instrumental, served from Paul's private beats folder alone (src/beats.ts): behind the
+   * same sign-in as the reports view above, because the gate covers everything under its path, and
+   * behind the same long-lived token, so the token on its own is not enough and neither is the
+   * session. The name is checked by the beats module's own rule (one plain audio file name) and the
+   * file is resolved inside that folder or not at all: no other folder on the volume, and nothing
+   * beside the track but the track, is reachable through this route. A GET only, like the rest of
+   * the view: nothing here can write.
+   */
+  app.get(`${REPORTS_PATH}/beat/:name`, (req, res) => {
+    const token = typeof req.query.t === "string" ? req.query.t : "";
+    const beat = reportsTokenValid(deps.store, token) ? beatFor(String(req.params.name ?? "")) : undefined;
+    let bytes: Buffer | undefined;
+    try {
+      const read = beat ? fs.readFileSync(beat.file) : undefined;
+      bytes = read && read.length ? read : undefined;
+    } catch {
+      // Gone between the check and the read: refused like anything else.
+    }
+    if (!beat || !bytes) {
+      reportHeaders(res, PAGE_CSP);
+      return res.status(404).type("html").send(reportsRefusedPage());
+    }
+    reportHeaders(res, FILE_CSP);
+    res.set("Content-Type", beat.mime);
+    res.set("Content-Disposition", `inline; filename="${path.basename(beat.file)}"`);
+    res.send(bytes);
   });
 
   /**
