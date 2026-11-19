@@ -52,12 +52,13 @@ import { appBoard, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefus
 import { mintAppApproval } from "./app-approver.js";
 import { PrStates } from "./pr-state.js";
 import { AppPulls, PullError } from "./app-pulls.js";
+import type { Attachment } from "./uploads.js";
 import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
-import { routeWeb, webChat as serviceWebChat, webRefusal, webThread, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
+import { routeWeb, webChat as serviceWebChat, webFiles, WebFilesError, webRefusal, webThread, WEB_BODY_LIMIT, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
 import { parseCodeCommand } from "./otp.js";
 import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
@@ -338,6 +339,12 @@ export function buildApp(given: AppDeps) {
   // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach
   // Paul's own chat, approve anything, grant a permit or start anything but read-only research or write jobs.
   app.use(INSTINCT_PATH, instinctRouter({ store: deps.store, token: config.instinctBridgeToken, documents, chat: bridgeChat, isAllowed: isOversightSender, chatEnabled: config.instinctBridgeChat, guilds: () => (discordRef.current ? inspectGuilds(discordRef.current.client as never, config.oversightSenderIds.find((x) => x.startsWith("dc:u:"))?.slice(5) ?? "") : Promise.resolve(undefined)), dmHistory: (limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); return discordRef.current && owner ? readOwnerDm(discordRef.current.client as never, owner, limit, before) : Promise.resolve(undefined); }, threadHistory: (threadId, limit, before) => { const owner = soleDiscordOwner(config.oversightSenderIds); const c = discordRef.current?.client as never as { user?: { id: string } } | undefined; return discordRef.current && owner && c?.user?.id ? readJobThread(discordRef.current.client as never, { ownerUserId: owner, botUserId: c.user.id, guildId: config.bridgeThreadGuildId, parentId: config.bridgeThreadParentId }, threadId, limit, before) : Promise.resolve(undefined); }, commissionAllow: config.instinctBridgeCommissions, commissionLogFile: path.join(config.dataDir, "bridge-commissions.json"), commissionBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no commission starts from here." : undefined), commissionBrief: (id) => { try { return fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "commissions", `${id}.md`), "utf8"); } catch { return undefined; } }, commission: (id, brief) => { const owner = soleDiscordOwner(config.oversightSenderIds); if (!owner) throw new Error("No single Discord owner is configured."); const j = jobs.startCommission(id, brief, owner, `Commission ${id}`); return { id: j.id, status: j.status }; }, retryLogFile: path.join(config.dataDir, "bridge-retries.json"), retryAllow: config.instinctBridgeRetryAllow, retry: (id) => jobs.retry(id), retryBlocked: () => (jobs.capReached() ? "The daily spend cap is reached, so no retry runs from here." : undefined) }));
+
+  // The web app's chat can carry files (src/web-chat.ts `webFiles`), so its one route reads a larger
+  // body than the app-wide parser below allows. Only for a browser that is already signed in: anyone
+  // else falls through to the 100 KB parser and is refused there, before a large body is ever read.
+  const bigChat = express.json({ limit: WEB_BODY_LIMIT });
+  app.post(`${APP_PATH}/api/chat`, (req, res, next) => ((deps.appAuth ?? serviceAppAuth).sessionValid(deps.store, req.headers.cookie) ? bigChat(req, res, next) : next()));
 
   // Keep the raw body for signature verification. Registered after the bridge above on purpose: the bridge's
   // own routes carry their own body limits (a document can be a few megabytes) and check the bearer token
@@ -850,15 +857,22 @@ export function buildApp(given: AppDeps) {
     appHeaders(res);
     if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
     const text = typeof (req.body as { text?: unknown } | undefined)?.text === "string" ? (req.body as { text: string }).text.trim() : "";
-    if (!text) return void res.status(400).json({ error: "empty" });
+    // Files from his own browser: all of them are read and checked here, or the message is refused whole.
+    let files: Attachment[];
+    try {
+      files = webFiles((req.body as { files?: unknown } | undefined)?.files);
+    } catch (err) {
+      return void res.status(400).json({ error: err instanceof WebFilesError ? err.message : "The files could not be read." });
+    }
+    if (!text && !files.length) return void res.status(400).json({ error: "empty" });
     if (text.length > WEB_TEXT_MAX) return void res.status(413).json({ error: "too long" });
     // The main conversation, or the thread of a job or a pull request: only ever one of the app's own.
     const where = appThread((req.body as { thread?: unknown } | undefined)?.thread);
     if (!where) return void res.status(404).json({ error: "There is no such thread." });
     const refused = webRefusal(text);
-    chat.inbound(parseCodeCommand(text) ? WEB_CODE_PLACEHOLDER : text, where);
+    chat.inbound(parseCodeCommand(text) ? WEB_CODE_PLACEHOLDER : text, where, files.map((f) => f.name));
     if (refused) void chat.send(where, refused);
-    else void orchestrator.handle(WEB_SENDER, text, { replyTo: where, web: true });
+    else void orchestrator.handle(WEB_SENDER, text, { replyTo: where, web: true, ...(files.length ? { attachments: files } : {}) });
     res.status(202).json({ ok: true });
   });
   /**

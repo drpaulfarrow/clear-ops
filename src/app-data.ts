@@ -612,6 +612,8 @@ export interface AppChatMessage {
   html?: string;
   /** The chief's status line while it works. Plain text. */
   live?: true;
+  /** The names of the files Paul sent with it. */
+  files?: string[];
 }
 
 export interface AppChat {
@@ -639,7 +641,7 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view">, conversa
   return {
     generatedAt: new Date(now).toISOString(),
     messages: view.messages.map((m) =>
-      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}) } : { id: m.id, at: m.at, from: m.from, html: renderMarkdown(m.text) },
+      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}) } : { id: m.id, at: m.at, from: m.from, html: renderMarkdown(m.text) },
     ),
     typing: view.typing,
     jobs: jobs.map((j) => toAppJob(source, j, ev)),

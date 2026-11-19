@@ -21,7 +21,7 @@ Engineers work on a branch and open a pull request. The maintainer reviews it. O
 These are enforced by `test/invariants.test.ts`, which may be extended but never removed or weakened. The full wording of each is in `docs/ARCHITECTURE.md`.
 
 - Only allowlisted senders (`ALLOWED_TELEGRAM_IDS`, `ALLOWED_DISCORD_IDS`, `ALLOWED_NUMBERS`; `isAllowed`) get a reply, and every listener checks before handling. The one other sender is the web app's own chat, behind its GitHub sign-in (`src/web-chat.ts`). WhatsApp signatures are verified before parsing.
-- Uploads are downloaded only after the allowlist check, live only in the uploads directory (never in a checkout), owner-only, sanitised and size-capped, and are never executed. Every worker prompt carries `UPLOADS_RULE`.
+- Uploads are downloaded only after the allowlist check (from the web app: read only from a signed-in browser), live only in the uploads directory (never in a checkout), owner-only, sanitised and size-capped, and are never executed. Every worker prompt carries `UPLOADS_RULE`.
 - Every agent prompt carries the clean-room rule, `PAUL_STYLE`, and for workers `REPORT_RULE`, including kinds added later. Only engineering kinds (engineer, create_agent) get Edit, Write or unrestricted Bash.
 - Only the maintainer merges, and on this repository it does not: Paul merges there (`SELF_MERGE`), on GitHub or by his own tap in the signed-in web app on the commit shown (`src/app-pulls.ts`). Nobody force-pushes, rewrites shared history or deletes recursively. Branch protection on `main` is the backstop.
 - The design worker is read-only plus its own screenshot and asset tools. Its browser runs as the unprivileged `designer` user behind an egress proxy that refuses private addresses.

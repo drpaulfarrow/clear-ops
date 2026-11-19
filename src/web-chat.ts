@@ -36,6 +36,7 @@ import { parsePurchaseCommand } from "./purchase.js";
 import { redact } from "./repos.js";
 import { parseSignupCommand } from "./signup-gate.js";
 import { parseActAsMeCommand } from "./site-policy.js";
+import type { Attachment } from "./uploads.js";
 import type { Messenger } from "./whatsapp.js";
 
 /** Every address the web app owns starts with this; the router sends them here and nowhere else. */
@@ -68,6 +69,43 @@ export function webThread(topic: WebTopic): string | undefined {
 }
 /** The longest message the app accepts. */
 export const WEB_TEXT_MAX = 4000;
+/** How many files one message may carry from the app, and how much they may come to together. */
+export const WEB_FILES_MAX = 5;
+export const WEB_FILES_BYTES = 18 * 1024 * 1024;
+/** The largest request body the app's chat route reads, and then only from a signed-in browser: the files above as base64, with room for the rest. */
+export const WEB_BODY_LIMIT = "26mb";
+
+/** Why the files on a message were refused, in words for Paul. */
+export class WebFilesError extends Error {}
+
+/**
+ * The files on a message from the app, as attachments the orchestrator saves like any other channel's
+ * (src/uploads.ts: the private directory, sanitised names, the size cap, never executed). The app sends
+ * each as `{ name, type, data }` with the bytes in base64; anything else is refused whole, so a message
+ * never arrives with some of its files missing.
+ */
+export function webFiles(raw: unknown): Attachment[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new WebFilesError("The files could not be read.");
+  if (raw.length > WEB_FILES_MAX) throw new WebFilesError(`At most ${WEB_FILES_MAX} files go with one message.`);
+  let total = 0;
+  return raw.map((f: unknown) => {
+    const { name, type, data } = (f ?? {}) as { name?: unknown; type?: unknown; data?: unknown };
+    if (typeof name !== "string" || !name.trim() || name.length > 200 || typeof data !== "string" || (type !== undefined && (typeof type !== "string" || type.length > 100))) throw new WebFilesError("The files could not be read.");
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) throw new WebFilesError("The files could not be read.");
+    const bytes = Buffer.from(data, "base64");
+    if (!bytes.length) throw new WebFilesError(`${name.trim()} is empty.`);
+    total += bytes.length;
+    if (total > WEB_FILES_BYTES) throw new WebFilesError(`Together the files are too large. The most one message can carry is ${Math.round(WEB_FILES_BYTES / (1024 * 1024))} MB.`);
+    return {
+      name: name.trim(),
+      ...(typeof type === "string" && type ? { mimeType: type } : {}),
+      size: bytes.length,
+      // The bytes are already here: the route read them from Paul's own signed-in browser.
+      download: async () => bytes,
+    };
+  });
+}
 /** How many messages the transcript keeps of the main conversation. */
 export const WEB_KEEP = 500;
 /** How many it keeps of each thread, and how many threads; the thread quiet for longest goes first. */
@@ -117,6 +155,8 @@ export interface WebMessage {
   live?: true;
   /** The thread it belongs to, by address. Absent: the main conversation. */
   thread?: string;
+  /** The names of the files Paul sent with it. The files themselves are in the uploads directory. */
+  files?: string[];
 }
 
 export interface WebChatOptions {
@@ -173,10 +213,10 @@ export class WebChat {
     return this.messages.filter((m) => m.thread === thread);
   }
 
-  private add(from: WebMessage["from"], text: string, live = false, to: string = WEB_CONVERSATION): WebMessage {
+  private add(from: WebMessage["from"], text: string, live = false, to: string = WEB_CONVERSATION, files: string[] = []): WebMessage {
     this.seq += 1;
     const thread = this.threadOf(to);
-    const message: WebMessage = { id: String(this.seq), at: new Date(this.now()).toISOString(), from, text: redact(text), ...(live ? { live: true as const } : {}), ...(thread ? { thread } : {}) };
+    const message: WebMessage = { id: String(this.seq), at: new Date(this.now()).toISOString(), from, text: redact(text), ...(live ? { live: true as const } : {}), ...(thread ? { thread } : {}), ...(files.length ? { files } : {}) };
     this.messages.push(message);
     this.notes = undefined;
     this.trim(thread);
@@ -201,8 +241,8 @@ export class WebChat {
   }
 
   /** Paul's own message, from the app's route. */
-  inbound(text: string, to: string = WEB_CONVERSATION): WebMessage {
-    return this.add("paul", text, false, to);
+  inbound(text: string, to: string = WEB_CONVERSATION, files: string[] = []): WebMessage {
+    return this.add("paul", text, false, to, files.map((n) => redact(n).slice(0, 200)));
   }
 
   /** What the app shows of one conversation: the newest messages, and whether the chief is working on a reply. */
