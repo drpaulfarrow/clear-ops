@@ -94,9 +94,25 @@ A pull request whose branch conflicts with its base cannot be merged, and the pa
 ### What this changes in the rules
 The app's sender used to pass the orchestrator in exactly one conversation, `web:main`. It now passes in the main conversation or a well-formed thread (`isWebConversation`). The invariant test pins the pattern, and that the route's address is only ever one the service itself built.
 
+## What slice 6 adds: the Spend page (`src/live-settings.ts`, `appSpend` in `src/app-data.ts`)
+
+The spend meter in the header opens a page (`docs/app/spend.png`, made-up figures).
+
+- **Today.** The provider's own figure for the day against the daily cap, as the header shows it.
+- **Where it went.** Jobs that finished today and have the provider's own figure, added up by agent and by project, dearest first, and what is left over once they are subtracted from the day's figure (the chief's own replies, and jobs with no figure of their own). A job has a figure only when it runs under a per-job cap, because that is when each of its calls is priced (`src/realcost.ts`); today that is engineering and review jobs. A job's figure is its whole cost, counted on the day it finished. There is no breakdown by model yet: nothing on main records which model a call ran on. The telemetry pull request would supply that.
+- **Caps.** The daily cap, the cap on one engineering or review job, and the cap on any other job. Each is an amount between $0.50 and $500, or put back to the deploy's own setting.
+- **Models.** Which model the chief, the workers, the engineers and the maintainer run on: one of the aliases this deploy already maps to a model. The executive assistant always runs on Claude and is not offered.
+
+What Paul sets is kept in the store and laid over the deploy's own values, so the rest of the service reads `config` as before. A change applies to the next run and is said in the app's chat. Only the app's own route writes these settings (`POST /app/api/settings`, signed in, this site's own script); `config` is touched only for a setting that was changed here.
+
+Two things to know. The eval (`npm run eval`) is meant to follow a change of model, and a change made here does not run it. And these settings live in the store on the data volume, so they survive a deploy: `fly.toml` no longer has the last word on a setting changed here until it is put back.
+
+### What this changes in the rules
+Caps and models were deploy-time only. `CLAUDE.md` gains a clause and there is an invariant test: one module writes these settings, one route calls it, and it can assign exactly three caps and four roles' models.
+
 ## Still to come
 
-What it does not do yet: changing caps or models, project spaces of Paul's own (each with its own chat), voice, uploads, push notifications, search. Each is a later slice.
+What it does not do yet: a breakdown of spend by model and a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), voice, uploads, push notifications, search. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

@@ -465,6 +465,11 @@ export interface Settings {
    * metadata; the same rules apply (compared in constant time, never logged, read-only pages only).
    */
   reportsToken?: string;
+  /**
+   * What Paul changed from the web app's Spend page, laid over the deploy's own settings
+   * (src/live-settings.ts): money caps and which model each role runs on. Only that page's route writes it.
+   */
+  live?: { dailyBudgetUsd?: number; engineerBudgetUsd?: number; jobBudgetUsd?: number; models?: { chief?: string; worker?: string; engineer?: string; maintainer?: string } };
 }
 
 interface State {

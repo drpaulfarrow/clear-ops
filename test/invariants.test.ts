@@ -1176,10 +1176,10 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
   // Two routes under /app are not a GET: the one that ends the session, and Paul's own message to the
   // chief (slice 2). Nothing under /app approves, starts, stops or edits anything directly.
-  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`"]);
-  // Every one of the four that does something is taken from this site's own script only.
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`", "`${APP_PATH}/api/settings`"]);
+  // Every one of the five that does something is taken from this site's own script only.
   assert.match(routes, /const ownScript = \(req: express\.Request\): boolean => \{[\s\S]*?return !!req\.is\("application\/json"\) && \(origin === undefined \|\| origin === new URL\(config\.publicUrl\)\.origin\) && \(site === undefined \|\| site === "same-origin"\);/);
-  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 4);
+  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 5);
   // That message is taken from this site's own script only, is refused before it is kept when it is an
   // approval word, is never kept when it is a one-time code, and reaches the orchestrator as the app's
   // own sender with the flag no channel listener sets.
@@ -1224,6 +1224,30 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(data, /const cost = realCost\(job\);/);
   assert.doesNotMatch(data, /job\.costUsd/);
   assert.match(src("github-auth.ts"), /const WORKER_STRIPPED = \[[^\]]*"UI_GITHUB_CLIENT_ID", "UI_GITHUB_CLIENT_SECRET"\]/);
+});
+
+test("caps and models change at run time only from the web app's own route, and only the seven settings it names", () => {
+  const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
+  // One module holds the settings and writes them, and one route calls it: no agent, command word,
+  // chat message, schedule or other listener can change a cap or a model.
+  for (const f of files) if (f !== "live-settings.ts") assert.doesNotMatch(src(f), /setSetting\("live"/, `${f} must not write the live settings`);
+  for (const f of files) if (f !== "index.ts" && f !== "live-settings.ts") assert.doesNotMatch(src(f), /\bsetLive\(/, `${f} must not change a live setting`);
+  const index = src("index.ts");
+  assert.equal((index.match(/\bsetLive\(/g) ?? []).length, 1);
+  const route = index.slice(index.indexOf("app.post(`${APP_PATH}/api/settings`"), index.indexOf("app.get(`${APP_PATH}/api/jobs/:id`,"));
+  const own = route.indexOf("if (!ownScript(req)) return void res.status(403)");
+  assert.ok(own > 0 && route.indexOf("setLive(deps.store, body.key, body.value)") > own, "the same-site check comes before the change");
+  const live = src("live-settings.ts");
+  // Three caps and four roles, and nothing else in `config` is ever assigned here: not the runaway
+  // guard, not the executive assistant's model, not a provider, a key, an allowlist or a gate.
+  assert.match(live, /export const LIVE_CAPS = \["dailyBudgetUsd", "engineerBudgetUsd", "jobBudgetUsd"\] as const;/);
+  assert.match(live, /export const LIVE_ROLES = \["chief", "worker", "engineer", "maintainer"\] as const;/);
+  assert.deepEqual([...new Set([...live.matchAll(/\bconfig(?:\.[A-Za-z]+)*(?:\[[a-z]+\])? = /g)].map((m) => m[0]))].sort(), ["config.models[role] = ", "config[cap] = "]);
+  // A cap is an amount within fixed bounds; a model is one of the deploy's own aliases, never a free id.
+  assert.match(live, /return cents >= LIVE_CAP_MIN && cents <= LIVE_CAP_MAX \? cents : undefined;/);
+  assert.match(live, /if \(!isAlias\(value\) \|\| !liveModelChoices\(\)\.some\(\(c\) => c\.alias === value\)\) throw new LiveSettingError\(/);
+  // The per-run runaway guard stays where it was: the app cannot raise or remove it.
+  assert.doesNotMatch(live, /sdkRunawayBudgetUsd|models\.ea|selfMerge/);
 });
 
 test("the service merges a pull request only on Paul's own tap in the web app, on the commit he was shown, in a repository ClearOps manages", () => {
