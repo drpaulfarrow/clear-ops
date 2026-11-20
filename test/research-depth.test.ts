@@ -84,6 +84,9 @@ test("deep research gets more turns and a configurable budget; every kind keeps 
   assert.deepEqual(runLimits("maintain"), { maxTurns: 80, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.engineerBudgetUsd });
   assert.deepEqual(runLimits("design"), { maxTurns: 80, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.design.budgetUsd });
   assert.deepEqual(runLimits("write", "deep"), { maxTurns: 40, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.jobBudgetUsd }, "depth only applies to research");
+  // Analyse and ideate read a whole repository, so they get 80 turns (20 Nov 2026); the money cap is the ordinary job's.
+  for (const kind of ["analyse", "ideate"] as const) assert.deepEqual(runLimits(kind), { maxTurns: 80, maxBudgetUsd: config.sdkRunawayBudgetUsd, realBudgetUsd: config.jobBudgetUsd });
+  for (const kind of ["write", "ea", "advisor"] as const) assert.equal(runLimits(kind).maxTurns, 40, `${kind} is unchanged`);
   // Money limits are off by default (Paul's call, 13 Nov 2026); every kind is still bounded by turns.
   for (const kind of JOB_KINDS) assert.ok(runLimits(kind, "deep").maxTurns > 0, `${kind} always has a turn limit`);
   assert.equal(config.jobBudgetUsd, undefined, "no per-run money cap unless one is set");

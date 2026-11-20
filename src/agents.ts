@@ -573,6 +573,10 @@ export function runLimits(kind: JobKind, depth?: ResearchDepth): RunLimits {
   if (kind === "maintain") return { maxTurns: 80, maxBudgetUsd: guard, realBudgetUsd: config.engineerBudgetUsd };
   if (kind === "design") return { maxTurns: 80, maxBudgetUsd: guard, realBudgetUsd: config.design.budgetUsd };
   if (kind === "research") return depth === "deep" ? { maxTurns: 200, maxBudgetUsd: guard, realBudgetUsd: config.deepResearchBudgetUsd } : { maxTurns: 60, maxBudgetUsd: guard, realBudgetUsd: config.jobBudgetUsd };
+  // Reading a whole repository takes more turns than writing a note does. At 40, a deep review and a
+  // feature-ideas job on doubleshift each ran out before writing anything (19 Nov 2026), so these two
+  // get the same room as a review or a design job (Paul's call, 20 Nov 2026). The money cap is unchanged.
+  if (kind === "analyse" || kind === "ideate") return { maxTurns: 80, maxBudgetUsd: guard, realBudgetUsd: config.jobBudgetUsd };
   return { maxTurns: 40, maxBudgetUsd: guard, realBudgetUsd: config.jobBudgetUsd };
 }
 
