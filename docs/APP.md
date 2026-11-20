@@ -220,6 +220,23 @@ Spaces of Paul's own add one route that is not a GET, `POST /app/api/spaces`, ta
 
 A space's chat adds one kind of address to the app's conversations (`space:<alias>` beside a job's thread, a pull request's thread and Paul's own chats), which `test/invariants.test.ts` pins. It is taken only for a repository in the registry, and it changes nothing about who may say what: a message there comes in by the same route, as the same sender on no allowlist, and is refused every typed approval word before any model, exactly as in the main conversation. The line the chief is given about the repository is the service's own and says so.
 
+## Cleo: talking in the app (`src/web-voice.ts`)
+
+The Cleo button in the chat's message box is the voice (`docs/app/cleo.png`). Tap it, speak, tap again, and she answers aloud. One turn at a time: the page records while it is listening, sends the recording in one request, and plays what comes back.
+
+- **Who she is.** The same Cleo as in a Discord voice channel (`src/voice.ts`): a quick model with one tool, which hands what Paul asked to the chief in his words. She is told she is speaking in the app, and she does not say "one moment" while the chief works, because her whole answer is spoken at once.
+- **Where it goes.** The conversation on screen: the main one, one of his own chats, or a space's chat. What she hands the chief arrives there as the app's own sender, and the chief's written answer lands there like any other.
+- **What is kept.** His words as transcribed ("Said to Cleo") and what she said ("said aloud"), as two messages in that conversation, so there is a record and search finds it. When the chief answered in the chat during the turn, its own words are the record and hers are only spoken. The audio is not kept: his recording and her speech are held in memory for the length of the request and written nowhere.
+- **What she cannot do.** Approve anything. A spoken request reaches the chief only under the voice prefix ("Voice request from Paul ..."), which no approval command can match, and she tells him an approval is his own tap on the item in the app.
+- **Limits.** A turn is at most a minute (the page sends it on its own then) and 2 MB. One turn is in hand at a time. She remembers the talk so far, up to twenty turns, until he has been quiet for `VOICE_IDLE_MINUTES`.
+- **When it is there.** Only when voice is switched on and can be transcribed (`voiceEnabled`), in a browser that can record. Then she is also on the roster as "Ready to talk", with a page of her own.
+- **What it costs.** Each turn is one transcription, one or two calls to her model and one text-to-speech call, all through OpenRouter and all counted in the day's spend like everything else.
+- **What it is not, yet.** An open call. She speaks only in answer to a tap, so a job that finishes later is announced in the chat as text, not aloud. Hands-free with the phone locked is not something a web page can do reliably.
+
+### What this changes in the rules
+
+`POST /app/api/voice` is the ninth route under `/app` that is not a GET, and the eighth that takes the same-site check; `test/invariants.test.ts` pins the list, and a test of its own pins the rest: this site's own script only, switched on, a conversation that exists, and only then is anything listened to. Two callers may now say a message is from the app, where there was one: the chat route and Cleo's voice, and the test names both. The rule that nothing spoken can approve anything is held by the same code as Discord voice: the voice brain is the only thing that calls the chief, and it wraps the request first. The recording is measured before it is decoded, read only for a signed-in browser, and never written or logged.
+
 ## A space's notes and library (`appSpace` in `src/app-data.ts`, `spaceNotes` in `src/spaces.ts`)
 
 "Notes and library" in a space's chat bar and in the rail opens the space's own page (`#/space/<id>`, `docs/app/space-page.png`), for a repository's space or one of Paul's own.
@@ -264,7 +281,7 @@ On a phone's board, "Sign out" moved from the header into the rail's drawer to m
 
 ## Still to come
 
-What it does not do yet: opening a file Paul sent from the app, notes the chief can add to, live voice with Cleo, push notifications, searching inside the files Paul has sent. Each is a later slice.
+What it does not do yet: opening a file Paul sent from the app, notes the chief can add to, an open call with Cleo (she answers a tap, and does not speak unasked), push notifications, searching inside the files Paul has sent. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

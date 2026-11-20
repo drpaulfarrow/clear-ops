@@ -465,3 +465,19 @@ a.rail-row{text-decoration:none}
 .chat-space b{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .chat-space .muted{min-width:0;overflow:hidden;text-overflow:ellipsis}
 @media (max-width:640px){.chat-space .muted{display:none}.space-more{padding:0;width:40px}.space-more span{display:none}}
+/* Cleo: the voice. Her button in the composer, and what was said aloud in the chat. */
+.av-voice{--hue:25;--shape:50% 50% 50% 28%}
+.cleo{flex:none;height:44px;padding:0 16px;border-radius:22px;border:0;background:oklch(.78 .13 25);color:var(--accent-ink);font:inherit;font-weight:600;font-size:14px;display:inline-flex;align-items:center;gap:8px;cursor:pointer}
+.cleo:hover{background:oklch(.83 .12 25)}
+.cleo[hidden]{display:none}
+.cleo.listening{background:var(--bad);color:#fff;animation:cleo-on 1.2s ease-in-out infinite}
+/* Brightness only: the button he is about to tap again does not move. */
+@keyframes cleo-on{0%,100%{opacity:1}50%{opacity:.72}}
+.cleo.thinking{opacity:.7;cursor:default}
+.cleo.speaking{background:var(--raised);color:var(--text);box-shadow:inset 0 0 0 1px var(--line)}
+.cleo-line{display:flex;align-items:center;gap:10px;min-height:0}
+.cleo-note{flex:1;min-width:0;font-size:13px;color:var(--muted)}
+.cleo-note[hidden],.cleo-cancel[hidden]{display:none}
+.cleo-cancel{flex:none;min-height:36px}
+.said-aloud{color:var(--text);line-height:1.55}
+@media (max-width:640px){.cleo{padding:0 12px}.cleo.idle span{display:none}}

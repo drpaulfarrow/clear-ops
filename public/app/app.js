@@ -50,6 +50,7 @@ const ICONS = {
   clip: ["M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8L10 17a1.8 1.8 0 0 1-2.6-2.6l7.2-7.2"],
   mic: ["M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z", "M5 11a7 7 0 0 0 14 0M12 18v3"],
   stop: ["M7 7h10v10H7z"],
+  wave: ["M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"],
   plus: ["M12 5v14M5 12h14"],
   doc: ["M7 3h7l5 5v13H7z", "M14 3v5h5", "M10 13h6M10 17h6"],
   down: ["m6 9 6 6 6-6"],
@@ -97,7 +98,9 @@ const modelName = (id) => (id ? id.split("/").pop() : undefined);
 /** The agents' names. Placeholders until Paul names them; a kind without one goes by its role. */
 const NAMES = { engineer: "Fitz", maintain: "Vera", research: "Scout", design: "Pip" };
 const CHIEF = "Marlo";
-const KNOWN_KINDS = new Set(["engineer", "maintain", "research", "design", "write", "analyse", "create_agent", "ea", "ideate", "cv", "dns", "advisor", "prebid"]);
+const KNOWN_KINDS = new Set(["engineer", "maintain", "research", "design", "write", "analyse", "create_agent", "ea", "ideate", "cv", "dns", "advisor", "prebid", "voice"]);
+/** The voice of ClearOps: who speaks when the Cleo button is used. */
+const CLEO = "Cleo";
 const who = (job) => (NAMES[job.kind] ? `${NAMES[job.kind]} · ${job.kindName}` : job.kindName.charAt(0).toUpperCase() + job.kindName.slice(1));
 const avatar = (kind, size = "") => h("span", { class: `av ${KNOWN_KINDS.has(kind) ? `av-${kind}` : "av-chief"} ${size}`, "aria-hidden": "true" }, h("i"), h("i"));
 
@@ -1531,6 +1534,8 @@ const sentFiles = (names) => (names.length ? h("div", { class: "sent-files" }, n
  * it is being, and the plain file if it could not be. The recording itself is kept with his uploads.
  */
 function mineBubble(m) {
+  // What he said to Cleo, as it was heard.
+  if (m.spoken) return h("div", { class: "mine" }, h("div", { class: "bubble" }, h("div", { class: "voice" }, h("span", { class: "voice-tag" }, icon("wave", 14), `Said to ${CLEO}`), h("span", { class: "voice-said" }, m.text))));
   const files = m.files ?? [];
   const spoken = files.filter((n) => VOICE_FILE.test(n));
   const unheard = m.heard === "";
@@ -1885,6 +1890,10 @@ function chatItems() {
     } else if (item.message.from === "paul") {
       out.push(mineBubble(item.message));
       lastFrom = "paul";
+    } else if (item.message.spoken) {
+      // What Cleo said aloud: her own face and name, and her words as plain text.
+      out.push(h("div", { class: "theirs" }, avatar("voice"), h("div", { class: "theirs-body" }, h("div", { class: "theirs-who" }, h("b", {}, CLEO), h("span", { class: "voice-tag" }, icon("wave", 14), "said aloud"), h("span", { class: "muted num" }, clock(item.message.at))), h("div", { class: "said-aloud" }, item.message.text))));
+      lastFrom = "cleo";
     } else {
       const first = lastFrom !== "clearops";
       out.push(
@@ -2083,6 +2092,104 @@ const logEl = h("div", { class: "chat-log", role: "log", "aria-label": `Conversa
 const boardEl = h("aside", { class: "beside", "aria-label": "Jobs board" });
 const fullBoardEl = h("div", { class: "full-board" });
 const chips = ["What's waiting on me?", "/jobs", "/spend"].map((text) => h("button", { class: "chip", type: "button", onclick: () => void send(text) }, text));
+/* ---------- Cleo: tap, speak, tap, and hear the answer ---------- */
+
+/** The longest one spoken turn runs before it is sent on its own. */
+const CLEO_MAX_MS = 60_000;
+const canTalk = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder && (window.AudioContext || window.webkitAudioContext));
+/** One turn at a time: idle, listening (recording him), thinking (waiting for her), speaking (playing her answer). */
+const cleo = { state: "idle", note: undefined, recorder: undefined, ctx: undefined, playing: undefined, timer: undefined };
+const cleoButton = h("button", { class: "cleo", type: "button" });
+const cleoCancel = h("button", { class: "btn quiet cleo-cancel", type: "button", onclick: () => stopTalking(false) }, "Cancel");
+const cleoNote = h("div", { class: "cleo-note", role: "status" });
+function drawCleo() {
+  // Only where she can be heard and answered: voice is on, this browser can record, and the conversation has begun.
+  const on = !!state.board?.voice && canTalk && state.own !== "new";
+  cleoButton.hidden = !on && cleo.state === "idle";
+  cleoButton.className = `cleo ${cleo.state}`;
+  cleoButton.disabled = cleo.state === "thinking";
+  const words = { idle: CLEO, listening: "Tap to send", thinking: "Thinking", speaking: "Tap to stop" }[cleo.state];
+  cleoButton.setAttribute("aria-label", { idle: `Talk to ${CLEO}`, listening: `Send what you said to ${CLEO}`, thinking: `${CLEO} is thinking`, speaking: `Stop ${CLEO} speaking` }[cleo.state]);
+  cleoButton.replaceChildren(...[icon(cleo.state === "speaking" ? "stop" : "wave", 18), h("span", {}, words)]);
+  cleoCancel.hidden = cleo.state !== "listening";
+  cleoNote.textContent = cleo.state === "listening" ? `${CLEO} is listening.` : cleo.note ?? "";
+  cleoNote.hidden = !cleoNote.textContent;
+}
+function cleoSays(note) {
+  cleo.state = "idle";
+  cleo.note = note;
+  drawCleo();
+}
+async function startTalking() {
+  cleo.note = undefined;
+  // Made and woken inside his tap, which is the only time a phone lets a page make sound later.
+  cleo.ctx ??= new (window.AudioContext || window.webkitAudioContext)();
+  void cleo.ctx.resume();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    return cleoSays("The microphone could not be used. Check the browser's permission for this site.");
+  }
+  const parts = [];
+  const began = Date.now();
+  const recorder = new MediaRecorder(stream);
+  cleo.recorder = recorder;
+  recorder.send = true;
+  recorder.addEventListener("dataavailable", (e) => e.data.size && parts.push(e.data));
+  recorder.addEventListener("stop", () => {
+    clearTimeout(cleo.timer);
+    for (const track of stream.getTracks()) track.stop();
+    cleo.recorder = undefined;
+    if (!recorder.send) return cleoSays(undefined);
+    if (Date.now() - began < 400 || !parts.length) return cleoSays("That was too short to hear. Tap, speak, then tap again.");
+    void sendTalk(new Blob(parts, { type: (recorder.mimeType || "audio/webm").split(";")[0] }));
+  });
+  recorder.start();
+  cleo.timer = setTimeout(() => stopTalking(true), CLEO_MAX_MS);
+  cleo.state = "listening";
+  drawCleo();
+}
+function stopTalking(send) {
+  if (!cleo.recorder) return;
+  cleo.recorder.send = send;
+  cleo.recorder.stop();
+}
+function stopSpeaking() {
+  try {
+    cleo.playing?.stop();
+  } catch {
+    // Already finished.
+  }
+  cleo.playing = undefined;
+  cleoSays(undefined);
+}
+async function sendTalk(blob) {
+  cleo.state = "thinking";
+  drawCleo();
+  const where = threadOnScreen();
+  try {
+    const res = await postJson("/voice", { ...(where ? { thread: where } : {}), audio: { type: blob.type, data: await asBase64(blob) } });
+    void chatTick();
+    if (!res.ok) return cleoSays(res.data.error || `${CLEO} could not answer just now.`);
+    if (!res.data.heard) return cleoSays(`${CLEO} did not catch anything. Tap and try again.`);
+    if (!res.data.audio) return cleoSays(res.data.said ? `${CLEO} answered, but it could not be spoken. Her words are in the chat.` : undefined);
+    const bytes = Uint8Array.from(atob(res.data.audio), (c) => c.charCodeAt(0));
+    const sound = await cleo.ctx.decodeAudioData(bytes.buffer);
+    const source = cleo.ctx.createBufferSource();
+    source.buffer = sound;
+    source.connect(cleo.ctx.destination);
+    source.addEventListener("ended", () => { if (cleo.playing === source) { cleo.playing = undefined; cleoSays(undefined); } });
+    cleo.playing = source;
+    cleo.state = "speaking";
+    drawCleo();
+    source.start();
+  } catch (err) {
+    cleoSays(err.message === "signed out" ? undefined : `${CLEO} could not be reached or heard just now.`);
+  }
+}
+cleoButton.addEventListener("click", () => (cleo.state === "idle" ? void startTalking() : cleo.state === "listening" ? stopTalking(true) : cleo.state === "speaking" ? stopSpeaking() : undefined));
+
 const chatEl = h(
   "section",
   { class: "chat", "aria-label": "Chat" },
@@ -2094,12 +2201,14 @@ const chatEl = h(
     h("div", { class: "chips" }, chips),
     mainMenu.el,
     mainFiles.tray,
+    h("div", { class: "cleo-line" }, cleoNote, cleoCancel),
     h(
       "form",
       { class: "composer", onsubmit: (e) => { e.preventDefault(); void send(input.value); } },
       h("label", { class: "sr", for: "ask" }, `Message ${CHIEF}`),
       mainFiles.tools,
       input,
+      cleoButton,
       sendButton,
     ),
   ),
@@ -2222,6 +2331,7 @@ async function send(raw) {
 
 let stickNext = true;
 function drawChat() {
+  drawCleo();
   lookedAt();
   drawChatBar(Date.now(), true);
   const stick = stickNext || logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120;

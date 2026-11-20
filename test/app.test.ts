@@ -158,11 +158,23 @@ const newPulls = (now: () => number = Date.now) =>
   new AppPulls({ repos: () => PULL_REPOS, repoOf: (job) => (PULL_REPOS.some((r) => r.alias === job.target) ? job.target : undefined), token: (repo) => (repo.alias === "product" ? undefined : PULL_TOKEN), selfAlias: "self", fetch: pullFetch, now });
 const SELF_PR = "https://github.com/drpaulfarrow/clear-ops/pull/12";
 
+// Cleo in the app: switched off unless a test turns her on, and a stand-in that records what the route handed her.
+let voiceOn = false;
+const voiceTurns: Array<{ where: string; type: string; bytes: number }> = [];
+let voiceFails: Error | undefined;
+
 function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
   // Like the service's own router (src/channels.ts), it can read a conversation back; the app's are read from its transcript.
   const messenger = { send: async (to: string, text: string) => void elsewhere.push({ to, text }), recent: async () => [] as Array<{ author: string; text: string }> };
   // No test here may reach the real GitHub: the app is given a pull-request reader with no credential.
-  const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c, prStates: new PrStates({ token: () => undefined }), pulls: newPulls() });
+  const webVoice = {
+    turn: async (where: string, audio: { data: Buffer; type: string; name: string }) => {
+      voiceTurns.push({ where, type: audio.type, bytes: audio.data.length });
+      if (voiceFails) throw voiceFails;
+      return { heard: "What is running?", said: "Two jobs.", kept: true, audio: Buffer.from("mp3").toString("base64") };
+    },
+  };
+  const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c, prStates: new PrStates({ token: () => undefined }), pulls: newPulls(), webVoice, webVoiceEnabled: () => voiceOn });
   return new Promise<{ server: import("node:http").Server; base: string; scheduler: Scheduler; orchestrator: typeof built.orchestrator }>((resolve) => {
     const srv = built.app.listen(0, () => resolve({ server: srv, base: `http://127.0.0.1:${(srv.address() as import("node:net").AddressInfo).port}`, scheduler: built.scheduler, orchestrator: built.orchestrator }));
   });
@@ -693,10 +705,10 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal(typeof board.health.headline, "string");
 });
 
-test("eight things under /app are not a GET, and the data module never writes", () => {
+test("nine things under /app are not a GET, and the data module never writes", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const appRoutes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
-  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`", "post `${APP_PATH}/api/chats`", "post `${APP_PATH}/api/settings`", "post `${APP_PATH}/api/spaces`"]);
+  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`", "post `${APP_PATH}/api/chats`", "post `${APP_PATH}/api/settings`", "post `${APP_PATH}/api/spaces`", "post `${APP_PATH}/api/voice`"]);
   assert.match(appRoutes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some/, "one gate over everything under /app");
   const data = fs.readFileSync(new URL("../src/app-data.ts", import.meta.url), "utf8");
   assert.doesNotMatch(data, /\.(updateJob|createJob|importJob|setSetting|setCapDays|setQueueHold|writeOutput|put[A-Z]\w*|update[A-Z]\w*|create[A-Z]\w*|disableSchedule|addNote)\(/);
@@ -1965,6 +1977,56 @@ test("a space of Paul's own is made, changed and removed by his own tap, and its
     store.updateJob(job.id, { status: "cancelled" } as never);
   } finally {
     chiefSays = undefined;
+  }
+});
+
+test("a spoken turn with Cleo is taken only from the signed-in app, for a conversation that exists, when she is switched on", async () => {
+  const cookie = await session();
+  const { WebVoiceError, WEB_VOICE_BYTES } = await import("../src/web-voice.js");
+  const audio = { type: "audio/webm;codecs=opus", data: Buffer.from("a short recording").toString("base64") };
+  const voice = (body: unknown, c?: string, headers: Record<string, string> = {}) =>
+    fetch(`${base}${APP_PATH}/api/voice`, { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...(c ? { cookie: c } : {}), ...headers }, body: JSON.stringify(body) });
+  const said = async (res: Response) => [res.status, ((await res.json()) as { error?: string }).error] as const;
+  voiceTurns.length = 0;
+  try {
+    // Switched off: the board says so, she is not on the roster, and nothing is listened to.
+    const off = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as { voice: boolean; roster: Array<{ kind: string }> };
+    assert.deepEqual([off.voice, off.roster.some((r) => r.kind === "voice")], [false, false]);
+    assert.deepEqual(await said(await voice({ audio }, cookie)), [503, "Cleo is not switched on."]);
+    voiceOn = true;
+    const on = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as { voice: boolean; roster: Array<{ kind: string; name?: string; line: string }> };
+    assert.equal(on.voice, true);
+    assert.deepEqual(on.roster.at(-1), { kind: "voice", name: "Cleo", role: "voice", state: "here", line: "Ready to talk" });
+    // Not signed in, another site's page, or a form post: nothing.
+    assert.equal((await voice({ audio })).status, 401);
+    assert.equal((await voice({ audio }, cookie, { origin: "https://evil.example" })).status, 403);
+    assert.equal((await fetch(`${base}${APP_PATH}/api/voice`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", origin: process.env.PUBLIC_URL!, cookie }, body: "audio=x" })).status, 403);
+    // No such conversation, or nothing that is a recording.
+    for (const bad of ["job:nope", "space:nowhere", "chat:00000000", "web:main", 7]) assert.equal((await voice({ thread: bad, audio }, cookie)).status, 404, JSON.stringify(bad));
+    assert.equal((await voice({ audio: { type: "video/mp4", data: audio.data } }, cookie)).status, 400);
+    assert.equal((await voice({ audio: { type: "audio/webm" } }, cookie)).status, 400);
+    assert.equal((await voice({ audio: { type: "audio/webm", data: "A".repeat(Math.ceil((WEB_VOICE_BYTES * 4) / 3) + 8) } }, cookie)).status, 413);
+    assert.deepEqual(voiceTurns, [], "none of that reached her");
+
+    // A turn in the main conversation, and one in a space's chat.
+    const res = await voice({ audio }, cookie);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("cache-control") ?? "", /no-store/);
+    assert.deepEqual(await res.json(), { heard: "What is running?", said: "Two jobs.", kept: true, audio: Buffer.from("mp3").toString("base64") });
+    assert.equal((await voice({ thread: "space:self", audio }, cookie)).status, 200);
+    assert.deepEqual(voiceTurns, [{ where: "web:main", type: "audio/webm", bytes: 17 }, { where: "web:space:self", type: "audio/webm", bytes: 17 }]);
+    // Her own refusals are passed on in her words; anything else is said plainly and tells nothing.
+    voiceFails = new WebVoiceError(409, "Cleo is still answering. Give her a moment.");
+    assert.deepEqual(await said(await voice({ audio }, cookie)), [409, "Cleo is still answering. Give her a moment."]);
+    voiceFails = new Error("ECONNRESET at 10.0.0.4 with key sk-secret");
+    assert.deepEqual(await said(await voice({ audio }, cookie)), [500, "Cleo could not answer just now."]);
+    // Her page, like any agent's.
+    const page = JSON.parse(await text(await get(`${APP_PATH}/api/agents/voice`, cookie))) as { name: string; role: string; now: { line: string }; tools: string[] };
+    assert.deepEqual([page.name, page.role, page.now.line], ["Cleo", "voice", "Ready to talk"]);
+    assert.match(page.tools.join(" "), /nothing said aloud can approve anything/);
+  } finally {
+    voiceOn = false;
+    voiceFails = undefined;
   }
 });
 

@@ -58,6 +58,7 @@ import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
 import { createSpace, ownSpaceAddress, removeSpace, SpaceError, spaceNotes, updateSpace } from "./spaces.js";
 import { appSearch } from "./app-search.js";
+import { WebVoice, WebVoiceError, webVoiceAudio, WEB_VOICE_BODY_LIMIT } from "./web-voice.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
@@ -97,6 +98,9 @@ export interface AppDeps {
   githubStatus?: () => Promise<string>;
   /** Copies each finished job's output to the private outputs repository. Absent in tests. */
   outputs?: OutputsPublisher;
+  /** Cleo in the web app (src/web-voice.ts), and whether she is switched on. Tests inject both; the defaults are the real ones. */
+  webVoice?: Pick<WebVoice, "turn">;
+  webVoiceEnabled?: () => boolean;
   /** Paul's login vault. The singleton by default; the vault pages' test injects one with a pinned clock. */
   vault?: Vault;
   /** The card vault, for the same reason. */
@@ -295,6 +299,10 @@ export function buildApp(given: AppDeps) {
   upgradeEaSchedules(scheduler);
   // Cleo, the voice brain: hands spoken requests to the chief as if typed in the voice channel's chat.
   const voice = new VoiceBrain({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address }), tap });
+  // Cleo in the web app: the same brain over one request at a time. What she hands the chief arrives as
+  // the app's own sender, to be answered in the conversation Paul has open.
+  const webVoice = deps.webVoice ?? new WebVoice({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address, web: true }), tap, chat });
+  const webVoiceOn = deps.webVoiceEnabled ?? voiceEnabled;
   const holdWatcher = new HoldWatcher(deps.store, googleApi, deps.messenger);
   // The board's health block (src/health.ts): one heartbeat a minute and a light probe of everything
   // the workforce depends on, every five. Neither touches a job: the probes are one small read-only
@@ -348,6 +356,9 @@ export function buildApp(given: AppDeps) {
   // else falls through to the 100 KB parser and is refused there, before a large body is ever read.
   const bigChat = express.json({ limit: WEB_BODY_LIMIT });
   app.post(`${APP_PATH}/api/chat`, (req, res, next) => ((deps.appAuth ?? serviceAppAuth).sessionValid(deps.store, req.headers.cookie) ? bigChat(req, res, next) : next()));
+  // The same for one spoken turn with Cleo (src/web-voice.ts): a short recording, and only from a signed-in browser.
+  const voiceBody = express.json({ limit: WEB_VOICE_BODY_LIMIT });
+  app.post(`${APP_PATH}/api/voice`, (req, res, next) => ((deps.appAuth ?? serviceAppAuth).sessionValid(deps.store, req.headers.cookie) ? voiceBody(req, res, next) : next()));
 
   // Keep the raw body for signature verification. Registered after the bridge above on purpose: the bridge's
   // own routes carry their own body limits (a document can be a few megabytes) and check the bearer token
@@ -783,7 +794,7 @@ export function buildApp(given: AppDeps) {
       token: async (repo) => (await repoCredential(repo).catch(() => undefined))?.token || undefined,
       selfAlias: "self",
     });
-  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.info(url), jobPull: (job) => pulls.forJob(job), openPulls: () => pulls.open(), threads: () => chat.threads() });
+  const appSource = (): AppSource => ({ store: deps.store, queue: jobs, uptime, probes, activeWorkers: () => jobs.activeCount(), gates: { outbound, dns, signup, purchase }, prState: (url) => prStates.info(url), jobPull: (job) => pulls.forJob(job), openPulls: () => pulls.open(), threads: () => chat.threads(), voice: () => webVoiceOn() });
   /**
    * Whether a request that changes something came from this site's own script: a JSON body, and where
    * the browser says where the request came from, from here. A form, or a page on another site, fails
@@ -1141,6 +1152,26 @@ export function buildApp(given: AppDeps) {
     const detail = appJob(appSource(), String(req.params.id ?? ""));
     if (!detail) return void res.status(404).json({ error: "no such job" });
     res.json(detail);
+  });
+  /**
+   * One spoken turn with Cleo (src/web-voice.ts): his recording in, her words and her voice out. Taken
+   * from this site's own script only, for a conversation that exists. What he said reaches the chief
+   * only through the voice brain's own prefix, which no approval command can match, and the recording
+   * is held in memory for this request and written nowhere.
+   */
+  app.post(`${APP_PATH}/api/voice`, async (req, res) => {
+    appHeaders(res);
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
+    if (!webVoiceOn()) return void res.status(503).json({ error: "Cleo is not switched on." });
+    const body = (req.body ?? {}) as { thread?: unknown; audio?: unknown };
+    const where = appThread(body.thread);
+    if (!where) return void res.status(404).json({ error: "There is no such thread." });
+    try {
+      res.json(await webVoice.turn(where, webVoiceAudio(body.audio)));
+    } catch (err) {
+      if (err instanceof WebVoiceError) return void res.status(err.status).json({ error: err.message });
+      res.status(500).json({ error: "Cleo could not answer just now." });
+    }
   });
   // One space's page: his notes for it, its reports, and the names of the files he sent in its chat. Read-only.
   app.get(`${APP_PATH}/api/spaces/:id`, (req, res) => {
