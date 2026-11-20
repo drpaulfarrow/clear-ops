@@ -176,6 +176,11 @@ const state = {
   pull: undefined,
   jobMissing: false,
   problem: undefined,
+  /** The space whose page is open, as last read, and what is typed into its notes: { id, text, busy, said, bad }. */
+  spacePage: undefined,
+  spacePageRaw: "",
+  spacePageMissing: false,
+  notesDraft: undefined,
   /** The agent whose page is open, as last read. */
   agent: undefined,
   agentRaw: "",
@@ -189,6 +194,8 @@ const route = () => {
   const m = /^#\/job\/([A-Za-z0-9_-]{1,64})(\/report)?$/.exec(location.hash);
   if (m) return { name: "job", id: m[1], report: !!m[2] };
   if (location.hash === "#/spend") return { name: "spend" };
+  const sp = /^#\/space\/([a-z0-9][a-z0-9-]{0,39})$/.exec(location.hash);
+  if (sp) return { name: "space", id: sp[1] };
   const a = /^#\/agent\/([a-z_]{1,24})$/.exec(location.hash);
   if (a) return { name: "agent", kind: a[1] };
   // The search page, with what is being looked for kept in the address so a reload or the back button keeps it.
@@ -542,6 +549,7 @@ function rail(board) {
     state.spaceForm
       ? spaceForm(board)
       : [
+          spaceOf()?.managed ? h("a", { class: "rail-row rail-do", href: `#/space/${spaceOf().id}` }, icon("doc", 14), h("span", { class: "rail-name" }, "Notes and library")) : null,
           spaceOf()?.own ? h("button", { class: "rail-row rail-do", type: "button", onclick: () => { state.spaceForm = { id: spaceOf().id, name: spaceOf().name, repos: new Set(spaceOf().repos) }; drawRail(true); document.getElementById("space-name")?.focus(); } }, h("span", { class: "rail-name" }, "Change this space")) : null,
           h("button", { class: "rail-row rail-do", type: "button", onclick: () => { state.spaceForm = { name: "", repos: new Set() }; drawRail(true); document.getElementById("space-name")?.focus(); } }, icon("plus", 14), h("span", { class: "rail-name" }, "New space")),
         ],
@@ -553,6 +561,104 @@ function rail(board) {
   };
   const shift = h("section", { "aria-label": "On shift" }, h("h2", { class: "rail-head" }, "On shift"), (board.roster ?? []).map(person));
   return [spaces, shift, signOut("in-rail")];
+}
+
+/* ---------- One space: notes and library ---------- */
+
+async function refreshSpacePage(id) {
+  try {
+    const text = await getJson(`/spaces/${id}`);
+    if (route().id !== id) return false;
+    if (text === undefined) {
+      state.spacePageMissing = true;
+      state.spacePage = undefined;
+      return true;
+    }
+    const changed = text !== state.spacePageRaw || state.problem || state.spacePageMissing;
+    state.problem = undefined;
+    state.spacePageMissing = false;
+    if (changed) {
+      state.spacePageRaw = text;
+      state.spacePage = JSON.parse(text);
+      return true;
+    }
+  } catch (err) {
+    if (err.message === "signed out") return false;
+    const had = state.problem;
+    state.problem = "The service could not be reached. Trying again.";
+    return !had;
+  }
+  return false;
+}
+
+/** Keeps what is typed into a space's notes: his own tap, sent as this site's own JSON like every other change. */
+async function saveNotes(id) {
+  const d = state.notesDraft;
+  if (!d || d.id !== id || d.busy) return;
+  d.busy = true;
+  d.said = undefined;
+  draw();
+  try {
+    const res = await postJson("/spaces", { action: "notes", id, notes: d.text });
+    d.busy = false;
+    if (!res.ok) {
+      d.said = res.data.error || "The notes could not be saved just now.";
+      d.bad = true;
+    } else {
+      d.text = res.data.text ?? d.text;
+      d.saved = d.text;
+      d.said = d.text ? "Saved. Marlo is given these with every message in this space's chat." : "Cleared.";
+      d.bad = false;
+      state.spacePageRaw = "";
+      await refreshSpacePage(id);
+    }
+  } catch (err) {
+    d.busy = false;
+    d.said = err.message === "signed out" ? undefined : "The service could not be reached, so nothing was saved.";
+    d.bad = true;
+  }
+  draw();
+}
+
+function spacePage() {
+  const r = route();
+  const back = h("a", { class: "btn", href: "#/" }, icon("back"), "Back");
+  const sp = state.spacePage;
+  if (state.spacePageMissing) return h("main", { class: "page" }, h("div", { class: "job-head" }, back), h("p", { class: "muted" }, "There is no such space."));
+  if (!sp || sp.id !== r.id) return h("main", { class: "page" }, h("div", { class: "job-head" }, back), h("p", { class: "muted" }, state.problem ?? "Loading."));
+  const now = Date.parse(sp.generatedAt);
+  // What is typed is kept apart from what was last read, so a refresh never wipes it.
+  if (!state.notesDraft || state.notesDraft.id !== sp.id) state.notesDraft = { id: sp.id, text: sp.notes?.text ?? "", saved: sp.notes?.text ?? "" };
+  const d = state.notesDraft;
+  const box = h("textarea", { id: "space-notes", class: "notes-box", rows: "8", maxlength: String(sp.notesMax), "aria-label": `Your notes for ${sp.name}`, placeholder: "What should Marlo keep in mind here? Who it is for, what matters, what to avoid.", oninput: (e) => { d.text = e.target.value; d.said = undefined; } });
+  box.value = d.text;
+  const head = h("div", { class: "job-head" }, back, h("div", { class: "job-id" }, h("div", { class: "job-title" }, h("h1", {}, sp.name)), h("div", { class: "muted" }, sp.own ? (sp.repositories.length ? `A space of your own, with ${sp.repositories.join(", ")}.` : "A space of your own, tied to no repository.") : "This repository's space.")));
+  const notes = h(
+    "section",
+    { class: "pane", "aria-label": "Your notes" },
+    h("h2", {}, "Your notes"),
+    h("p", { class: "muted" }, `Only you write these. ${CHIEF} is given them with every message in this space's chat, as background from you, and cannot change them.`),
+    box,
+    h("div", { class: "row-banner" }, h("button", { class: "btn primary", type: "button", disabled: d.busy, onclick: () => void saveNotes(sp.id) }, d.busy ? "Saving" : "Save notes"), sp.notes ? h("span", { class: "muted" }, `Last saved ${ago(sp.notes.updatedAt, now)}.`) : h("span", { class: "muted" }, "None saved yet.")),
+    d.said ? h("p", { class: d.bad ? "refused" : "muted", role: "status" }, d.said) : null,
+  );
+  const reports = h(
+    "section",
+    { "aria-label": "Reports" },
+    h("h2", { class: "day" }, `Reports · ${sp.reports.length}${sp.moreReports ? "+" : ""}`),
+    sp.reports.length
+      ? h("div", { class: "rows" }, sp.reports.map((j) => h("a", { class: "row", href: `#/job/${j.id}/report` }, avatar(j.kind, "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, j.title), h("div", { class: "card-sub" }, `${NAMES[j.kind] ? `${NAMES[j.kind]} · ` : ""}${j.who} · ${ago(j.at, now) ?? ""}`)))))
+      : h("div", { class: "empty" }, "No job in this space has written a report the app can show."),
+    sp.moreReports ? h("div", { class: "more" }, "Older reports are found by searching.") : null,
+  );
+  const files = h(
+    "section",
+    { "aria-label": "Files you sent here" },
+    h("h2", { class: "day" }, `Files you sent here · ${sp.files.length}${sp.moreFiles ? "+" : ""}`),
+    sp.files.length ? h("div", { class: "rows" }, sp.files.map((f) => h("div", { class: "row plain" }, h("span", { class: "found-icon" }, icon("clip", 16)), h("div", { class: "row-main" }, h("div", { class: "card-title" }, f.name), h("div", { class: "card-sub" }, `Sent ${ago(f.at, now) ?? ""}`))))) : h("div", { class: "empty" }, "You have sent no files in this space's chat."),
+    h("p", { class: "muted" }, "Names only. A file you send is kept for the workers to read and is not opened from here."),
+  );
+  return h("main", { class: "page" }, head, state.problem ? h("div", { class: "banner" }, h("b", {}, "Not up to date. "), state.problem) : null, notes, reports, files);
 }
 
 /* ---------- One agent ---------- */
@@ -1932,7 +2038,7 @@ function drawChatBar(now = Date.now(), fromRefresh = false) {
       note ? h("span", { class: "muted num" }, note) : null,
     );
   // A space has one chat: its name, and no list to choose from.
-  if (spaceChat()) return void chatBarEl.replaceChildren(...[h("div", { class: "chat-bar-top" }, h("div", { class: "chat-space" }, h("b", {}, spaceOf()?.name ?? "This space"), h("span", { class: "muted" }, `· this space's chat with ${CHIEF}`)))]);
+  if (spaceChat()) return void chatBarEl.replaceChildren(...[h("div", { class: "chat-bar-top" }, h("div", { class: "chat-space" }, h("b", {}, spaceOf()?.name ?? "This space"), h("span", { class: "muted" }, `· this space's chat with ${CHIEF}`)), h("a", { class: "btn quiet chat-new space-more", href: `#/space/${spaceChat()}`, "aria-label": "Notes and library" }, icon("doc", 16), h("span", { "aria-hidden": "true" }, "Notes and library")))]);
   // replaceChildren writes anything that is not an element as text, the word "null" included, so the
   // list is left out when it is closed rather than passed as nothing.
   chatBarEl.replaceChildren(
@@ -2137,7 +2243,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.ra
 
 function draw() {
   const r = route();
-  document.title = r.name === "agent" && state.agent ? `${state.agent.name ?? state.agent.role} · ClearOps` : r.name === "search" ? "Search · ClearOps" : r.name === "spend" ? "Spend · ClearOps" : r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
+  document.title = r.name === "space" && state.spacePage ? `${state.spacePage.name} · ClearOps` : r.name === "agent" && state.agent ? `${state.agent.name ?? state.agent.role} · ClearOps` : r.name === "search" ? "Search · ClearOps" : r.name === "spend" ? "Spend · ClearOps" : r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
   if (!shellEl.isConnected) root.replaceChildren(shellEl);
   headerEl.replaceChildren(header(state.board));
   if (r.name === "job" || r.name === "pull") {
@@ -2164,6 +2270,19 @@ function draw() {
   if (r.name === "agent") {
     shellEl.className = "shell";
     bodyEl.replaceChildren(...[agentPage()]);
+    return;
+  }
+  if (r.name === "space") {
+    shellEl.className = "shell";
+    // The notes box keeps its caret and its scroll across a redraw.
+    const was = document.activeElement?.id === "space-notes" ? [document.activeElement.selectionStart, document.activeElement.selectionEnd, document.activeElement.scrollTop] : undefined;
+    bodyEl.replaceChildren(...[spacePage()]);
+    const box = document.getElementById("space-notes");
+    if (was && box) {
+      box.focus({ preventScroll: true });
+      box.setSelectionRange(was[0], was[1]);
+      box.scrollTop = was[2];
+    }
     return;
   }
   if (r.name === "search") {
@@ -2345,12 +2464,12 @@ async function tick() {
   const r = route();
   let wait = BOARD_EVERY_MS;
   if (!document.hidden) {
-    const [boardChanged, jobChanged] = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : r.name === "agent" ? refreshAgent(r.kind) : r.name === "spend" ? refreshSpend() : false]);
+    const [boardChanged, jobChanged] = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : r.name === "agent" ? refreshAgent(r.kind) : r.name === "space" ? refreshSpacePage(r.id) : r.name === "spend" ? refreshSpend() : false]);
     // Away from the board, a new reading of the board only refreshes the header: redrawing the page
     // under someone reading a diff would lose their place.
     if (r.name === "board" ? boardChanged : jobChanged) draw();
     else if (boardChanged) headerEl.replaceChildren(header(state.board));
-    if (r.name === "pull" || r.name === "spend" || r.name === "agent") wait = JOB_IDLE_EVERY_MS;
+    if (r.name === "pull" || r.name === "spend" || r.name === "agent" || r.name === "space") wait = JOB_IDLE_EVERY_MS;
     if (r.name === "job") wait = state.job && (state.job.job.status === "running" || state.job.job.status === "queued") ? JOB_LIVE_EVERY_MS : JOB_IDLE_EVERY_MS;
   }
   timer = setTimeout(tick, wait);
@@ -2370,6 +2489,8 @@ window.addEventListener("hashchange", () => {
   state.agent = undefined;
   state.agentRaw = "";
   state.agentMissing = false;
+  state.spacePageRaw = "";
+  state.spacePageMissing = false;
   state.problem = undefined;
   state.reportAsked = state.reportShown = undefined;
   window.scrollTo(0, 0);

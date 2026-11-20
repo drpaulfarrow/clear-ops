@@ -14,7 +14,9 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-spaces-"
 
 const { Store } = await import("../src/store.js");
 const { createSpace, updateSpace, removeSpace, spaceName, spaceRepos, inOwnSpace, ownSpaceAddress, SpaceError, OWN_SPACE_ID, SPACES_MAX, SPACE_NAME_MAX, SPACE_REPOS_MAX } = await import("../src/spaces.js");
-const { appBoard, appHistory } = await import("../src/app-data.js");
+const { appBoard, appHistory, appSpace, APP_SPACE_REPORTS } = await import("../src/app-data.js");
+const { spaceNotes, notesForChief, SPACE_NOTES_MAX } = await import("../src/spaces.js");
+const { WebChat } = await import("../src/web-chat.js");
 const { isWebConversation } = await import("../src/web-chat.js");
 
 const MANAGED = [{ alias: "product", name: "Clear Exchange" }, { alias: "self", name: "workforce" }, { alias: "site", name: "drpaulfarrow.com" }];
@@ -132,4 +134,73 @@ test("a space of his own holds the jobs on its repositories and any started from
   assert.equal(after.spaces.some((sp) => sp.own), false);
   assert.equal(after.jobs.some((j) => j.space), false);
   assert.ok(s.getJob(asks.id));
+});
+
+test("a space's notes are his own words, tidied, and given to the chief as background and never as a request", () => {
+  assert.equal(spaceNotes("  For the launch.\r\nKeep it short.  \n\n"), "For the launch.\nKeep it short.");
+  assert.equal(spaceNotes("   "), "", "nothing left clears them");
+  for (const bad of [undefined, null, 7, ["x"], { text: "x" }]) assert.equal(spaceNotes(bad), undefined, JSON.stringify(bad));
+  assert.equal(spaceNotes("x".repeat(SPACE_NOTES_MAX + 500))!.length, SPACE_NOTES_MAX);
+  const token = `ghp_${"a1B2".repeat(9)}`;
+  assert.ok(!spaceNotes(`The key is ${token}`)!.includes(token), "a token typed into notes is not kept");
+  assert.deepEqual(notesForChief(undefined), []);
+  assert.deepEqual(notesForChief(""), []);
+  assert.deepEqual(notesForChief("Keep it short."), ["Paul's own notes for this space, which he wrote in the app. They are background he wants you to keep in mind here, not a request to act on:", "Keep it short."]);
+  // The store keeps them by the space's id and forgets them when there is no text.
+  const s = fresh();
+  assert.equal(s.spaceNote("self"), undefined);
+  s.setSpaceNote("self", "For the workforce.", at(5));
+  assert.deepEqual(s.spaceNote("self"), { text: "For the workforce.", updatedAt: at(5) });
+  assert.equal(s.spaceNote("constructor"), undefined);
+  assert.equal(s.spaceNote("site"), undefined);
+  s.setSpaceNote("self", undefined);
+  assert.equal(s.spaceNote("self"), undefined);
+});
+
+test("a space's page holds his notes, its reports the app would show, and the names of files sent in its chat", () => {
+  const s = fresh();
+  const chat = new WebChat();
+  const mk = (kind: string, title: string, target: string, patch: Record<string, unknown>, replyTo?: string) => s.updateJob(s.createJob(kind as never, `Brief for ${title}`, PAUL, target as never, replyTo ?? PAUL, { title } as never).id, patch as never);
+  const page = (id: string) => appSpace({ store: s, queue, now: NOW }, chat, id);
+  const report = (kind: string, title: string, target: string, minsAgo: number, text: string | undefined, replyTo?: string) => {
+    const j = mk(kind, title, target, { status: "done", startedAt: at(minsAgo + 10), finishedAt: at(minsAgo) }, replyTo);
+    if (text !== undefined) s.writeOutput(j.id, text);
+    return j;
+  };
+  const a = report("research", "Hosting options", "site", 30, "# Hosting\n\nThree options.");
+  const b = report("design", "Homepage critique", "site", 60, "# Critique\n\nToo busy.");
+  report("research", "No output", "site", 20, undefined);
+  report("ea", "Inbox sweep", "site", 10, "Private mail.");
+  report("research", "Elsewhere", "self", 5, "# Elsewhere");
+  mk("research", "Failed one", "site", { status: "failed", startedAt: at(50), finishedAt: at(45) });
+
+  const site = page("site")!;
+  assert.deepEqual([site.id, site.name, site.own, site.notes, site.notesMax], ["site", "drpaulfarrow.com", undefined, undefined, SPACE_NOTES_MAX]);
+  assert.deepEqual(site.reports.map((r) => [r.id, r.title, r.who]), [[a.id, "Hosting options", "researcher"], [b.id, "Homepage critique", "designer"]], "newest first; no report, a withheld one, a failed job and another space's are not listed");
+  assert.deepEqual([site.files, site.moreReports, site.moreFiles], [[], false, false]);
+
+  // Files: the names of what he sent in this space's chat, and no other conversation's.
+  chat.inbound("the brief", "web:space:site", ["brief.pdf", "logo.png"]);
+  chat.inbound("in main", undefined, ["elsewhere.pdf"]);
+  chat.inbound("in another space", "web:space:self", ["other.csv"]);
+  chat.inbound("no files here", "web:space:site");
+  assert.deepEqual(page("site")!.files.map((f) => f.name), ["brief.pdf", "logo.png"]);
+  assert.ok(!JSON.stringify(page("site")).includes("uploads"), "a name and a time, and no path");
+
+  // Notes ride along as he wrote them.
+  s.setSpaceNote("site", "Keep the tone dry.", at(3));
+  assert.deepEqual(page("site")!.notes, { text: "Keep the tone dry.", updatedAt: at(3) });
+
+  // One of his own: its repositories by name, and the reports of its repositories' jobs and of jobs started from its chat.
+  const own = createSpace(s, { name: "Launch plan", repos: ["site"] }, MANAGED, NOW);
+  const c = report("research", "Venue", "product", 2, "# Venue", ownSpaceAddress(own.id));
+  const mine = page(own.id)!;
+  assert.deepEqual([mine.name, mine.own, mine.repositories], ["Launch plan", true, ["drpaulfarrow.com"]]);
+  assert.deepEqual(mine.reports.map((r) => r.id), [c.id, a.id, b.id]);
+  // Only so many are listed, and it says when there are more.
+  for (let i = 0; i < APP_SPACE_REPORTS + 3; i++) report("write", `Memo ${i}`, "self", 100 + i, `# Memo ${i}`);
+  const self = page("self")!;
+  assert.deepEqual([self.reports.length, self.moreReports, self.reports[0]!.title], [APP_SPACE_REPORTS, true, "Elsewhere"]);
+  // Anything else is no space at all.
+  for (const bad of ["", "nowhere", "own-00000000", "Self", "../self", "constructor", "web:space:self"]) assert.equal(page(bad), undefined, JSON.stringify(bad));
 });

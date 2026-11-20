@@ -457,3 +457,11 @@ mark{background:var(--accent-soft);color:var(--accent-text);border-radius:3px;pa
 .agent-count{color:var(--text-2)}
 .agent-count b{font-family:var(--display);font-size:20px;color:var(--text)}
 .tone-good{color:var(--ok-text)}.tone-wait{color:var(--accent-text)}.tone-bad{color:var(--bad-text)}
+/* One space's page: notes and library. */
+.notes-box{width:100%;min-height:160px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit;font-size:16px;line-height:1.5;resize:vertical}
+.notes-box:focus{outline:2px solid var(--accent-line);outline-offset:1px}
+a.rail-row{text-decoration:none}
+.chat-space{flex:1 1 auto}
+.chat-space b{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.chat-space .muted{min-width:0;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:640px){.chat-space .muted{display:none}.space-more{padding:0;width:40px}.space-more span{display:none}}

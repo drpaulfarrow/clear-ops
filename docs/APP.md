@@ -220,6 +220,18 @@ Spaces of Paul's own add one route that is not a GET, `POST /app/api/spaces`, ta
 
 A space's chat adds one kind of address to the app's conversations (`space:<alias>` beside a job's thread, a pull request's thread and Paul's own chats), which `test/invariants.test.ts` pins. It is taken only for a repository in the registry, and it changes nothing about who may say what: a message there comes in by the same route, as the same sender on no allowlist, and is refused every typed approval word before any model, exactly as in the main conversation. The line the chief is given about the repository is the service's own and says so.
 
+## A space's notes and library (`appSpace` in `src/app-data.ts`, `spaceNotes` in `src/spaces.ts`)
+
+"Notes and library" in a space's chat bar and in the rail opens the space's own page (`#/space/<id>`, `docs/app/space-page.png`), for a repository's space or one of Paul's own.
+
+- **His notes.** One box of plain text, up to 4,000 characters, which only he writes. They are kept in the store by the space's id and given to the chief with every message in that space's chat, marked as his background for the space and not as a request to act on. The chief cannot change them, and no other conversation is given them. Saving with nothing in the box clears them, and removing one of his own spaces removes its notes.
+- **Reports.** The reports of the space's jobs, newest first: the same jobs its board shows, and only reports the app would show anyway (`reportFor`). The newest 50 are listed; older ones are found by searching.
+- **Files he sent here.** The names of the files he sent in the space's chat, with when. Names only: a file he sends is kept for the workers to read and is not opened from the app, which is how the uploads rule stands.
+
+### What this changes in the rules
+
+`POST /app/api/spaces` gains a fourth action, `notes`, and it is the one thing that route can do to a repository's own space. It keeps text and nothing else, for a space that exists, tidied and redacted. `test/invariants.test.ts` pins that nothing else in the service writes a space's notes: no agent, no tool of the chief's, no channel listener. `GET /app/api/spaces/<id>` is read-only. The uploads rule is untouched: no route serves an upload.
+
 ## One agent's page (`appAgent` in `src/app-data.ts`)
 
 Anyone on the roster opens a page of their own (`#/agent/<kind>`, `docs/app/agent.png`), read-only:
@@ -252,7 +264,7 @@ On a phone's board, "Sign out" moved from the header into the rail's drawer to m
 
 ## Still to come
 
-What it does not do yet: files and notes of its own for each space, live voice with Cleo, push notifications, searching inside the files Paul has sent. Each is a later slice.
+What it does not do yet: opening a file Paul sent from the app, notes the chief can add to, live voice with Cleo, push notifications, searching inside the files Paul has sent. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

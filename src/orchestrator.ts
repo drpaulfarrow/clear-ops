@@ -26,6 +26,7 @@ import { parseSignupCommand, signupLine, type SignupGate } from "./signup-gate.j
 import { parsePurchaseCommand, type PurchaseGate } from "./purchase.js";
 import { parseCodeCommand, type OtpRelay } from "./otp.js";
 import { isWebConversation, WEB_SENDER, webRefusal, webTopic } from "./web-chat.js";
+import { notesForChief } from "./spaces.js";
 import { DOCS_READONLY_SCOPE, parseDocReadCommand, type DocReadCommand, type DocReader } from "./doc-reader.js";
 import { BROWSE_KINDS } from "./web-tools.js";
 import { spendDisplay, type RealSpend } from "./spend.js";
@@ -469,6 +470,7 @@ export class Orchestrator {
         repos.length
           ? `He put ${repos.length === 1 ? "this repository" : "these repositories"} in it: ${repos.map((r) => `${r.alias}${r.slug ? ` (${r.slug})` : ""}`).join(", ")}. Unless he says otherwise, what he asks for here is about ${repos.length === 1 ? "that repository" : "them"}${repos.length === 1 ? "" : "; when a job could be in more than one, ask which"}.`
           : "It is tied to no repository: treat it as a subject of its own, and ask which repository when a job needs one.",
+        ...notesForChief(this.store.spaceNote(own.id)?.text),
       ].join("\n");
     }
     // A space's chat (docs/APP.md): the address says which repository the conversation is about.
@@ -478,6 +480,7 @@ export class Orchestrator {
       return [
         `This message is in the app's chat for one project space: the ${repo.alias} repository${repo.slug ? ` (${repo.slug})` : ""}. That is from the service, not from Paul.`,
         `Unless he says otherwise, what he asks for here is about that repository: a job started from this chat that works in a repository works in ${repo.alias}. He does not need to name it.`,
+        ...notesForChief(this.store.spaceNote(repo.alias)?.text),
       ].join("\n");
     }
     if (!topic && !threadMention(from)) return "";

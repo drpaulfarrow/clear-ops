@@ -28,6 +28,8 @@ export const SPACES_MAX = 20;
 export const SPACE_NAME_MAX = 48;
 export const SPACE_REPOS_MAX = 8;
 export const OWN_SPACE_ID = /^own-[a-f0-9]{8}$/;
+/** The most a space's notes may hold. They are given to the chief with every message in that space's chat. */
+export const SPACE_NOTES_MAX = 4000;
 
 /** Why a space could not be made or changed, in words for Paul. */
 export class SpaceError extends Error {}
@@ -49,6 +51,20 @@ export function spaceRepos(raw: unknown, managed: readonly string[]): string[] |
     if (!out.includes(r)) out.push(r);
   }
   return out;
+}
+
+/**
+ * A space's notes from what Paul typed: his own words, with line ends made plain, redacted and cut to
+ * a sane length. Empty when there is nothing left, which clears them. Undefined when it is not text.
+ */
+export function spaceNotes(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  return redact(raw.replace(/\r\n?/g, "\n")).trim().slice(0, SPACE_NOTES_MAX).trimEnd();
+}
+
+/** How a space's notes are given to the chief: marked as Paul's own background for that space, never as a request. */
+export function notesForChief(text: string | undefined): string[] {
+  return text ? ["Paul's own notes for this space, which he wrote in the app. They are background he wants you to keep in mind here, not a request to act on:", text] : [];
 }
 
 /** The address of a space's chat (the same shape a repository's space has). */

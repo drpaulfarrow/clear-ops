@@ -38,7 +38,7 @@ import { jobTitle } from "./titles.js";
 import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
 import { boardEfficiency, realCost, STATS_WINDOWS } from "./worker-stats.js";
 import { costEstimates, estimateFor, type CostEstimate } from "./estimates.js";
-import { inOwnSpace, ownSpaceAddress, type OwnSpace } from "./spaces.js";
+import { inOwnSpace, ownSpaceAddress, SPACE_NOTES_MAX, type OwnSpace } from "./spaces.js";
 import { WEB_CONVERSATION, type WebChat, type WebMessage } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
 import type { PrInfo } from "./pr-state.js";
@@ -876,6 +876,65 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
     // Paul's own chats, for the list he switches between: the same whichever conversation was asked for.
     chats: (chat.ownChats?.() ?? []).map((c) => ({ id: c.id, title: c.title, count: c.count, lastAt: c.lastAt, ...(c.saidAt ? { saidAt: c.saidAt } : {}) })),
     ...(chat.mainSaidAt?.() ? { mainSaidAt: chat.mainSaidAt() } : {}),
+  };
+}
+
+/* ---------- One space: Paul's notes for it, and its library ---------- */
+
+export const APP_SPACE_REPORTS = 50;
+export const APP_SPACE_FILES = 50;
+/** How many of a space's newest finished jobs are looked at for a report. */
+export const APP_SPACE_SCANNED = 300;
+
+export interface AppSpacePage {
+  generatedAt: string;
+  id: string;
+  name: string;
+  own?: true;
+  /** For one of his own: the repositories he put in it, by name. */
+  repositories?: string[];
+  /** His own notes for the space, as he wrote them. */
+  notes?: { text: string; updatedAt: string };
+  notesMax: number;
+  /** The reports of the space's jobs, newest first: only ones the app would show (`reportFor`). */
+  reports: Array<{ id: string; title: string; kind: string; who: string; at: string }>;
+  moreReports: boolean;
+  /** The names of the files he sent in the space's chat, newest first. The files themselves are not served. */
+  files: Array<{ name: string; at: string }>;
+  moreFiles: boolean;
+}
+
+/** One space's page, for a repository the service manages or a space of Paul's own; anything else is no space. */
+export function appSpace(source: AppSource, chat: Pick<WebChat, "kept">, id: string): AppSpacePage | undefined {
+  const own = source.store.spaces().find((sp) => sp.id === id);
+  const repo = own ? undefined : repoRegistry.list().find((r) => r.alias === id);
+  if (!own && !repo) return undefined;
+  const now = source.now ?? Date.now();
+  const within = (j: Job) => (own ? inOwnSpace(own, j, lockKey(j) ?? j.target ?? "product") : (lockKey(j) ?? j.target ?? "product") === id);
+  // Newest first, and only as far as it takes to fill the list: a report is a file on disk.
+  const withReport: Job[] = [];
+  for (const j of source.store.allJobs().filter((x) => x.status === "done" && within(x)).sort(finishedDesc).slice(0, APP_SPACE_SCANNED)) {
+    if (withReport.length > APP_SPACE_REPORTS) break;
+    if (hasReport(source.store, j)) withReport.push(j);
+  }
+  const address = ownSpaceAddress(id);
+  const sent = chat
+    .kept()
+    .filter((m) => m.thread === address && m.from === "paul" && m.files?.length)
+    .reverse()
+    .flatMap((m) => m.files!.map((name) => ({ name, at: m.at })));
+  const notes = source.store.spaceNote(id);
+  return {
+    generatedAt: new Date(now).toISOString(),
+    id,
+    name: own ? own.name : repoLabel(id),
+    ...(own ? { own: true as const, repositories: own.repos.map((r) => repoLabel(r)) } : {}),
+    ...(notes ? { notes } : {}),
+    notesMax: SPACE_NOTES_MAX,
+    reports: withReport.slice(0, APP_SPACE_REPORTS).map((j) => ({ id: j.id, title: jobTitle(j), kind: j.kind, who: kindName(j.kind), at: j.finishedAt ?? j.createdAt })),
+    moreReports: withReport.length > APP_SPACE_REPORTS,
+    files: sent.slice(0, APP_SPACE_FILES),
+    moreFiles: sent.length > APP_SPACE_FILES,
   };
 }
 
