@@ -1253,14 +1253,24 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
     "deps.store.getJob(job[1]!) ? webThread({ job: job[1]! }) : undefined",
     "repoRegistry.list().some((r) => r.alias === pull[1] && r.slug) ? webThread({ pull: { repo: pull[1]!, number: Number(pull[2]) } }) : undefined",
     "chat.chat(own[1]!) ? webOwnChat(own[1]!) : undefined",
+    // A space's chat: only for a repository in the registry, by its own alias.
+    "repoRegistry.list().some((r) => r.alias === space[1]) ? webSpace(space[1]!) : undefined",
     "undefined",
   ]);
   const webChatSrc = src("web-chat.ts");
-  assert.match(webChatSrc, /const WEB_THREAD = \/\^web:\(\?:job:\(\[A-Za-z0-9_-\]\{1,64\}\)\|pull:\(\[A-Za-z0-9\._-\]\{1,64\}\):\(\[1-9\]\\d\{0,8\}\)\|chat:\(\[a-f0-9\]\{8\}\)\)\$\/;/);
+  assert.match(webChatSrc, /const WEB_THREAD = \/\^web:\(\?:job:\(\[A-Za-z0-9_-\]\{1,64\}\)\|pull:\(\[A-Za-z0-9\._-\]\{1,64\}\):\(\[1-9\]\\d\{0,8\}\)\|chat:\(\[a-f0-9\]\{8\}\)\|space:\(\[a-z0-9\]\[a-z0-9-\]\{0,39\}\)\)\$\/;/);
   // A chat's id is made by the service, at random, when it is opened, and a chat is never about a job or
   // a pull request: no job's context is attached to it by its address.
   assert.match(webChatSrc, /let id = randomBytes\(4\)\.toString\("hex"\);/);
   assert.match(webChatSrc, /if \(!m \|\| m\[4\]\) return undefined;/);
+  // A space's chat is about its repository and nothing narrower: its address carries an alias in the
+  // shape the registry makes, the route takes it only for a repository in the registry, and the chief is
+  // told which repository in the service's own words. It grants nothing: the message comes in by the
+  // same route, as the same sender, and is refused the same approval words.
+  assert.match(webChatSrc, /if \(m\[5\]\) return \{ space: m\[5\] \};/);
+  assert.match(webChatSrc, /const WEB_SPACE = \/\^web:space:\[a-z0-9\]\[a-z0-9-\]\{0,39\}\$\/;/);
+  assert.match(src("orchestrator.ts"), /if \(topic && "space" in topic\) \{\s*const repo = repoRegistry\.list\(\)\.find\(\(r\) => r\.alias === topic\.space\);\s*if \(!repo\) return "";/);
+  assert.match(src("orchestrator.ts"), /This message is in the app's chat for one project space: the \$\{repo\.alias\} repository[^\n]*That is from the service, not from Paul\./);
   assert.match(webChatSrc, /export function isWebConversation\(address: string\): boolean \{\s*return address === WEB_CONVERSATION \|\| WEB_THREAD\.test\(address\);\s*\}/);
   assert.equal((index.match(/web: true/g) ?? []).length, 1, "the app's route is the only caller that says a message is from the app");
   for (const listener of ["discord.ts", "telegram.ts", "whatsapp.ts", "voice-bridge.ts", "instinct-chat.ts", "instinct-bridge.ts", "device.ts"]) assert.doesNotMatch(src(listener), /\bweb: true\b|WEB_SENDER/, `${listener} cannot speak as the app`);

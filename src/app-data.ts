@@ -66,7 +66,7 @@ export interface AppSource {
   /** The open pull requests of the managed repositories, as last read from GitHub. Never waits. */
   openPulls?: () => { pulls: PullSummary[]; unread: string[]; loading: boolean };
   /** The app's threads that have anything in them, by address (src/web-chat.ts). */
-  threads?: () => Map<string, { count: number; lastAt: string }>;
+  threads?: () => Map<string, { count: number; lastAt: string; saidAt?: string }>;
   /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
   gates?: AppGates;
   /** Where traces are read from, for the tests. */
@@ -217,6 +217,10 @@ export interface AppSpace {
   active: number;
   /** Finished jobs there that the board shows as waiting on Paul. */
   waiting: number;
+  /** It is a repository ClearOps manages, so it has a chat of its own (`web:space:<id>`). */
+  managed: boolean;
+  /** When the service last said something in that chat, so the app can mark it as having something new. */
+  saidAt?: string;
 }
 
 /**
@@ -667,7 +671,8 @@ const isFinished = (j: Job) => j.status === "done" || j.status === "failed";
 
 /** The board: everything active, what waits on Paul, and the recently finished. */
 /** The spaces: every managed repository that has an address, then any other a card on the board belongs to. */
-function spacesOf(jobs: readonly AppJob[], pulls: ReadonlyArray<{ repo: string }>): AppSpace[] {
+function spacesOf(jobs: readonly AppJob[], pulls: ReadonlyArray<{ repo: string }>, threads?: Map<string, { saidAt?: string }>): AppSpace[] {
+  const managed = new Set(repoRegistry.aliases());
   const ids = repoRegistry.list().filter((r) => r.slug).map((r) => r.alias);
   for (const id of [...jobs.map((j) => j.repository), ...pulls.map((p) => p.repo)]) if (!ids.includes(id)) ids.push(id);
   return ids.map((id) => {
@@ -677,6 +682,8 @@ function spacesOf(jobs: readonly AppJob[], pulls: ReadonlyArray<{ repo: string }
       name: repoLabel(id),
       active: mine.filter((j) => j.status === "running" || j.status === "queued").length,
       waiting: mine.filter((j) => j.outcome?.state === "waiting").length,
+      managed: managed.has(id),
+      ...(threads?.get(`web:space:${id}`)?.saidAt ? { saidAt: threads.get(`web:space:${id}`)!.saidAt } : {}),
     };
   });
 }
@@ -734,7 +741,7 @@ export function appBoard(source: AppSource): AppBoard {
     paused: !!source.store.queueHold(),
     waiting: appWaiting(source.store, source.gates, now),
     jobs,
-    spaces: spacesOf(jobs, open.pulls),
+    spaces: spacesOf(jobs, open.pulls, threads),
     roster: rosterOf(jobs, spend.capReached),
     hasOlder: finished.length > recent.length,
     pulls: open.pulls.map((p) => {

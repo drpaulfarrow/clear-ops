@@ -48,11 +48,16 @@ export const WEB_SENDER = "web:paul";
 export const WEB_CONVERSATION = "web:main";
 /**
  * A thread about one job or one pull request, or (since 19 Nov 2026) a chat of Paul's own beside the
- * main one, under an id the service made when he opened it. Nothing else is a conversation of the app's.
+ * main one, under an id the service made when he opened it, or (since 20 Nov 2026) the chat of one
+ * project space, under its repository's alias. Nothing else is a conversation of the app's.
  */
-const WEB_THREAD = /^web:(?:job:([A-Za-z0-9_-]{1,64})|pull:([A-Za-z0-9._-]{1,64}):([1-9]\d{0,8})|chat:([a-f0-9]{8}))$/;
+const WEB_THREAD = /^web:(?:job:([A-Za-z0-9_-]{1,64})|pull:([A-Za-z0-9._-]{1,64}):([1-9]\d{0,8})|chat:([a-f0-9]{8})|space:([a-z0-9][a-z0-9-]{0,39}))$/;
 /** The address of one of Paul's own chats, by its id. */
 const WEB_OWN = /^web:chat:[a-f0-9]{8}$/;
+/** The address of a space's chat, by its repository's alias. */
+const WEB_SPACE = /^web:space:[a-z0-9][a-z0-9-]{0,39}$/;
+/** A conversation in full rather than a thread about one thing: one of his own chats, or a space's. */
+const whole = (thread: string): boolean => WEB_OWN.test(thread) || WEB_SPACE.test(thread);
 /** What the app sends as the thread of the first message of a chat that does not exist yet. */
 export const WEB_NEW_CHAT = "chat:new";
 /** How many chats of his own are kept. Opening one more drops the one quiet for longest, with everything in it. */
@@ -73,7 +78,7 @@ export interface OwnChat {
   createdAt: string;
 }
 /** What a thread is about. */
-export type WebTopic = { job: string } | { pull: { repo: string; number: number } };
+export type WebTopic = { job: string } | { pull: { repo: string; number: number } } | { space: string };
 
 /** Whether an address is one of the app's own conversations: the main one, or a well-formed thread. */
 export function isWebConversation(address: string): boolean {
@@ -85,6 +90,8 @@ export function webTopic(address: string): WebTopic | undefined {
   const m = WEB_THREAD.exec(address);
   // A chat of his own is about nothing in particular: only a job's or a pull request's thread has a topic.
   if (!m || m[4]) return undefined;
+  // A space's chat is about its repository as a whole.
+  if (m[5]) return { space: m[5] };
   return m[1] ? { job: m[1] } : { pull: { repo: m[2]!, number: Number(m[3]) } };
 }
 
@@ -94,8 +101,14 @@ export function webOwnChat(id: string): string | undefined {
   return WEB_OWN.test(address) ? address : undefined;
 }
 
+/** The address of a space's chat, or undefined when the alias is not the shape of one. Whether the space exists is the caller's to check. */
+export function webSpace(alias: string): string | undefined {
+  const address = `web:space:${alias}`;
+  return WEB_SPACE.test(address) ? address : undefined;
+}
+
 /** The address of the thread about a job or a pull request, or undefined when it does not name one. */
-export function webThread(topic: WebTopic): string | undefined {
+export function webThread(topic: Exclude<WebTopic, { space: string }>): string | undefined {
   const address = "job" in topic ? `web:job:${topic.job}` : `web:pull:${topic.pull.repo}:${topic.pull.number}`;
   return WEB_THREAD.test(address) ? address : undefined;
 }
@@ -399,16 +412,17 @@ export class WebChat {
   /** Each conversation keeps its newest messages, and only so many threads are kept at all. */
   private trim(thread: string | undefined): void {
     const before = this.messages;
-    // One of his own chats is a conversation in full and keeps as much as the main one.
-    const keep = thread && !WEB_OWN.test(thread) ? WEB_THREAD_KEEP : WEB_KEEP;
+    // One of his own chats, or a space's, is a conversation in full and keeps as much as the main one.
+    const keep = thread && !whole(thread) ? WEB_THREAD_KEEP : WEB_KEEP;
     const mine = this.in(thread);
     if (mine.length > keep) {
       const drop = new Set(mine.slice(0, mine.length - keep));
       this.messages = this.messages.filter((m) => !drop.has(m));
     }
     const last = new Map<string, number>();
-    // Only job and pull request threads are counted here: his own chats have their own limit (`open`).
-    this.messages.forEach((m, i) => m.thread && !WEB_OWN.test(m.thread) && last.set(m.thread, i));
+    // Only job and pull request threads are counted here: his own chats have their own limit (`open`),
+    // and there is one chat for each space and no more.
+    this.messages.forEach((m, i) => m.thread && !whole(m.thread) && last.set(m.thread, i));
     if (last.size > WEB_THREADS_MAX) {
       const gone = new Set([...last].sort((a, b) => a[1] - b[1]).slice(0, last.size - WEB_THREADS_MAX).map(([t]) => t));
       this.messages = this.messages.filter((m) => !m.thread || !gone.has(m.thread));

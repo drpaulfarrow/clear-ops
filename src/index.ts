@@ -59,7 +59,7 @@ import { repoLabel } from "./job-descriptions.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
-import { routeWeb, webChat as serviceWebChat, webFiles, WebFilesError, webOwnChat, webRefusal, webThread, WEB_BODY_LIMIT, WEB_COMMANDS, WEB_NEW_CHAT, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
+import { routeWeb, webChat as serviceWebChat, webFiles, WebFilesError, webOwnChat, webRefusal, webSpace, webThread, WEB_BODY_LIMIT, WEB_COMMANDS, WEB_NEW_CHAT, WEB_CODE_PLACEHOLDER, WEB_CONVERSATION, WEB_PREFIX, WEB_SENDER, WEB_TEXT_MAX, type WebChat } from "./web-chat.js";
 import { parseCodeCommand } from "./otp.js";
 import { APP_ASSETS_PATH, APP_CSP, appAsset, appShell, appSignInPage } from "./app-pages.js";
 import { defaultProbes, HealthProbes } from "./health.js";
@@ -859,7 +859,8 @@ export function buildApp(given: AppDeps) {
   /**
    * Which of the app's conversations a request means: the main one when it names none, or the thread of
    * a job that exists or of a pull request in a repository ClearOps manages ("job:<id>",
-   * "pull:<alias>:<number>"). Anything else is no conversation at all.
+   * "pull:<alias>:<number>"), one of his own chats, or the chat of a space ("space:<alias>"). Anything
+   * else is no conversation at all.
    */
   const appThread = (raw: unknown): string | undefined => {
     if (raw === undefined || raw === "") return WEB_CONVERSATION;
@@ -871,6 +872,9 @@ export function buildApp(given: AppDeps) {
     // One of Paul's own chats: only an id the transcript itself made and still keeps.
     const own = /^chat:([a-f0-9]{8})$/.exec(raw);
     if (own) return chat.chat(own[1]!) ? webOwnChat(own[1]!) : undefined;
+    // A space's chat: only for a repository ClearOps manages, by its own alias.
+    const space = /^space:([a-z0-9][a-z0-9-]{0,39})$/.exec(raw);
+    if (space) return repoRegistry.list().some((r) => r.alias === space[1]) ? webSpace(space[1]!) : undefined;
     return undefined;
   };
   app.get(`${APP_PATH}/api/chat`, (req, res) => {

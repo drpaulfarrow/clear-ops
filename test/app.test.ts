@@ -25,6 +25,7 @@ const { appBoard, appChat, appHistory, appJob, APP_HISTORY_PAGE } = await import
 const { webFiles, WebFilesError, WEB_FILES_MAX, WEB_FILES_BYTES } = await import("../src/web-chat.js");
 const { WEB_COMMANDS, WEB_PICTURE_BYTES } = await import("../src/web-chat.js");
 const { webOwnChat, WEB_NEW_CHAT, WEB_CHATS_MAX, WEB_CHAT_TITLE_MAX } = await import("../src/web-chat.js");
+const { webSpace } = await import("../src/web-chat.js");
 const { HELP } = await import("../src/orchestrator.js");
 const { WebChat, routeWeb, webRefusal, webThread, webTopic, isWebConversation, WEB_SENDER, WEB_CONVERSATION, WEB_APPROVAL_REFUSAL, WEB_CODE_REFUSAL, WEB_CODE_PLACEHOLDER, WEB_KEEP, WEB_THREAD_KEEP, WEB_THREADS_MAX, WEB_TEXT_MAX } = await import("../src/web-chat.js");
 const { isAllowed } = await import("../src/config.js");
@@ -1807,6 +1808,69 @@ test("a message in a pull request's thread tells the chief which pull request, i
   } finally {
     chiefSays = undefined;
   }
+});
+
+/* ---------- A space's own chat ---------- */
+
+test("a space's chat is addressed by its repository's alias, and is about that repository", () => {
+  assert.equal(webSpace("self"), "web:space:self");
+  assert.equal(webSpace("school-timetable"), "web:space:school-timetable");
+  for (const bad of ["", "Self", "-self", "a b", "a/b", "a:b", "self\n", "../x", "x".repeat(41)]) assert.equal(webSpace(bad), undefined, JSON.stringify(bad));
+  assert.equal(isWebConversation("web:space:self"), true);
+  assert.deepEqual(webTopic("web:space:doubleshift"), { space: "doubleshift" });
+  for (const bad of ["web:space:", "web:space:Self", "web:space:self:1", "web:space:self\n", "web:spaces:self", "web:space:a/b"]) {
+    assert.equal(isWebConversation(bad), false, JSON.stringify(bad));
+    assert.equal(webTopic(bad), undefined, JSON.stringify(bad));
+  }
+});
+
+test("a message in a space's chat tells the chief which repository, stays in that chat, and unlocks nothing", async () => {
+  const cookie = await session();
+  chiefSays = "On it.";
+  chiefAsked.length = 0;
+  const mainBefore = chat.view().messages.length;
+  try {
+    assert.equal((await postChat({ text: "What is open here?", thread: "space:self" }, cookie)).status, 202);
+    for (let i = 0; i < 100 && chat.view("web:space:self").messages.at(-1)?.from !== "clearops"; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(chiefAsked.length, 1);
+    assert.match(chiefAsked[0]!, /^This message is in the app's chat for one project space: the self repository \(drpaulfarrow\/clear-ops\)\. That is from the service, not from Paul\.\nUnless he says otherwise, what he asks for here is about that repository: a job started from this chat that works in a repository works in self\. He does not need to name it\./);
+    assert.match(chiefAsked[0]!, /What is open here\?/);
+    assert.deepEqual(chat.view("web:space:self").messages.map((m) => m.from), ["paul", "clearops"]);
+    assert.equal(chat.view().messages.length, mainBefore, "nothing of it is in the main conversation");
+    // The app reads it back by the same name, and the board says the service has spoken there.
+    const view = JSON.parse(await text(await get(`${APP_PATH}/api/chat?thread=space:self`, cookie))) as { messages: Array<{ from: string }> };
+    assert.deepEqual(view.messages.map((m) => m.from), ["paul", "clearops"]);
+    const board = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as { spaces: Array<{ id: string; managed: boolean; saidAt?: string }> };
+    const self = board.spaces.find((sp) => sp.id === "self")!;
+    assert.equal(self.managed, true);
+    assert.equal(self.saidAt, chat.view("web:space:self").messages.at(-1)!.at);
+    assert.equal(board.spaces.find((sp) => sp.id === "site")!.saidAt, undefined);
+
+    // A typed approval word is refused there exactly as in the main conversation, before any model.
+    assert.equal((await postChat({ text: "dns apply abc123", thread: "space:self" }, cookie)).status, 202);
+    assert.match(chat.view("web:space:self").messages.at(-1)!.text, /Typed approvals do not work in the app/);
+    assert.equal(chiefAsked.length, 1, "the approval word reached no model");
+
+    // Only a repository the service manages has a chat: any other name is no conversation at all.
+    for (const bad of ["space:nowhere", "space:Self", "space:self/x", "space:", "space:self:1"]) {
+      assert.equal((await postChat({ text: "hello", thread: bad }, cookie)).status, 404, bad);
+      assert.equal((await get(`${APP_PATH}/api/chat?thread=${encodeURIComponent(bad)}`, cookie)).status, 404, bad);
+    }
+    assert.equal(chiefAsked.length, 1);
+  } finally {
+    chiefSays = undefined;
+  }
+});
+
+test("a space's chat is a conversation in full: it keeps as much as the main one and is never let go as an old thread", () => {
+  const c = new WebChat();
+  const S = "web:space:self";
+  for (let i = 0; i < WEB_THREAD_KEEP + 30; i++) c.inbound(`s${i}`, S);
+  assert.equal(c.view(S).messages.length > 0, true);
+  assert.equal(c.threads().get(S)!.count, WEB_THREAD_KEEP + 30, "more than a job's thread would keep");
+  for (let i = 0; i < WEB_THREADS_MAX + 5; i++) c.inbound("hello", `web:job:j${i}`);
+  assert.equal(c.threads().has(S), true, "old job threads go first, and a space's chat is not one of them");
+  assert.equal([...c.threads().keys()].filter((k) => k.startsWith("web:job:")).length, WEB_THREADS_MAX);
 });
 
 test("a pull request that conflicts says so, so the app can offer to have it resolved", async () => {
