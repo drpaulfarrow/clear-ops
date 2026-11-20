@@ -57,6 +57,7 @@ import type { Attachment } from "./uploads.js";
 import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
 import { createSpace, ownSpaceAddress, removeSpace, SpaceError, updateSpace } from "./spaces.js";
+import { appSearch } from "./app-search.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
@@ -1129,6 +1130,11 @@ export function buildApp(given: AppDeps) {
     const detail = appJob(appSource(), String(req.params.id ?? ""));
     if (!detail) return void res.status(404).json({ error: "no such job" });
     res.json(detail);
+  });
+  // Search (src/app-search.ts): read-only, over what the app already shows, by plain words.
+  app.get(`${APP_PATH}/api/search`, (req, res) => {
+    appHeaders(res);
+    res.json(appSearch(appSource(), chat, req.query.q));
   });
 
   return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, startHealth, voice };

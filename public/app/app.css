@@ -432,3 +432,18 @@ a.rail-person:hover{background:var(--surface);color:var(--text)}
 .space-form .refused{font-size:13px;color:var(--bad-text)}
 .space-form-remove{align-self:flex-start;color:var(--bad-text);padding:0 4px;border:0;min-height:36px}
 @media (max-width:900px){.space-form-repo{min-height:44px}}
+/* Search: one box, and what it found in three lists. */
+.search-open{color:var(--muted);min-width:40px;justify-content:center}
+.search-open-text{display:none;font-size:13px}
+@media (min-width:1101px){.search-open{justify-content:flex-start;min-width:260px}.search-open-text{display:inline}}
+.search-box{width:100%;max-width:760px;min-height:48px;padding:0 16px;border-radius:14px;border:1px solid var(--line);background:var(--surface);color:var(--text);font:inherit;font-size:16px}
+.search-box:focus{outline:2px solid var(--accent-line);outline-offset:1px}
+.search-out{display:flex;flex-direction:column;gap:6px;max-width:760px}
+.found{font-size:13px;color:var(--text-2);overflow-wrap:anywhere;margin-top:2px}
+.found-icon{flex:none;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted)}
+mark{background:var(--accent-soft);color:var(--accent-text);border-radius:3px;padding:0 1px}
+.row-button{width:100%;border-left:0;border-right:0;border-bottom:0;background:none;text-align:left;font:inherit}
+.av-you{--hue:30;background:var(--over)}
+.av-you i{background:var(--muted)}
+.signout.in-rail{display:none}
+@media (max-width:640px){.signout.in-top:not(.always){display:none}.signout.in-rail{display:block;margin-top:auto;padding-top:8px;border-top:1px solid var(--line)}.signout.in-rail .rail-row{width:100%}}

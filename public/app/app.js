@@ -54,6 +54,7 @@ const ICONS = {
   doc: ["M7 3h7l5 5v13H7z", "M14 3v5h5", "M10 13h6M10 17h6"],
   down: ["m6 9 6 6 6-6"],
   menu: ["M4 7h16M4 12h16M4 17h16"],
+  search: ["M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z", "m20 20-3.6-3.6"],
 };
 function icon(name, size = 16, label) {
   const svg = document.createElementNS(SVG_NS, "svg");
@@ -175,6 +176,8 @@ const state = {
   pull: undefined,
   jobMissing: false,
   problem: undefined,
+  /** The search page: what is being looked for, what came back, and what went wrong. */
+  search: { q: "", data: undefined, loading: false, problem: undefined },
 };
 
 const route = () => {
@@ -182,6 +185,17 @@ const route = () => {
   const m = /^#\/job\/([A-Za-z0-9_-]{1,64})(\/report)?$/.exec(location.hash);
   if (m) return { name: "job", id: m[1], report: !!m[2] };
   if (location.hash === "#/spend") return { name: "spend" };
+  // The search page, with what is being looked for kept in the address so a reload or the back button keeps it.
+  const s = /^#\/search(?:\/(.*))?$/.exec(location.hash);
+  if (s) {
+    let q = "";
+    try {
+      q = decodeURIComponent(s[1] ?? "").slice(0, 80);
+    } catch {
+      q = "";
+    }
+    return { name: "search", q };
+  }
   const p = /^#\/pull\/([A-Za-z0-9._-]{1,64})\/([1-9]\d{0,8})$/.exec(location.hash);
   return p ? { name: "pull", repo: p[1], number: Number(p[2]) } : { name: "board" };
 };
@@ -341,6 +355,10 @@ function column(tone, title, cards, emptyText, extra) {
   );
 }
 
+/** The one form in the app: ending the session. In the header, and on a phone in the drawer, where there is room for it. */
+const signOut = (place) =>
+  h("form", { method: "post", action: "/app/sign-out", class: `signout ${place}` }, h("button", { class: place === "in-rail" ? "rail-row rail-do" : "btn quiet", type: "submit", "aria-label": "Sign out" }, icon("out", 16), h("span", { class: place === "in-rail" ? "rail-name" : "wide-only", "aria-hidden": "true" }, "Sign out")));
+
 function header(board) {
   const s = board?.spend;
   let spend = null;
@@ -379,10 +397,12 @@ function header(board) {
           h("button", { type: "button", "aria-pressed": String(layout() === "board"), onclick: () => setLayout("board") }, "Board"),
         )
       : null,
+    route().name === "search" ? null : h("a", { class: "pill search-open", href: "#/search", "aria-label": "Search jobs, reports and chats" }, icon("search", 16), h("span", { class: "search-open-text", "aria-hidden": "true" }, "Search jobs, reports and chats")),
     h("div", { class: "grow" }),
     spend,
     health,
-    h("form", { method: "post", action: "/app/sign-out" }, h("button", { class: "btn quiet", type: "submit", "aria-label": "Sign out" }, icon("out", 16), h("span", { class: "wide-only", "aria-hidden": "true" }, "Sign out"))),
+    // On a phone's board the drawer holds it, to leave room for the rest; on every other page it stays here.
+    signOut(route().name === "board" ? "in-top" : "in-top always"),
   );
 }
 
@@ -526,7 +546,73 @@ function rail(board) {
     return r.jobId ? h("a", { class: "rail-person", href: `#/job/${r.jobId}` }, kids) : h("div", { class: "rail-person" }, kids);
   };
   const shift = h("section", { "aria-label": "On shift" }, h("h2", { class: "rail-head" }, "On shift"), (board.roster ?? []).map(person));
-  return [spaces, shift];
+  return [spaces, shift, signOut("in-rail")];
+}
+
+/* ---------- Search ---------- */
+
+/** A line of text with the words that were searched for marked. Built as text and elements, never as markup. */
+function markedText(text, words) {
+  const low = text.toLowerCase();
+  const out = [];
+  let i = 0;
+  while (i < text.length) {
+    let at = -1;
+    let len = 0;
+    for (const w of words) {
+      const k = w ? low.indexOf(w, i) : -1;
+      if (k >= 0 && (at < 0 || k < at)) {
+        at = k;
+        len = w.length;
+      }
+    }
+    if (at < 0) {
+      out.push(text.slice(i));
+      break;
+    }
+    if (at > i) out.push(text.slice(i, at));
+    out.push(h("mark", {}, text.slice(at, at + len)));
+    i = at + len;
+  }
+  return out;
+}
+
+/** Opens the conversation a found message is in. It opens at the newest message, not at the one found. */
+function openWhere(w) {
+  if (w.in === "job") return void (location.hash = `#/job/${w.id}`);
+  if (w.in === "pull") return void (location.hash = `#/pull/${w.repo}/${w.number}`);
+  state.space = w.in === "space" ? w.id : "";
+  store("clearops.space", state.space);
+  if (w.in !== "space") {
+    state.own = w.in === "chat" ? w.id : "";
+    store("clearops.chat", state.own);
+  }
+  state.history = [];
+  state.historyNext = undefined;
+  state.chat = undefined;
+  state.chatRaw = "";
+  state.chatProblem = undefined;
+  stickNext = true;
+  if (layout() === "board") state.layout = "chat";
+  location.hash = "#/";
+  void chatTick();
+}
+
+function searchResults() {
+  const { q, data, loading, problem } = state.search;
+  if (problem) return [h("div", { class: "banner" }, problem)];
+  if (q.trim().length < 2) return [h("p", { class: "muted" }, "Type two letters or more. It looks through job titles and briefs, saved reports, and what has been said in the app's chats, including the names of files you sent. Every word you type has to be there.")];
+  if (!data) return [h("p", { class: "muted" }, loading ? "Searching." : "")];
+  const now = Date.now();
+  const words = data.words ?? [];
+  const more = (flag) => (flag ? h("div", { class: "more" }, "More match than are shown. Add a word to narrow it.") : null);
+  const group = (title, n, rows, flag) => (n ? h("section", { "aria-label": title }, h("h2", { class: "day" }, `${title} · ${n}${flag ? "+" : ""}`), h("div", { class: "rows" }, rows), more(flag)) : null);
+  const out = [
+    group("Jobs", data.jobs.length, data.jobs.map((j) => h("a", { class: "row", href: `#/job/${j.id}` }, avatar(j.kind, "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, markedText(j.title, words)), h("div", { class: "card-sub" }, `${NAMES[j.kind] ? `${NAMES[j.kind]} · ` : ""}${j.who} · ${j.repositoryName} · ${j.status === "done" ? "finished" : j.status} ${ago(j.at, now) ?? ""}`), j.snippet ? h("div", { class: "found" }, markedText(j.snippet, words)) : null))), data.more.jobs),
+    group("Reports", data.reports.length, data.reports.map((r) => h("a", { class: "row", href: `#/job/${r.id}/report` }, h("span", { class: "found-icon" }, icon("doc", 18)), h("div", { class: "row-main" }, h("div", { class: "card-title" }, r.title), h("div", { class: "card-sub" }, `Report · ${ago(r.at, now) ?? ""}`), h("div", { class: "found" }, markedText(r.snippet, words))))), data.more.reports),
+    group("Chats", data.messages.length, data.messages.map((m) => h("button", { class: "row row-button", type: "button", onclick: () => openWhere(m.where) }, m.from === "paul" ? h("span", { class: "av sm av-you", "aria-hidden": "true" }, h("i"), h("i")) : avatar("chief", "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, m.title), h("div", { class: "card-sub" }, `${m.from === "paul" ? "You" : CHIEF} · ${ago(m.at, now) ?? ""}`), h("div", { class: "found" }, markedText(m.snippet, words))))), data.more.messages),
+  ].filter(Boolean);
+  return out.length ? out : [h("div", { class: "empty" }, `Nothing found for "${data.q}".`)];
 }
 
 /* ---------- Board views ---------- */
@@ -1825,6 +1911,44 @@ const headerEl = h("div", {});
 const bodyEl = h("div", { class: "body" });
 const shellEl = h("div", { class: "shell" }, headerEl, bodyEl);
 
+// The search page is one element kept between drawings, so its box is never rebuilt under his typing.
+const searchInput = h("input", { id: "search", class: "search-box", type: "search", maxlength: "80", autocomplete: "off", enterkeyhint: "search", placeholder: "Search jobs, reports and chats", "aria-label": "Search jobs, reports and chats" });
+const searchOut = h("div", { class: "search-out", "aria-live": "polite" });
+const searchEl = h("main", { class: "page search" }, h("div", { class: "job-head" }, h("a", { class: "btn", href: "#/" }, icon("back"), "Back"), h("div", { class: "job-id" }, h("div", { class: "job-title" }, h("h1", {}, "Search")))), searchInput, searchOut);
+const drawSearch = () => searchOut.replaceChildren(...searchResults());
+let searchTimer;
+let searchAsked = 0;
+async function runSearch(q) {
+  const mine = ++searchAsked;
+  state.search.q = q;
+  state.search.problem = undefined;
+  if (q.trim().length < 2) {
+    state.search.data = undefined;
+    state.search.loading = false;
+    return void drawSearch();
+  }
+  state.search.loading = true;
+  drawSearch();
+  try {
+    const text = await getJson(`/search?q=${encodeURIComponent(q.trim())}`);
+    // Only the answer to what is in the box now is shown.
+    if (mine !== searchAsked) return;
+    state.search.data = text ? JSON.parse(text) : undefined;
+  } catch (err) {
+    if (mine !== searchAsked || err.message === "signed out") return;
+    state.search.problem = "The search could not be run just now.";
+  }
+  state.search.loading = false;
+  drawSearch();
+}
+searchInput.addEventListener("input", () => {
+  const q = searchInput.value;
+  // Kept in the address without a new entry in the history for every letter.
+  history.replaceState(null, "", q.trim() ? `#/search/${encodeURIComponent(q)}` : "#/search");
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => void runSearch(q), 250);
+});
+
 function grow() {
   input.style.height = "auto";
   input.style.height = `${Math.min(160, input.scrollHeight)}px`;
@@ -1910,7 +2034,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.ra
 
 function draw() {
   const r = route();
-  document.title = r.name === "spend" ? "Spend · ClearOps" : r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
+  document.title = r.name === "search" ? "Search · ClearOps" : r.name === "spend" ? "Spend · ClearOps" : r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
   if (!shellEl.isConnected) root.replaceChildren(shellEl);
   headerEl.replaceChildren(header(state.board));
   if (r.name === "job" || r.name === "pull") {
@@ -1932,6 +2056,19 @@ function draw() {
       threadInput.focus({ preventScroll: true });
       threadInput.setSelectionRange(caret[0], caret[1]);
     }
+    return;
+  }
+  if (r.name === "search") {
+    shellEl.className = "shell";
+    if (searchEl.parentNode !== bodyEl) {
+      bodyEl.replaceChildren(...[searchEl]);
+      if (searchInput.value !== r.q || state.search.q !== r.q) {
+        searchInput.value = r.q;
+        void runSearch(r.q);
+      }
+      searchInput.focus();
+    }
+    drawSearch();
     return;
   }
   if (r.name === "spend") {
