@@ -132,6 +132,11 @@ const state = {
   own: /^[a-f0-9]{8}$/.test(store("clearops.chat") ?? "") ? store("clearops.chat") : "",
   /** Paul's own chats as last heard, for the list. */
   chats: [],
+  mainSaidAt: undefined,
+  /** Renaming or deleting the chat on screen: which, whether it is being sent, and what went wrong. */
+  chatEdit: undefined,
+  chatBusy: false,
+  chatSaid: undefined,
   chatsOpen: false,
   /** The job whose report is shown in full on its page. */
   reportOpen: undefined,
@@ -1445,11 +1450,97 @@ function chatItems() {
 /* ---------- Chats: the main conversation, and others of Paul's own beside it ---------- */
 
 const chatBarEl = h("div", { class: "chat-bar" });
+
+/**
+ * When each conversation was last looked at, kept in this browser only. A conversation the service has
+ * spoken in since then is marked as having something new. The first sight of one counts as looked at.
+ */
+const seen = (() => {
+  try {
+    const kept = JSON.parse(store("clearops.seen") ?? "{}");
+    return kept && typeof kept === "object" ? kept : {};
+  } catch {
+    return {};
+  }
+})();
+const saidAtOf = (own) => (own ? state.chats.find((c) => c.id === own)?.saidAt : state.mainSaidAt);
+function keepSeen(key, at) {
+  seen[key] = at;
+  // Chats that are gone are forgotten here too.
+  for (const k of Object.keys(seen)) if (k !== "main" && !state.chats.some((c) => c.id === k)) delete seen[k];
+  store("clearops.seen", JSON.stringify(seen));
+}
+function hasNew(own) {
+  const at = saidAtOf(own);
+  if (!at || own === state.own) return false;
+  const key = own || "main";
+  if (!seen[key]) keepSeen(key, at);
+  return at > seen[key];
+}
+/** The conversation on screen has been looked at up to what the service last said in it. */
+function lookedAt() {
+  if (state.own === "new" || document.hidden) return;
+  const at = saidAtOf(state.own);
+  const key = state.own || "main";
+  if (at && seen[key] !== at) keepSeen(key, at);
+}
+
+/** Renames or removes the chat being shown: his own tap, sent as this site's own JSON like every other change. */
+async function manageChat(action, title) {
+  const id = state.own;
+  state.chatBusy = true;
+  drawChatBar();
+  try {
+    const res = await postJson("/chats", { id, action, ...(action === "rename" ? { title } : {}) });
+    if (!res.ok) throw new Error(typeof res.data.error === "string" ? res.data.error : "That did not work.");
+    const said = res.data;
+    state.chatEdit = undefined;
+    state.chatSaid = undefined;
+    if (action === "rename") state.chats = state.chats.map((c) => (c.id === id ? { ...c, title: said.title ?? c.title } : c));
+    else {
+      state.chats = state.chats.filter((c) => c.id !== id);
+      state.chatBusy = false;
+      return showChat("");
+    }
+  } catch (err) {
+    state.chatSaid = err instanceof Error ? err.message : "That did not work.";
+  }
+  state.chatBusy = false;
+  drawChatBar();
+}
+
+/** What can be done to the chat being shown, under the list: nothing for Main, which is always there. */
+function chatManage() {
+  const mine = state.chats.find((c) => c.id === state.own);
+  if (!mine) return null;
+  const set = (edit) => () => {
+    state.chatEdit = edit;
+    state.chatSaid = undefined;
+    drawChatBar();
+    if (edit === "rename") chatBarEl.querySelector(".chat-name")?.select();
+  };
+  if (state.chatEdit === "rename") {
+    const name = h("input", { class: "chat-name pick", type: "text", value: mine.title, maxlength: "48", "aria-label": "Name of this chat", autocomplete: "off" });
+    const save = () => name.value.trim() && void manageChat("rename", name.value);
+    name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") save();
+      if (e.key === "Escape") set(undefined)();
+    });
+    return h("div", { class: "chat-manage" }, name, h("button", { class: "btn primary", type: "button", disabled: state.chatBusy, onclick: save }, "Save"), h("button", { class: "btn quiet", type: "button", onclick: set(undefined) }, "Cancel"), state.chatSaid ? h("p", { class: "file-note" }, state.chatSaid) : null);
+  }
+  if (state.chatEdit === "delete") {
+    // Removing a chat cannot be undone, so it takes a second, deliberate tap.
+    return h("div", { class: "chat-manage" }, h("p", { class: "chat-manage-ask" }, `Delete "${mine.title}"? Its messages go for good. Jobs started in it are kept.`), h("button", { class: "btn danger", type: "button", disabled: state.chatBusy, onclick: () => void manageChat("delete") }, "Delete it"), h("button", { class: "btn quiet", type: "button", onclick: set(undefined) }, "Keep it"), state.chatSaid ? h("p", { class: "file-note" }, state.chatSaid) : null);
+  }
+  return h("div", { class: "chat-manage" }, h("span", { class: "muted chat-manage-label" }, "This chat"), h("button", { class: "btn quiet", type: "button", onclick: set("rename") }, "Rename"), h("button", { class: "btn quiet", type: "button", onclick: set("delete") }, "Delete"));
+}
 const ownTitle = () => (state.own === "new" ? "New chat" : state.own ? state.chats.find((c) => c.id === state.own)?.title ?? "Chat" : "Main");
 
 /** Shows another conversation. Each is its own with the chief: what is said in one is not carried into another. */
 function showChat(own) {
   state.chatsOpen = false;
+  state.chatEdit = undefined;
+  state.chatSaid = undefined;
   if (own !== state.own) {
     state.own = own;
     store("clearops.chat", own === "new" ? "" : own);
@@ -1463,13 +1554,15 @@ function showChat(own) {
   if (!narrow.matches) input.focus();
 }
 
-function drawChatBar() {
-  const now = Date.now();
+function drawChatBar(now = Date.now(), fromRefresh = false) {
+  // A routine refresh leaves the bar alone while a chat is being renamed or its deletion confirmed:
+  // rebuilding it would wipe what he is typing or move a button from under his finger.
+  if (fromRefresh && state.chatEdit && chatBarEl.querySelector(".chat-manage")) return;
   const row = (own, title, note) =>
     h(
       "button",
       { class: "chat-row", type: "button", role: "option", "aria-selected": own === state.own ? "true" : "false", onclick: () => showChat(own) },
-      h("span", { class: "chat-row-title" }, title),
+      h("span", { class: "chat-row-title" }, hasNew(own) ? h("span", { class: "new-dot", role: "img", "aria-label": "Something new" }) : null, title),
       note ? h("span", { class: "muted num" }, note) : null,
     );
   // replaceChildren writes anything that is not an element as text, the word "null" included, so the
@@ -1481,8 +1574,10 @@ function drawChatBar() {
       { class: "chat-bar-top" },
       h(
         "button",
-        { class: "chat-pick", type: "button", "aria-haspopup": "listbox", "aria-expanded": state.chatsOpen ? "true" : "false", "aria-label": `Chat: ${ownTitle()}. Choose another`, onclick: () => { state.chatsOpen = !state.chatsOpen; drawChatBar(); } },
+        { class: "chat-pick", type: "button", "aria-haspopup": "listbox", "aria-expanded": state.chatsOpen ? "true" : "false", "aria-label": `Chat: ${ownTitle()}. Choose another`, onclick: () => { state.chatsOpen = !state.chatsOpen; state.chatEdit = undefined; drawChatBar(); } },
         h("span", { class: "chat-pick-title" }, ownTitle()),
+        // Something new in a conversation that is not the one on screen.
+        ["", ...state.chats.map((c) => c.id)].some(hasNew) ? h("span", { class: "new-dot", role: "img", "aria-label": "Something new in another chat" }) : null,
         icon("down", 16),
       ),
       h("button", { class: "btn quiet chat-new", type: "button", disabled: state.own === "new", onclick: () => showChat("new") }, icon("plus", 16), h("span", {}, "New chat")),
@@ -1494,6 +1589,7 @@ function drawChatBar() {
           row("", "Main", "where jobs and decisions are reported"),
           state.chats.map((c) => row(c.id, c.title, `${c.count} ${c.count === 1 ? "message" : "messages"} · ${ago(c.lastAt, now)}`)),
           state.chats.length ? null : h("p", { class: "muted chat-list-note" }, `No other chats yet. New chat starts one, and ${CHIEF} keeps each apart.`),
+          chatManage(),
         )
       : null,
     ].filter(Boolean),
@@ -1603,7 +1699,8 @@ async function send(raw) {
 
 let stickNext = true;
 function drawChat() {
-  drawChatBar();
+  lookedAt();
+  drawChatBar(Date.now(), true);
   const stick = stickNext || logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120;
   logEl.replaceChildren(...chatItems());
   if (stick) logEl.scrollTop = logEl.scrollHeight;
@@ -1767,6 +1864,7 @@ async function refreshChat() {
       state.chatRaw = text;
       state.chat = JSON.parse(text);
       state.chats = state.chat.chats ?? [];
+      state.mainSaidAt = state.chat.mainSaidAt;
     }
     return changed;
   } catch (err) {

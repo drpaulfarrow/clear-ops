@@ -1201,10 +1201,20 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
   // Two routes under /app are not a GET: the one that ends the session, and Paul's own message to the
   // chief (slice 2). Nothing under /app approves, starts, stops or edits anything directly.
-  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`", "`${APP_PATH}/api/settings`"]);
-  // Every one of the five that does something is taken from this site's own script only.
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`", "`${APP_PATH}/api/chats`", "`${APP_PATH}/api/settings`"]);
+  // Every one of the six that does something is taken from this site's own script only. The sixth
+  // (20 Nov 2026) renames or removes one of Paul's own chats and touches nothing else.
   assert.match(routes, /const ownScript = \(req: express\.Request\): boolean => \{[\s\S]*?return !!req\.is\("application\/json"\) && \(origin === undefined \|\| origin === new URL\(config\.publicUrl\)\.origin\) && \(site === undefined \|\| site === "same-origin"\);/);
-  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 5);
+  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 6);
+  const manage = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/chats`"), routes.indexOf("app.post(`${APP_PATH}/api/settings`"));
+  // It names a chat only by an id the transcript keeps, checked after the same-site check and before
+  // anything is done; it can rename and remove and nothing else; and no address, path or conversation
+  // comes from the request. Main, a job's thread and a pull request's thread cannot be named here at all.
+  assert.match(manage, /if \(!ownScript\(req\)\) return void res\.status\(403\)[^\n]*\n[\s\S]*?const address = chat\.chat\(id\) \? webOwnChat\(id\) : undefined;\s*if \(!address\) return void res\.status\(404\)/);
+  assert.deepEqual([...manage.matchAll(/body\.action === "([a-z]+)"/g)].map((m) => m[1]), ["rename", "delete"]);
+  assert.deepEqual([...manage.matchAll(/\bchat\.([a-zA-Z]+)\(/g)].map((m) => m[1]), ["chat", "rename", "close"]);
+  assert.doesNotMatch(manage, /appThread|webThread|orchestrator|\.handle\(|jobs\.|readFileSync|path\.join/);
+  assert.match(manage, /chat\.close\(id\);\s*deps\.store\.clearSession\(address\);/, "removing a chat forgets the chief's side of it, and only its own");
   // That message is taken from this site's own script only, is refused before it is kept when it is an
   // approval word, is never kept when it is a one-time code, and reaches the orchestrator as the app's
   // own sender with the flag no channel listener sets.
