@@ -115,7 +115,10 @@ button{font:inherit;color:inherit;cursor:pointer}
 .chat-card{padding-left:44px}
 .chat-empty{margin:auto 0;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;color:var(--muted);padding:40px 0}
 .chat-empty p{max-width:34ch;font-size:15px}
-.working{display:flex;align-items:center;gap:10px;padding-left:44px;color:var(--run-text);font-family:var(--mono);font-size:12.5px}
+.working{display:flex;align-items:center;gap:12px;color:var(--run-text);font-family:var(--mono);font-size:12.5px}
+/* The chief's own face where its messages have it, breathing while it works. */
+.av.busy{animation:co-breathe 1.6s ease-in-out infinite}
+@keyframes co-breathe{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.55;transform:scale(.92)}}
 .composer-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8px 24px 16px}
 .composer-wrap>*{width:100%;max-width:760px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}

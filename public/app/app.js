@@ -1226,7 +1226,7 @@ function threadItems() {
   if (!stream.length) out.push(h("p", { class: "muted" }, `Nothing said here yet. What you write goes to ${CHIEF} with this attached, so there is no need to say what it is about.`));
   const live = t.view.messages.find((m) => m.live);
   const unanswered = t.view.messages.filter((m) => !m.live).at(-1)?.from === "paul";
-  if (live || t.view.typing || unanswered) out.push(h("div", { class: "working", role: "status" }, h("span", { class: "dot live" }), h("span", {}, live ? live.text : `${CHIEF} is working on it`)));
+  if (live || t.view.typing || unanswered) out.push(h("div", { class: "working", role: "status" }, avatar("chief", "busy"), h("span", {}, live ? live.text : `${CHIEF} is working on it`)));
   if (t.problem) out.push(h("div", { class: "banner" }, h("b", {}, "Not sent or not up to date. "), t.problem));
   return out;
 }
@@ -1541,7 +1541,7 @@ function chatItems() {
   const live = chat.messages.find((m) => m.live);
   // His message is in and nothing has come back yet: say so, whether or not the service has signalled it.
   const unanswered = chat.messages.filter((m) => !m.live).at(-1)?.from === "paul";
-  if (live || chat.typing || unanswered) out.push(h("div", { class: "working", role: "status" }, h("span", { class: "dot live" }), h("span", {}, live ? live.text : `${CHIEF} is working on it`)));
+  if (live || chat.typing || unanswered) out.push(h("div", { class: "working", role: "status" }, avatar("chief", "busy"), h("span", {}, live ? live.text : `${CHIEF} is working on it`)));
   if (state.chatProblem) out.push(h("div", { class: "banner" }, h("b", {}, "Not sent or not up to date. "), state.chatProblem));
   return out;
 }
