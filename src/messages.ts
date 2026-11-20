@@ -31,6 +31,20 @@ export const CHIEF_VOICE = `Your voice. You are ${AGENT_NAMES.chief}, and in con
 export const reportPointer = (jobId: string): string => `Full report: show job ${jobId}.`;
 export const REPORT_POINTER = /\s*Full report: show job ([A-Za-z0-9_-]{1,64})\.$/;
 
+/**
+ * The one line a run leaves when the Agent SDK stopped it before it gave an answer (src/agents.ts). It
+ * is not a report. Until 20 Nov 2026 a job that ran out of turns was recorded as done with this line as
+ * its whole output, so older jobs still hold it; the app says plainly that those wrote nothing.
+ */
+const STOPPED_EARLY = /^The agent stopped early \(([a-z_]+)\)\.$/;
+const STOPPED_EARLY_SENTENCE = /The agent stopped early \(([a-z_]+)\)\./g;
+/** Why a run stopped early, when its text is only the line saying so; undefined for anything else. */
+export const stoppedEarly = (text: string | undefined): string | undefined => STOPPED_EARLY.exec((text ?? "").trim())?.[1];
+/** The same in plain words, for Paul. */
+export const stoppedEarlyWords = (reason: string): string => (reason === "error_max_turns" ? "It ran out of turns before writing a report." : "It was stopped before writing a report.");
+/** A message with that line said in plain words wherever it appears. */
+export const plainStop = (text: string): string => text.replace(STOPPED_EARLY_SENTENCE, (_m, reason: string) => stoppedEarlyWords(reason));
+
 export const MESSAGE_OPEN = "<message_to_paul>";
 export const MESSAGE_CLOSE = "</message_to_paul>";
 

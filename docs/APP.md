@@ -180,6 +180,7 @@ Paul's ask on 20 Nov 2026: when a job makes a document, it should come up in the
 
 - **The finished message links to the report.** On every channel a finished job's message ends "Full report: show job <id>." (`reportPointer` in `src/messages.ts`). The app reads that sentence back and shows an "Open the report" button in its place, for a job the store holds. The transcript keeps the sentence as sent.
 - **The link opens the report in full**: the job's page with the report expanded and scrolled to (`#/job/<id>/report`).
+- **A link only where there is something to read.** A job recorded as done whose whole output is the line saying the run was stopped (one that ran out of turns before 20 Nov 2026) wrote no report. Its message says "No report was written" and points at the job, its card says it did not do what was asked, and its page says why where the report would be. The SDK's own wording never reaches him. A job whose output is withheld or gone keeps the sentence as it was sent.
 - **The report is first on the job's page**, directly under the figures. It was last, below the thread and a long trace, where a phone hid it. It starts short so the rest of the page stays within reach, with "Read it all" to open it.
 
 ## Still to come
