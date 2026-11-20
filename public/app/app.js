@@ -53,6 +53,7 @@ const ICONS = {
   plus: ["M12 5v14M5 12h14"],
   doc: ["M7 3h7l5 5v13H7z", "M14 3v5h5", "M10 13h6M10 17h6"],
   down: ["m6 9 6 6 6-6"],
+  menu: ["M4 7h16M4 12h16M4 17h16"],
 };
 function icon(name, size = 16, label) {
   const svg = document.createElementNS(SVG_NS, "svg");
@@ -138,6 +139,10 @@ const state = {
   chatBusy: false,
   chatSaid: undefined,
   chatsOpen: false,
+  /** The space the board is narrowed to: a repository's alias, or "" for all of them. */
+  space: /^[A-Za-z0-9._-]{1,64}$/.test(store("clearops.space") ?? "") ? store("clearops.space") : "",
+  /** On a phone the rail is a drawer: whether it is open. */
+  railOpen: false,
   /** The job whose report is shown in full on its page. */
   reportOpen: undefined,
   /** The job whose report a link asked for, and the one already scrolled to, so each happens once per visit. */
@@ -361,13 +366,14 @@ function header(board) {
   return h(
     "header",
     { class: "top" },
-    h("a", { class: "brand", href: "#/" }, h("span", { class: "mark", "aria-hidden": "true" }, h("i"), h("i")), "ClearOps"),
+    route().name === "board" && narrow.matches ? h("button", { class: "btn quiet rail-open", type: "button", "aria-expanded": String(state.railOpen), "aria-controls": "rail", "aria-label": "Spaces and who is on shift", onclick: () => setRail(!state.railOpen) }, icon("menu", 18)) : null,
+    h("a", { class: "brand", href: "#/", "aria-label": "ClearOps" }, h("span", { class: "mark", "aria-hidden": "true" }, h("i"), h("i")), h("span", { class: "brand-name", "aria-hidden": "true" }, "ClearOps")),
     route().name === "board"
       ? h(
           "div",
           { class: "seg", role: "group", "aria-label": "What to show" },
           h("button", { type: "button", "aria-pressed": String(layout() === "chat"), onclick: () => setLayout("chat") }, "Chat"),
-          narrow.matches ? null : h("button", { type: "button", "aria-pressed": String(layout() === "split"), onclick: () => setLayout("split") }, "Both"),
+          roomy.matches ? h("button", { type: "button", "aria-pressed": String(layout() === "split"), onclick: () => setLayout("split") }, "Both") : null,
           h("button", { type: "button", "aria-pressed": String(layout() === "board"), onclick: () => setLayout("board") }, "Board"),
         )
       : null,
@@ -376,6 +382,55 @@ function header(board) {
     health,
     h("form", { method: "post", action: "/app/sign-out" }, h("button", { class: "btn quiet", type: "submit", "aria-label": "Sign out" }, icon("out", 16), h("span", { class: "wide-only", "aria-hidden": "true" }, "Sign out"))),
   );
+}
+
+/* ---------- The rail: spaces, and who is on shift ---------- */
+
+/** The space the board is narrowed to, as the board last listed it; undefined for all of them. */
+const spaceOf = () => (state.space ? (state.board?.spaces ?? []).find((s) => s.id === state.space) : undefined);
+
+/** The board with only one space's jobs and pull requests. What waits on Paul's decision is never narrowed away. */
+const scoped = (board) => (spaceOf() ? { ...board, jobs: board.jobs.filter((j) => j.repository === state.space), pulls: (board.pulls ?? []).filter((p) => p.repo === state.space) } : board);
+
+function setRail(open) {
+  state.railOpen = open;
+  draw();
+  if (open) railEl.querySelector("[aria-current='true']")?.focus({ preventScroll: true });
+}
+
+/**
+ * Narrows the board to one space, or back to all of them. Until a space has a chat of its own the
+ * board is all that changes, so choosing one from the chat brings the board into view.
+ */
+function setSpace(id) {
+  state.space = id;
+  store("clearops.space", id);
+  state.history = [];
+  state.historyNext = undefined;
+  state.railOpen = false;
+  if (id && layout() === "chat") state.layout = "board";
+  draw();
+}
+
+function rail(board) {
+  if (!board) return [];
+  const count = (waiting, active) => (waiting ? h("span", { class: "rail-count wait" }, `${waiting} waiting`) : active ? h("span", { class: "rail-count", "aria-label": `${active} active` }, String(active)) : null);
+  const row = (id, name, waiting, active) => h("button", { class: "rail-row", type: "button", "aria-current": String(state.space === id || (!id && !spaceOf())), onclick: () => setSpace(id) }, h("span", { class: "rail-name" }, name), count(waiting, active));
+  const sum = (key) => board.spaces.reduce((n, s) => n + s[key], 0);
+  const spaces = h(
+    "section",
+    { "aria-label": "Spaces" },
+    h("h2", { class: "rail-head" }, "Spaces"),
+    row("", "All spaces", board.waiting.length + sum("waiting"), sum("active")),
+    board.spaces.map((s) => row(s.id, s.name, s.waiting, s.active)),
+  );
+  const person = (r) => {
+    const title = h("div", { class: "rail-who" }, h("b", {}, r.name ?? r.role.charAt(0).toUpperCase() + r.role.slice(1)), r.name ? h("span", { class: "muted" }, ` ${r.role}`) : null);
+    const kids = [avatar(r.kind, "sm"), h("div", { class: "rail-main" }, title, h("div", { class: `rail-line ${r.state}` }, r.state === "working" ? h("i", { class: "live-dot", "aria-hidden": "true" }) : null, r.line))];
+    return r.jobId ? h("a", { class: "rail-person", href: `#/job/${r.jobId}` }, kids) : h("div", { class: "rail-person" }, kids);
+  };
+  const shift = h("section", { "aria-label": "On shift" }, h("h2", { class: "rail-head" }, "On shift"), (board.roster ?? []).map(person));
+  return [spaces, shift];
 }
 
 /* ---------- Board views ---------- */
@@ -465,8 +520,8 @@ function spaceView(board, now) {
 }
 
 function boardPage() {
-  const board = state.board;
-  if (!board) return h("main", { class: "page" }, h("p", { class: "muted" }, state.problem ?? "Loading the board."));
+  if (!state.board) return h("main", { class: "page" }, h("p", { class: "muted" }, state.problem ?? "Loading the board."));
+  const board = scoped(state.board);
   const now = Date.parse(board.generatedAt);
   const view = state.view === "timeline" ? timelineView(board, now) : state.view === "space" ? spaceView(board, now) : statusView(board, now);
   return h(
@@ -475,7 +530,8 @@ function boardPage() {
     h(
       "div",
       { class: "page-head" },
-      h("h1", {}, "Board"),
+      h("h1", {}, spaceOf() ? `Board · ${spaceOf().name}` : "Board"),
+      spaceOf() ? h("button", { class: "btn", type: "button", onclick: () => setSpace("") }, "Show all spaces") : null,
       h(
         "div",
         { class: "seg", role: "group", "aria-label": "Board view" },
@@ -1390,8 +1446,8 @@ function jobPage() {
 
 /** The board beside the chat: the same jobs, stacked, with the newest few finished. */
 function besideBoard() {
-  const board = state.board;
-  if (!board) return [h("p", { class: "muted" }, state.problem ?? "Loading the board.")];
+  if (!state.board) return [h("p", { class: "muted" }, state.problem ?? "Loading the board.")];
+  const board = scoped(state.board);
   const now = Date.parse(board.generatedAt);
   const by = (which) => board.jobs.filter((j) => pile(j) === which);
   const few = (jobs) => ({ cards: jobs.slice(0, DONE_SHOWN_BESIDE).map((j) => jobCard(j, now)), extra: { hidden: Math.max(0, jobs.length - DONE_SHOWN_BESIDE), node: null } });
@@ -1399,7 +1455,7 @@ function besideBoard() {
   const open = few(by("unconfirmed"));
   const not = few(by("not_met"));
   return [
-    h("div", { class: "page-head" }, h("h2", { class: "pane-title" }, "Board"), h("button", { class: "btn", type: "button", onclick: () => setLayout("board") }, "Open the board")),
+    h("div", { class: "page-head" }, h("h2", { class: "pane-title" }, spaceOf() ? `Board · ${spaceOf().name}` : "Board"), h("button", { class: "btn", type: "button", onclick: () => setLayout("board") }, "Open the board")),
     noticeBar(),
     board.paused ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "The queues are held.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Resume")) : null,
     board.spend.capReached ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Today's cap is reached.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
@@ -1653,7 +1709,10 @@ const chatEl = h(
     ),
   ),
 );
-const homeEl = h("div", { class: "home" }, chatEl, boardEl, fullBoardEl);
+const railEl = h("nav", { class: "rail", id: "rail", "aria-label": "Spaces and who is on shift" });
+// Behind the rail when it is a drawer: a tap outside it closes it.
+const scrimEl = h("button", { class: "scrim", type: "button", tabindex: "-1", "aria-label": "Close", onclick: () => setRail(false) });
+const homeEl = h("div", { class: "home" }, railEl, scrimEl, chatEl, boardEl, fullBoardEl);
 const headerEl = h("div", {});
 const bodyEl = h("div", { class: "body" });
 const shellEl = h("div", { class: "shell" }, headerEl, bodyEl);
@@ -1734,8 +1793,12 @@ function drawChat() {
 
 const narrow = window.matchMedia("(max-width: 900px)");
 /** On a phone there is no room for both, so "both" shows the chat. */
-const layout = () => (narrow.matches && state.layout === "split" ? "chat" : state.layout);
-narrow.addEventListener("change", () => draw());
+// Beside the rail there is room for the chat and the board together only on a wide screen.
+const roomy = window.matchMedia("(min-width: 1181px)");
+const layout = () => (!roomy.matches && state.layout === "split" ? "chat" : state.layout);
+narrow.addEventListener("change", () => { state.railOpen = false; draw(); });
+roomy.addEventListener("change", () => draw());
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.railOpen) setRail(false); });
 
 function draw() {
   const r = route();
@@ -1773,7 +1836,8 @@ function draw() {
   }
   const mode = layout();
   shellEl.className = `shell${mode === "board" ? "" : " fixed"}`;
-  homeEl.className = `home show-${mode}`;
+  homeEl.className = `home show-${mode}${state.railOpen && narrow.matches ? " rail-open" : ""}`;
+  railEl.replaceChildren(...rail(state.board));
   if (homeEl.parentNode !== bodyEl) {
     bodyEl.replaceChildren(homeEl);
     stickNext = true;
@@ -1805,10 +1869,10 @@ async function loadOlder() {
   state.historyLoading = true;
   draw();
   try {
-    const finished = state.board.jobs.filter((j) => j.status === "done" || j.status === "failed");
+    const finished = scoped(state.board).jobs.filter((j) => j.status === "done" || j.status === "failed");
     const oldest = finished.length ? finished[finished.length - 1].finishedAt : undefined;
     const before = state.historyNext ?? oldest ?? state.board.generatedAt;
-    const text = await getJson(`/history?before=${encodeURIComponent(before)}`);
+    const text = await getJson(`/history?before=${encodeURIComponent(before)}${spaceOf() ? `&space=${encodeURIComponent(state.space)}` : ""}`);
     const page = JSON.parse(text);
     state.history.push(...page.jobs);
     state.historyNext = page.next;
@@ -1830,6 +1894,8 @@ async function refreshBoard() {
       state.board = JSON.parse(text);
       // A finished page of history stays finished; only whether more exists is carried over.
       if (state.history.length && state.historyNext === undefined) state.board.hasOlder = false;
+      // A space that is no longer listed is not one the board can be narrowed to.
+      if (state.space && !(state.board.spaces ?? []).some((sp) => sp.id === state.space)) { state.space = ""; state.history = []; state.historyNext = undefined; }
       return true;
     }
   } catch (err) {

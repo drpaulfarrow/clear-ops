@@ -379,3 +379,36 @@ a.spend{text-decoration:none;color:inherit}
 .chat-name{flex:1 1 180px;min-width:0;border-radius:12px;font-size:16px}
 .btn.danger{border:0;background:var(--bad);color:#1A0606;font-weight:600}
 .btn.danger:hover{background:var(--bad-text);color:#1A0606}
+
+/* The rail: spaces, and who is on shift. A column beside the chat on a wide screen, a drawer on a phone. */
+.rail{display:none;flex:none;width:228px;min-height:0;overflow-y:auto;flex-direction:column;gap:22px;padding:18px 8px 24px;border-right:1px solid var(--line);background:var(--bg)}
+.rail section{display:flex;flex-direction:column;gap:2px}
+.rail-head{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted);padding:0 10px 8px}
+.rail-row{display:flex;align-items:center;gap:8px;min-height:38px;padding:0 10px;border:0;border-radius:10px;background:none;color:var(--text-2);text-align:left;font-size:14px}
+.rail-row:hover{background:var(--surface);color:var(--text)}
+.rail-row[aria-current="true"]{background:var(--raised);color:var(--text);font-weight:600}
+.rail-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-count{flex:none;font-size:12px;font-weight:500;color:var(--muted);font-variant-numeric:tabular-nums}
+.rail-count.wait{color:var(--accent-text)}
+.rail-person{display:flex;align-items:center;gap:10px;min-height:48px;padding:4px 10px;border-radius:10px;color:var(--text);text-decoration:none}
+a.rail-person:hover{background:var(--surface);color:var(--text)}
+.rail-main{min-width:0;flex:1}
+.rail-who{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-line{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-line.working{color:var(--run-text)}
+.rail-line.waiting{color:var(--accent-text)}
+.rail-line.stuck{color:var(--bad-text)}
+.live-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--run);margin-right:6px;vertical-align:middle}
+.scrim{display:none}
+.rail-open{display:none}
+@media (min-width:901px){
+  .home>.rail{display:flex}
+  .home.show-board>.rail{position:sticky;top:0;align-self:flex-start;height:100vh;height:100dvh}
+}
+@media (max-width:900px){
+  .rail-open{display:inline-flex;padding:0;width:40px;justify-content:center}
+  .home.rail-open>.rail{display:flex;position:fixed;z-index:31;top:0;bottom:0;left:0;width:min(86vw,320px);padding-top:max(18px,env(safe-area-inset-top));padding-bottom:max(24px,env(safe-area-inset-bottom))}
+  .home.rail-open>.scrim{display:block;position:fixed;z-index:30;inset:0;border:0;background:rgba(5,7,10,.6)}
+  .rail-row{min-height:44px;font-size:15px}
+}
+@media (max-width:640px){.brand-name{display:none}}
