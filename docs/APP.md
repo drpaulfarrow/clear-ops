@@ -174,6 +174,14 @@ Paul's point on 19 Nov 2026: a voice note came back as a file chip and a line sa
 
 Not here: playing the recording back in the app. That would mean reading uploads back out to the browser, which is the same open question as thumbnails on sent pictures.
 
+## A job's report is one tap from the answer, and first on its page
+
+Paul's ask on 20 Nov 2026: when a job makes a document, it should come up in the answer, or at least be linked there. `docs/app/report-link.png` shows it.
+
+- **The finished message links to the report.** On every channel a finished job's message ends "Full report: show job <id>." (`reportPointer` in `src/messages.ts`). The app reads that sentence back and shows an "Open the report" button in its place, for a job the store holds. The transcript keeps the sentence as sent.
+- **The link opens the report in full**: the job's page with the report expanded and scrolled to (`#/job/<id>/report`).
+- **The report is first on the job's page**, directly under the figures. It was last, below the thread and a long trace, where a phone hid it. It starts short so the rest of the page stays within reach, with "Read it all" to open it.
+
 ## Still to come
 
 What it does not do yet: a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), live voice with Cleo, push notifications, search. Each is a later slice.

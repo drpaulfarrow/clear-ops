@@ -1364,6 +1364,37 @@ test("the command menu offers what the chief understands, and nothing the app wo
   assert.match(menu, /textarea\.value = filled\(c\);/);
 });
 
+test("a finished job's message carries its report, so the app links to it where other channels name a command", async () => {
+  const { finishedText } = await import("../src/jobs.js");
+  const { reportPointer, REPORT_POINTER } = await import("../src/messages.js");
+  const cookie = await session();
+  const job = store.createJob("analyse", "Do a deep review of the repository.", WEB_SENDER, "product", WEB_CONVERSATION, { title: "Deep review" });
+  // What the service sends is the same on every channel: the worker's words, then a command to type.
+  const sent = finishedText(job, "The queue is sound. Billing can double charge.");
+  assert.ok(sent.endsWith(reportPointer(job.id)) && REPORT_POINTER.test(sent));
+  await chat.send(WEB_CONVERSATION, sent);
+  await chat.send(WEB_CONVERSATION, `Finished: something else.\nDone. ${reportPointer("nosuch")}`);
+  await chat.send(WEB_CONVERSATION, `I said "${reportPointer(job.id)}" in the middle, not at the end, here.`);
+  const messages = ((await chatView(cookie)) as unknown as { messages: Array<{ html?: string; report?: { job: string; title: string } }> }).messages.slice(-3);
+  // In the app that last sentence becomes the job itself: a link to the report, and no command to type.
+  assert.deepEqual(messages[0]!.report, { job: job.id, title: "Deep review" });
+  assert.match(messages[0]!.html!, /The queue is sound\. Billing can double charge\./);
+  assert.ok(!messages[0]!.html!.includes("show job") && !messages[0]!.html!.includes("Full report"));
+  // A job the store does not hold, or the sentence anywhere but the end, leaves the words as they were.
+  assert.equal(messages[1]!.report, undefined);
+  assert.match(messages[1]!.html!, /Full report: show job nosuch\./);
+  assert.equal(messages[2]!.report, undefined);
+  // The transcript itself is unchanged, so what the chief reads back is what every channel was sent.
+  assert.ok(chat.view().messages.some((m) => m.text === sent));
+
+  // The page follows that link to the job with its report opened in full, and shows the report first.
+  const script = appAsset("app.js")!.body.toString();
+  assert.match(script, /href: `#\/job\/\$\{m\.report\.job\}\/report`/);
+  assert.match(script, /const m = \/\^#\\\/job\\\/\(\[A-Za-z0-9_-\]\{1,64\}\)\(\\\/report\)\?\$\/\.exec\(location\.hash\);/);
+  const page = script.slice(script.indexOf("    detail.pull ? pullPane(detail.pull) : null,"), script.indexOf("/* ---------- Chat ---------- */"));
+  assert.ok(page.indexOf("output,") > 0 && page.indexOf("output,") < page.indexOf("threadPane(),") && page.indexOf("threadPane(),") < page.indexOf("about, trace"), "the report comes before the thread and the trace");
+});
+
 test("the app never hands replaceChildren something that is not an element", () => {
   // replaceChildren writes whatever is not a node as text, so a closed list passed as null showed the
   // word "null" under the chat bar (19 Nov 2026). Every call either builds its children with h(), which

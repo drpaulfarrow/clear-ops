@@ -354,3 +354,14 @@ a.spend{text-decoration:none;color:inherit}
 .voice-said{white-space:pre-wrap}
 .voice-wait{font-size:13px;color:var(--muted)}
 .file-chip>svg{flex:none;color:var(--muted)}
+
+/* ---------- A job's report: linked from the message that announces it, and first on its page ---------- */
+.report-link{display:flex;align-items:center;gap:12px;align-self:flex-start;max-width:100%;min-height:52px;margin-top:6px;padding:8px 16px 8px 14px;border-radius:14px;border:1px solid var(--accent-line);background:var(--accent-soft);color:var(--text);text-decoration:none}
+.report-link:hover{background:rgba(255,159,90,.24);color:var(--text)}
+.report-link svg{flex:none;color:var(--accent-text)}
+.report-link-main{display:flex;flex-direction:column;min-width:0}
+.report-link-main .muted{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.report-pane .report-body{position:relative;max-height:340px;overflow:hidden}
+.report-pane .report-body::after{content:"";position:absolute;left:0;right:0;bottom:0;height:72px;background:linear-gradient(to bottom,transparent,var(--surface));pointer-events:none}
+.report-pane.open .report-body{max-height:none;overflow:visible}
+.report-pane.open .report-body::after{display:none}

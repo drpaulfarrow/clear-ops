@@ -25,7 +25,7 @@ import { failureLabel } from "./failures.js";
 import { boardHealth } from "./health.js";
 import { describeJob, kindName, liveStep, repoLabel } from "./job-descriptions.js";
 import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
-import { shortText } from "./messages.js";
+import { REPORT_POINTER, shortText } from "./messages.js";
 import { PER_JOB_MODELS, resolveModel, runRoute } from "./llm.js";
 import { londonYmd } from "./london.js";
 import { renderMarkdown, reportFor } from "./reports.js";
@@ -34,7 +34,7 @@ import { spendDisplay } from "./spend.js";
 import { jobTitle } from "./titles.js";
 import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
 import { realCost } from "./worker-stats.js";
-import { WEB_CONVERSATION, type WebChat } from "./web-chat.js";
+import { WEB_CONVERSATION, type WebChat, type WebMessage } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
 import type { PrInfo } from "./pr-state.js";
 import { liveView, type LiveView } from "./live-settings.js";
@@ -648,6 +648,8 @@ export interface AppChatMessage {
   /** A picture the service sent with it: the name the app asks its picture route for, and the caption as plain words for its description. */
   picture?: string;
   caption?: string;
+  /** The job whose report this message announces, so the app links straight to it. */
+  report?: { job: string; title: string };
 }
 
 export interface AppChat {
@@ -665,6 +667,19 @@ export interface AppChat {
 export const APP_CHAT_JOBS = 40;
 
 /** One of the app's conversations with the chief (the main one, or a thread), and the jobs it started. */
+/**
+ * One message from the service, for the app. A finished job's message ends by saying where its report
+ * is, as a command to type (`reportPointer`). The app can do better than that: when the job is one the
+ * store holds, the sentence is taken off and the message carries the job, so the app shows a link that
+ * opens the report. A job the store does not hold leaves the words as they were.
+ */
+function said(source: AppSource, m: WebMessage): AppChatMessage {
+  const pointed = REPORT_POINTER.exec(m.text);
+  const job = pointed ? source.store.getJob(pointed[1]!) : undefined;
+  const text = job ? m.text.slice(0, pointed!.index) : m.text;
+  return { id: m.id, at: m.at, from: m.from, html: renderMarkdown(text), ...(m.picture ? { picture: m.picture, caption: m.text } : {}), ...(job ? { report: { job: job.id, title: jobTitle(job) } } : {}) };
+}
+
 export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial<Pick<WebChat, "ownChats">>, conversation: string = WEB_CONVERSATION): AppChat {
   const now = source.now ?? Date.now();
   const view = chat.view(conversation);
@@ -677,7 +692,7 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
   return {
     generatedAt: new Date(now).toISOString(),
     messages: view.messages.map((m) =>
-      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}), ...(m.heard !== undefined ? { heard: m.heard } : {}) } : { id: m.id, at: m.at, from: m.from, html: renderMarkdown(m.text), ...(m.picture ? { picture: m.picture, caption: m.text } : {}) },
+      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}), ...(m.heard !== undefined ? { heard: m.heard } : {}) } : said(source, m),
     ),
     typing: view.typing,
     jobs: jobs.map((j) => toAppJob(source, j, ev)),

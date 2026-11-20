@@ -102,6 +102,12 @@ export interface RunResult {
    * rate limits or overload after the retries, an execution error). The job runner records it as failed.
    */
   error?: RunFailure;
+  /**
+   * Set when the run used every turn it was allowed before giving a final answer (the SDK's
+   * error_max_turns), so `text` is only the line saying it stopped. The job runner then asks for a
+   * write-up of what it has (`writeUp` in src/jobs.ts) rather than keeping that line as the report.
+   */
+  outOfTurns?: boolean;
 }
 
 /** Anything that runs an agent turn. The real one wraps the Agent SDK; tests inject a fake. */
@@ -177,6 +183,7 @@ export const sdkRunner: AgentRunner = async (o) => {
   let sessionId: string | undefined;
   let costUsd: number | undefined;
   let error: RunFailure | undefined;
+  let outOfTurns = false;
   // The SDK's code for the last API error it hit (billing_error, rate_limit, ...), the best classifier.
   let sdkError: string | undefined;
   // Pinned to Anthropic (the executive assistant): never falls back to another provider. Without an
@@ -304,14 +311,17 @@ export const sdkRunner: AgentRunner = async (o) => {
           // provider's own figure where it can be read (src/realcost.ts) before Paul is told anything.
           text = `The agent stopped early (${message.subtype}).`;
           error = { kind: "budget", detail: `The agent stopped early (${message.subtype}), which is the SDK's own runaway guard, not a job's cap.` };
-        } else text = `The agent stopped early (${message.subtype}).`;
+        } else {
+          text = `The agent stopped early (${message.subtype}).`;
+          outOfTurns = message.subtype === "error_max_turns";
+        }
       }
     }
   } catch (err) {
     // A single-shot query() throws after yielding an error result; keep whatever we captured.
     if (!text && !error) throw err;
   }
-  return { text, sessionId, costUsd, ...(runUsage ? { usage: runUsage } : {}), ...(error ? { error } : {}) };
+  return { text, sessionId, costUsd, ...(runUsage ? { usage: runUsage } : {}), ...(error ? { error } : {}), ...(outOfTurns ? { outOfTurns: true } : {}) };
 };
 
 /** Reports one SDK message to the trace: tool calls, tool results, remarks and the end of the run. */

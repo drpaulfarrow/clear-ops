@@ -15,7 +15,7 @@ import { usdAmount } from "./realcost.js";
  * showed no activity for too long, "timeout" when it ran past the maximum runtime, "cancelled" when
  * Paul cancelled it.
  */
-export type FailureKind = "credit" | "auth" | "rate_limit" | "overloaded" | "api" | "empty" | "error" | "budget" | "stalled" | "timeout" | "cancelled";
+export type FailureKind = "credit" | "auth" | "rate_limit" | "overloaded" | "api" | "empty" | "error" | "budget" | "turns" | "stalled" | "timeout" | "cancelled";
 
 /** Jobs the service stopped rather than ones that failed on their own; their work is kept for a retry. */
 export const STOP_KINDS: FailureKind[] = ["stalled", "timeout", "cancelled"];
@@ -138,6 +138,8 @@ export function failureReason(f: Pick<RunFailure, "kind" | "detail"> & { budget?
       return `the ${providerName()} API was overloaded and the retries ran out`;
     case "empty":
       return "the agent came back with nothing";
+    case "turns":
+      return "it used every turn it is allowed and had no report written, even when asked for one";
     case "budget":
       return budgetReason(f.budget);
     case "api":
@@ -194,6 +196,8 @@ export function failureLabel(kind: FailureKind | undefined): string {
       return "API overloaded";
     case "empty":
       return "no output";
+    case "turns":
+      return "out of turns, no report";
     case "api":
       return "API error";
     case "budget":

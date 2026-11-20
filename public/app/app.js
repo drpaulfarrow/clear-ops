@@ -51,6 +51,7 @@ const ICONS = {
   mic: ["M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z", "M5 11a7 7 0 0 0 14 0M12 18v3"],
   stop: ["M7 7h10v10H7z"],
   plus: ["M12 5v14M5 12h14"],
+  doc: ["M7 3h7l5 5v13H7z", "M14 3v5h5", "M10 13h6M10 17h6"],
   down: ["m6 9 6 6 6-6"],
 };
 function icon(name, size = 16, label) {
@@ -132,6 +133,11 @@ const state = {
   /** Paul's own chats as last heard, for the list. */
   chats: [],
   chatsOpen: false,
+  /** The job whose report is shown in full on its page. */
+  reportOpen: undefined,
+  /** The job whose report a link asked for, and the one already scrolled to, so each happens once per visit. */
+  reportAsked: undefined,
+  reportShown: undefined,
   sending: false,
   /** What the last button press did, said once at the top of the page. */
   notice: undefined,
@@ -160,8 +166,9 @@ const state = {
 };
 
 const route = () => {
-  const m = /^#\/job\/([A-Za-z0-9_-]{1,64})$/.exec(location.hash);
-  if (m) return { name: "job", id: m[1] };
+  // A job's page, or the same page with its report opened in full (the link a finished job's message carries).
+  const m = /^#\/job\/([A-Za-z0-9_-]{1,64})(\/report)?$/.exec(location.hash);
+  if (m) return { name: "job", id: m[1], report: !!m[2] };
   if (location.hash === "#/spend") return { name: "spend" };
   const p = /^#\/pull\/([A-Za-z0-9._-]{1,64})\/([1-9]\d{0,8})$/.exec(location.hash);
   return p ? { name: "pull", repo: p[1], number: Number(p[2]) } : { name: "board" };
@@ -1030,6 +1037,8 @@ function said(m) {
   return [
     src ? h("a", { class: "pic", href: src, target: "_blank", rel: "noopener" }, h("img", { src, alt: m.caption || "A picture from a job", loading: "lazy", decoding: "async" })) : null,
     m.html ? rendered(m.html, "report said") : null,
+    // A finished job's report: one tap from the message that announces it.
+    m.report ? h("a", { class: "report-link", href: `#/job/${m.report.job}/report` }, icon("doc", 18), h("span", { class: "report-link-main" }, h("b", {}, "Open the report"), h("span", { class: "muted" }, m.report.title))) : null,
   ];
 }
 
@@ -1305,9 +1314,18 @@ function jobPage() {
     detail.trace.total > detail.trace.lines.length ? h("p", { class: "muted" }, `Showing the newest ${detail.trace.lines.length} of ${detail.trace.total} lines.`) : null,
   );
 
+  // The report is what a finished job is for, so it sits directly under the figures, not below the
+  // thread and a long trace where a phone hid it (20 Nov 2026). It starts short, so the rest of the page
+  // stays within reach, and opens in full on a tap or when the link in the chat brought him here.
   let output = null;
   if (detail.outputHtml !== undefined) {
-    output = h("section", { class: "pane", "aria-label": "Saved output" }, h("h2", {}, "Saved output"), rendered(detail.outputHtml, "report"));
+    const open = state.reportOpen === job.id;
+    output = h(
+      "section",
+      { class: `pane report-pane${open ? " open" : ""}`, id: "report", "aria-label": "Report" },
+      h("div", { class: "pane-head" }, h("h2", {}, "Report"), h("button", { class: "btn quiet", type: "button", "aria-expanded": String(open), onclick: () => { state.reportOpen = open ? undefined : job.id; draw(); } }, open ? "Show less" : "Read it all")),
+      h("div", { class: "report-body" }, rendered(detail.outputHtml, "report")),
+    );
   }
 
   return h(
@@ -1326,9 +1344,9 @@ function jobPage() {
     h("div", { class: "stats" }, cost, model, steps, time),
     // Above the trace, not below it: a long trace on a phone hid it (19 Nov 2026).
     detail.pull ? pullPane(detail.pull) : null,
+    output,
     threadPane(),
     h("div", { class: "panes" }, about, trace),
-    output,
   );
 }
 
@@ -1603,7 +1621,13 @@ function draw() {
     const caret = document.activeElement === threadInput ? [threadInput.selectionStart, threadInput.selectionEnd] : undefined;
     const atEnd = threadLog.scrollHeight - threadLog.scrollTop - threadLog.clientHeight < 120;
     const top = threadLog.scrollTop;
+    // Brought here by a report's link: it is opened in full, and shown, once the job has loaded.
+    if (r.name === "job" && r.report && state.reportAsked !== r.id) state.reportOpen = state.reportAsked = r.id;
     bodyEl.replaceChildren(r.name === "job" ? jobPage() : pullPage(r));
+    if (r.name === "job" && r.report && state.reportShown !== r.id && document.getElementById("report")) {
+      state.reportShown = r.id;
+      document.getElementById("report").scrollIntoView({ block: "start" });
+    }
     threadLog.scrollTop = atEnd ? threadLog.scrollHeight : top;
     if (caret) {
       threadInput.focus({ preventScroll: true });
@@ -1791,6 +1815,7 @@ window.addEventListener("hashchange", () => {
   state.jobRaw = "";
   state.jobMissing = false;
   state.problem = undefined;
+  state.reportAsked = state.reportShown = undefined;
   window.scrollTo(0, 0);
   draw();
   void tick();
