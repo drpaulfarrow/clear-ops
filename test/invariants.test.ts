@@ -1287,6 +1287,17 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(data, /spendDisplay\(source\.queue\.spendState\(\)\)/);
   assert.match(data, /const cost = realCost\(job\);/);
   assert.doesNotMatch(data, /job\.costUsd/);
+  // The one figure that is not a job's own (what jobs like it usually cost) comes from those provider
+  // figures alone, is sent apart from any cost, only for a job with none, and is worded as an estimate.
+  const estimates = src("estimates.ts");
+  assert.match(estimates, /const usd = realCost\(job\);/);
+  assert.doesNotMatch(estimates, /estimateUsd|job\.costUsd|costSource/, "an estimate is never built from the SDK's estimate, and realCost alone decides what is a real figure");
+  assert.match(estimates, /if \(costs\.length < ESTIMATE_MIN_JOBS\) continue;/);
+  assert.match(data, /const usual = cost === undefined && \(job\.status === "queued" \|\| job\.status === "running"\) \? estimateFor\(/);
+  assert.doesNotMatch(data, /costUsd: [^,}\n]*(usual|estimate)/i, "an estimate is never sent as a cost");
+  const page = fs.readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
+  assert.match(page, /Jobs like this usually cost about/);
+  assert.doesNotMatch(page, /money\((job\.usual|u|usual)\.usd\)[^\n]*card-cost|card-cost[^\n]*usual/, "an estimate is never drawn as a job's cost");
   assert.match(src("github-auth.ts"), /const WORKER_STRIPPED = \[[^\]]*"UI_GITHUB_CLIENT_ID", "UI_GITHUB_CLIENT_SECRET"\]/);
 });
 
