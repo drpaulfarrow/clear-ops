@@ -132,13 +132,16 @@ test("the history can be read one space at a time", () => {
 test("narrowing the board to a space never hides what waits on Paul's decision", () => {
   const js = fs.readFileSync("public/app/app.js", "utf8");
   // The narrowed board is the whole board with two lists replaced: its jobs and its pull requests.
-  assert.match(js, /const scoped = \(board\) => \(spaceOf\(\) \? \{ \.\.\.board, jobs: board\.jobs\.filter\(\(j\) => j\.repository === state\.space\), pulls: \(board\.pulls \?\? \[\]\)\.filter\(\(p\) => p\.repo === state\.space\) \} : board\);/);
+  assert.match(js, /const scoped = \(board\) => \(spaceOf\(\) \? \{ \.\.\.board, jobs: board\.jobs\.filter\(inSpace\(spaceOf\(\)\)\), pulls: \(board\.pulls \?\? \[\]\)\.filter\(\(p\) => \(spaceOf\(\)\.own \? spaceOf\(\)\.repos\.includes\(p\.repo\) : p\.repo === state\.space\)\) \} : board\);/);
+  assert.match(js, /const inSpace = \(sp\) => \(j\) => \(sp\.own \? sp\.repos\.includes\(j\.repository\) \|\| j\.space === sp\.id : j\.repository === sp\.id\);/);
   assert.doesNotMatch(js, /waiting: board\.waiting\.filter/);
   // The chat's own waiting items are drawn from the board as it arrived, not the narrowed one.
   const chatItems = js.slice(js.indexOf("function chatItems()"), js.indexOf("const seen = (() => {"));
   assert.doesNotMatch(chatItems, /scoped\(/);
   // A space the board no longer lists is forgotten, so a stale choice cannot leave the board empty.
   assert.match(js, /if \(state\.space && !\(state\.board\.spaces \?\? \[\]\)\.some\(\(sp\) => sp\.id === state\.space\)\) \{ state\.space = "";/);
+  // "All spaces" counts each job once: his own spaces hold some of the same jobs again.
+  assert.match(js, /const sum = \(key\) => board\.spaces\.filter\(\(s\) => !s\.own\)\.reduce\(/);
   // The rail is drawn only with what the board sent, as text.
   const rail = js.slice(js.indexOf("function rail(board)"), js.indexOf("/* ---------- Board views ---------- */"));
   assert.doesNotMatch(rail, /innerHTML|rendered\(/);

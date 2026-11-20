@@ -38,6 +38,7 @@ import { jobTitle } from "./titles.js";
 import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
 import { realCost } from "./worker-stats.js";
 import { costEstimates, estimateFor, type CostEstimate } from "./estimates.js";
+import { inOwnSpace, ownSpaceAddress, type OwnSpace } from "./spaces.js";
 import { WEB_CONVERSATION, type WebChat, type WebMessage } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
 import type { PrInfo } from "./pr-state.js";
@@ -101,6 +102,8 @@ export interface AppJob {
   usual?: { usd: number; lowUsd: number; highUsd: number; jobs: number };
   /** A pull request address, where the job has one. */
   pr?: string;
+  /** The space of Paul's own whose chat it was started from, where it was. */
+  space?: string;
   /** Its thread in the app, when anything has been said there. */
   thread?: AppThreadNote;
   /** Failed: why, in a word or two. */
@@ -217,8 +220,11 @@ export interface AppSpace {
   active: number;
   /** Finished jobs there that the board shows as waiting on Paul. */
   waiting: number;
-  /** It is a repository ClearOps manages, so it has a chat of its own (`web:space:<id>`). */
+  /** It has a chat of its own (`web:space:<id>`): a repository ClearOps manages, or a space of Paul's own. */
   managed: boolean;
+  /** One of Paul's own (src/spaces.ts), with the repositories he put in it. Its jobs are theirs and any started from its chat. */
+  own?: true;
+  repos?: string[];
   /** When the service last said something in that chat, so the app can mark it as having something new. */
   saidAt?: string;
 }
@@ -274,6 +280,8 @@ interface Evidence {
   reviews: Map<string, Job>;
   /** What each kind of job usually costs on each model, from finished jobs' real figures (src/estimates.ts). */
   estimates: CostEstimate[];
+  /** Paul's own spaces (src/spaces.ts). */
+  spaces: OwnSpace[];
 }
 
 function evidenceOf(store: Store): Evidence {
@@ -292,7 +300,7 @@ function evidenceOf(store: Store): Evidence {
     const seen = reviews.get(j.reviewOf);
     if (!seen || (seen.finishedAt ?? "") < (j.finishedAt ?? "")) reviews.set(j.reviewOf, j);
   }
-  return { acts, reviews, estimates: costEstimates(store.allJobs()) };
+  return { acts, reviews, estimates: costEstimates(store.allJobs()), spaces: store.spaces() };
 }
 
 /** A finished review's own verdict lines, read once: a saved output does not change. */
@@ -445,6 +453,8 @@ function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
   const outcome = outcomeOf(source.store, job, ev, source);
   const pr = source.jobPull?.(job)?.url ?? (job.pr && PR_URL.test(job.pr) ? job.pr : undefined);
   const note = source.threads?.().get(`web:job:${job.id}`);
+  // Started from the chat of one of his own spaces: it belongs there whatever repository it is on.
+  const started = ev.spaces.find((sp) => (job.replyTo ?? job.requestedBy) === ownSpaceAddress(sp.id));
   const said = job.status === "done" || job.status === "failed" ? saidOf(job) : undefined;
   // What jobs like it usually cost, only while it has no figure of its own and its model is known.
   const usual = cost === undefined && (job.status === "queued" || job.status === "running") ? estimateFor(ev.estimates, job, modelOf(job).model) : undefined;
@@ -464,6 +474,7 @@ function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
     ...(cost !== undefined ? { costUsd: cost } : {}),
     ...(usual ? { usual: { usd: usual.usd, lowUsd: usual.lowUsd, highUsd: usual.highUsd, jobs: usual.jobs } } : {}),
     ...(pr ? { pr } : {}),
+    ...(started ? { space: started.id } : {}),
     ...(note ? { thread: note } : {}),
     ...(job.fixRound ? { fixRound: job.fixRound } : {}),
     ...(job.reviewOf ? { reviewOf: job.reviewOf } : {}),
@@ -671,21 +682,20 @@ const isFinished = (j: Job) => j.status === "done" || j.status === "failed";
 
 /** The board: everything active, what waits on Paul, and the recently finished. */
 /** The spaces: every managed repository that has an address, then any other a card on the board belongs to. */
-function spacesOf(jobs: readonly AppJob[], pulls: ReadonlyArray<{ repo: string }>, threads?: Map<string, { saidAt?: string }>): AppSpace[] {
+function spacesOf(jobs: readonly AppJob[], pulls: ReadonlyArray<{ repo: string }>, threads?: Map<string, { saidAt?: string }>, own: readonly OwnSpace[] = []): AppSpace[] {
   const managed = new Set(repoRegistry.aliases());
   const ids = repoRegistry.list().filter((r) => r.slug).map((r) => r.alias);
   for (const id of [...jobs.map((j) => j.repository), ...pulls.map((p) => p.repo)]) if (!ids.includes(id)) ids.push(id);
-  return ids.map((id) => {
-    const mine = jobs.filter((j) => j.repository === id);
-    return {
-      id,
-      name: repoLabel(id),
-      active: mine.filter((j) => j.status === "running" || j.status === "queued").length,
-      waiting: mine.filter((j) => j.outcome?.state === "waiting").length,
-      managed: managed.has(id),
-      ...(threads?.get(`web:space:${id}`)?.saidAt ? { saidAt: threads.get(`web:space:${id}`)!.saidAt } : {}),
-    };
+  const counts = (mine: readonly AppJob[], id: string) => ({
+    active: mine.filter((j) => j.status === "running" || j.status === "queued").length,
+    waiting: mine.filter((j) => j.outcome?.state === "waiting").length,
+    ...(threads?.get(`web:space:${id}`)?.saidAt ? { saidAt: threads.get(`web:space:${id}`)!.saidAt } : {}),
   });
+  return [
+    ...ids.map((id) => ({ id, name: repoLabel(id), managed: managed.has(id), ...counts(jobs.filter((j) => j.repository === id), id) })),
+    // His own, after the repositories': the jobs on their repositories, and any started from their chat.
+    ...own.map((sp) => ({ id: sp.id, name: sp.name, managed: true, own: true as const, repos: [...sp.repos], ...counts(jobs.filter((j) => sp.repos.includes(j.repository) || j.space === sp.id), sp.id) })),
+  ];
 }
 
 /** The workers that are always on the roster, in the order Paul meets them. */
@@ -741,7 +751,7 @@ export function appBoard(source: AppSource): AppBoard {
     paused: !!source.store.queueHold(),
     waiting: appWaiting(source.store, source.gates, now),
     jobs,
-    spaces: spacesOf(jobs, open.pulls, threads),
+    spaces: spacesOf(jobs, open.pulls, threads, ev.spaces),
     roster: rosterOf(jobs, spend.capReached),
     hasOlder: finished.length > recent.length,
     pulls: open.pulls.map((p) => {
@@ -756,11 +766,13 @@ export function appBoard(source: AppSource): AppBoard {
 /** Finished jobs older than a moment, newest first, a page at a time: the whole history is reachable. */
 export function appHistory(source: AppSource, before: string | undefined, limit = APP_HISTORY_PAGE, space?: string): { jobs: AppJob[]; next?: string } {
   const cutoff = before && !Number.isNaN(Date.parse(before)) ? before : new Date(source.now ?? Date.now()).toISOString();
+  const mine = space ? source.store.spaces().find((sp) => sp.id === space) : undefined;
   const older = source.store
     .allJobs()
     .filter(isFinished)
-    // One space's history: the same rule a card's own repository is worked out by.
-    .filter((j) => !space || (lockKey(j) ?? j.target ?? "product") === space)
+    // One space's history: the same rule a card's own repository is worked out by, or for one of his own
+    // spaces the rule its board goes by.
+    .filter((j) => !space || (mine ? inOwnSpace(mine, j, lockKey(j) ?? j.target ?? "product") : (lockKey(j) ?? j.target ?? "product") === space))
     .filter((j) => (j.finishedAt ?? j.createdAt) < cutoff)
     .sort(finishedDesc);
   const page = older.slice(0, Math.max(1, Math.min(limit, APP_HISTORY_PAGE)));

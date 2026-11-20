@@ -693,10 +693,10 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal(typeof board.health.headline, "string");
 });
 
-test("seven things under /app are not a GET, and the data module never writes", () => {
+test("eight things under /app are not a GET, and the data module never writes", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const appRoutes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
-  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`", "post `${APP_PATH}/api/chats`", "post `${APP_PATH}/api/settings`"]);
+  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`", "post `${APP_PATH}/api/chats`", "post `${APP_PATH}/api/settings`", "post `${APP_PATH}/api/spaces`"]);
   assert.match(appRoutes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some/, "one gate over everything under /app");
   const data = fs.readFileSync(new URL("../src/app-data.ts", import.meta.url), "utf8");
   assert.doesNotMatch(data, /\.(updateJob|createJob|importJob|setSetting|setCapDays|setQueueHold|writeOutput|put[A-Z]\w*|update[A-Z]\w*|create[A-Z]\w*|disableSchedule|addNote)\(/);
@@ -1871,6 +1871,78 @@ test("a space's chat is a conversation in full: it keeps as much as the main one
   for (let i = 0; i < WEB_THREADS_MAX + 5; i++) c.inbound("hello", `web:job:j${i}`);
   assert.equal(c.threads().has(S), true, "old job threads go first, and a space's chat is not one of them");
   assert.equal([...c.threads().keys()].filter((k) => k.startsWith("web:job:")).length, WEB_THREADS_MAX);
+});
+
+test("a space of Paul's own is made, changed and removed by his own tap, and its chat tells the chief what it holds", async () => {
+  const cookie = await session();
+  const spaces = (body: unknown, c?: string, headers: Record<string, string> = {}) =>
+    fetch(`${base}${APP_PATH}/api/spaces`, { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...(c ? { cookie: c } : {}), ...headers }, body: JSON.stringify(body) });
+  const said = async (res: Response) => [res.status, ((await res.json()) as { error?: string }).error] as const;
+  // Not signed in, another site's page, or a form post: nothing.
+  assert.equal((await spaces({ action: "create", name: "Launch plan" })).status, 401);
+  assert.equal((await spaces({ action: "create", name: "Launch plan" }, cookie, { origin: "https://evil.example" })).status, 403);
+  assert.equal((await fetch(`${base}${APP_PATH}/api/spaces`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", origin: process.env.PUBLIC_URL!, cookie }, body: "action=create&name=Launch" })).status, 403);
+  assert.deepEqual(store.spaces(), [], "none of that made one");
+
+  const made = (await (await spaces({ action: "create", name: "Launch plan", repos: ["self", "site"] }, cookie)).json()) as { ok: boolean; id: string };
+  assert.match(made.id, /^own-[a-f0-9]{8}$/);
+  const address = `web:space:${made.id}`;
+  assert.deepEqual(store.spaces().map((sp) => [sp.id, sp.name, sp.repos]), [[made.id, "Launch plan", ["self", "site"]]]);
+  // What is refused, in words for him: no name, a name in use, a repository the service does not manage, another action.
+  assert.deepEqual(await said(await spaces({ action: "create", name: "  " }, cookie)), [400, "A space needs a name."]);
+  assert.deepEqual(await said(await spaces({ action: "create", name: "launch plan" }, cookie)), [400, "There is already a space with that name."]);
+  assert.equal((await spaces({ action: "create", name: "Other", repos: ["drpaulfarrow/elsewhere"] }, cookie)).status, 400);
+  assert.equal((await spaces({ action: "create", name: "Other", repos: "self" }, cookie)).status, 400);
+  assert.equal((await spaces({ action: "start", name: "Other" }, cookie)).status, 400);
+  // A repository's own space cannot be named here, nor anything that is not a kept space of his.
+  for (const bad of ["self", "product", "own-00000000", address, "", 7, null]) {
+    assert.equal((await spaces({ action: "update", id: bad, name: "Renamed" }, cookie)).status, 404, JSON.stringify(bad));
+    assert.equal((await spaces({ action: "delete", id: bad }, cookie)).status, 404, JSON.stringify(bad));
+  }
+  assert.equal(store.spaces().length, 1);
+
+  chiefSays = "On it.";
+  chiefAsked.length = 0;
+  try {
+    // The board lists it after the repositories', with a job started from its chat counted in it.
+    const job = store.createJob("research", "Find a venue.", WEB_SENDER, "product" as never, address, { title: "Venue" } as never);
+    const board = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie))) as { spaces: Array<{ id: string; own?: boolean; repos?: string[]; active: number; managed: boolean }>; jobs: Array<{ id: string; space?: string }> };
+    const mine = board.spaces.find((sp) => sp.id === made.id)!;
+    assert.deepEqual([mine.own, mine.repos, mine.managed, mine.active >= 1], [true, ["self", "site"], true, true]);
+    assert.equal(board.jobs.find((j) => j.id === job.id)!.space, made.id);
+    const history = JSON.parse(await text(await get(`${APP_PATH}/api/history?space=${made.id}`, cookie))) as { jobs: Array<{ repository: string }> };
+    assert.ok(history.jobs.every((j) => j.repository === "self" || j.repository === "site"), "only its repositories' finished jobs, or ones started from its chat");
+
+    // Its chat: the chief is told whose space it is, its name as his own, and what he put in it.
+    assert.equal((await postChat({ text: "Where are we?", thread: `space:${made.id}` }, cookie)).status, 202);
+    for (let i = 0; i < 100 && chat.view(address).messages.at(-1)?.from !== "clearops"; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(chiefAsked.length, 1);
+    assert.match(chiefAsked[0]!, /^This message is in the app's chat for one of Paul's own project spaces, which he named "Launch plan"\. That is from the service, not from Paul\.\nHe put these repositories in it: self \(drpaulfarrow\/clear-ops\), site \(drpaulfarrow\/drpaulfarrowcom\)\. Unless he says otherwise, what he asks for here is about them; when a job could be in more than one, ask which\./);
+    assert.deepEqual(chat.view(address).messages.map((m) => m.from), ["paul", "clearops"]);
+    for (let i = 0; i < 200 && store.getSession(address) === undefined; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(store.getSession(address), "the chief has a conversation there");
+
+    // Renamed, with no repositories: a subject of its own.
+    assert.equal((await spaces({ action: "update", id: made.id, name: "Launch", repos: [] }, cookie)).status, 200);
+    assert.deepEqual(store.spaces().map((sp) => [sp.id, sp.name, sp.repos]), [[made.id, "Launch", []]]);
+    assert.equal((await postChat({ text: "And now?", thread: `space:${made.id}` }, cookie)).status, 202);
+    for (let i = 0; i < 100 && chat.view(address).messages.length < 4; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.match(chiefAsked[1]!, /which he named "Launch"\. That is from the service, not from Paul\.\nIt is tied to no repository: treat it as a subject of its own, and ask which repository when a job needs one\./);
+
+    // Removed: its chat and the chief's side of it go, its jobs stay, and it is no conversation any more.
+    assert.equal((await spaces({ action: "delete", id: made.id }, cookie)).status, 200);
+    assert.deepEqual(store.spaces(), []);
+    assert.deepEqual(chat.view(address).messages, []);
+    assert.equal(store.getSession(address), undefined);
+    assert.ok(store.getJob(job.id), "the job it held is kept");
+    assert.equal((await get(`${APP_PATH}/api/chat?thread=space:${made.id}`, cookie)).status, 404);
+    assert.equal((await postChat({ text: "hello", thread: `space:${made.id}` }, cookie)).status, 404);
+    // The repositories' own chats are untouched by any of it.
+    assert.equal((await get(`${APP_PATH}/api/chat?thread=space:self`, cookie)).status, 200);
+    store.updateJob(job.id, { status: "cancelled" } as never);
+  } finally {
+    chiefSays = undefined;
+  }
 });
 
 test("a pull request that conflicts says so, so the app can offer to have it resolved", async () => {

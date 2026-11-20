@@ -56,6 +56,7 @@ import { AppPulls, PullError } from "./app-pulls.js";
 import type { Attachment } from "./uploads.js";
 import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
+import { createSpace, ownSpaceAddress, removeSpace, SpaceError, updateSpace } from "./spaces.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
 import { perJobModelError } from "./llm.js";
@@ -872,9 +873,9 @@ export function buildApp(given: AppDeps) {
     // One of Paul's own chats: only an id the transcript itself made and still keeps.
     const own = /^chat:([a-f0-9]{8})$/.exec(raw);
     if (own) return chat.chat(own[1]!) ? webOwnChat(own[1]!) : undefined;
-    // A space's chat: only for a repository ClearOps manages, by its own alias.
+    // A space's chat: only for a repository ClearOps manages, by its own alias, or a space of his own that is kept.
     const space = /^space:([a-z0-9][a-z0-9-]{0,39})$/.exec(raw);
-    if (space) return repoRegistry.list().some((r) => r.alias === space[1]) ? webSpace(space[1]!) : undefined;
+    if (space) return repoRegistry.list().some((r) => r.alias === space[1]) || deps.store.spaces().some((sp) => sp.id === space[1]) ? webSpace(space[1]!) : undefined;
     return undefined;
   };
   app.get(`${APP_PATH}/api/chat`, (req, res) => {
@@ -1090,6 +1091,38 @@ export function buildApp(given: AppDeps) {
     } catch (err) {
       res.status(400).json({ error: err instanceof LiveSettingError ? err.message : "That could not be changed." });
     }
+  });
+  /**
+   * Paul's own project spaces (src/spaces.ts): made, renamed, given other repositories, or removed, by
+   * his own tap. A space is a name, a chat and some of the repositories ClearOps already manages: this
+   * can name no other repository, starts nothing and touches no job. Removing one empties its chat and
+   * forgets the chief's side of it; a repository's own space cannot be named here at all.
+   */
+  app.post(`${APP_PATH}/api/spaces`, (req, res) => {
+    appHeaders(res);
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
+    const body = (req.body ?? {}) as { action?: unknown; id?: unknown; name?: unknown; repos?: unknown };
+    const managed = repoRegistry.list().map((r) => ({ alias: r.alias, name: repoLabel(r.alias) }));
+    try {
+      if (body.action === "create") {
+        const made = createSpace(deps.store, body, managed);
+        return void res.json({ ok: true, id: made.id });
+      }
+      if (body.action === "update") {
+        const next = updateSpace(deps.store, body.id, body, managed);
+        return void (next ? res.json({ ok: true, id: next.id }) : res.status(404).json({ error: "There is no such space." }));
+      }
+      if (body.action === "delete") {
+        const gone = removeSpace(deps.store, body.id);
+        if (!gone) return void res.status(404).json({ error: "There is no such space." });
+        chat.forget(ownSpaceAddress(gone.id));
+        deps.store.clearSession(ownSpaceAddress(gone.id));
+        return void res.json({ ok: true });
+      }
+    } catch (err) {
+      return void res.status(400).json({ error: err instanceof SpaceError ? err.message : "That could not be done." });
+    }
+    res.status(400).json({ error: "That is not something a space can do." });
   });
   app.get(`${APP_PATH}/api/jobs/:id`, (req, res) => {
     appHeaders(res);

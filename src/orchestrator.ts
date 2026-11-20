@@ -460,6 +460,17 @@ export class Orchestrator {
         "A job about it works in that repository, on that same pull request and its branch: it opens no new pull request and merges nothing.",
       ].join("\n");
     }
+    // The chat of one of Paul's own spaces (src/spaces.ts): a name of his, and the repositories he put in it, if any.
+    const own = topic && "space" in topic ? this.store.spaces().find((sp) => sp.id === topic.space) : undefined;
+    if (own) {
+      const repos = own.repos.map((alias) => repoRegistry.list().find((r) => r.alias === alias)).filter((r) => !!r);
+      return [
+        `This message is in the app's chat for one of Paul's own project spaces, which he named "${own.name}". That is from the service, not from Paul.`,
+        repos.length
+          ? `He put ${repos.length === 1 ? "this repository" : "these repositories"} in it: ${repos.map((r) => `${r.alias}${r.slug ? ` (${r.slug})` : ""}`).join(", ")}. Unless he says otherwise, what he asks for here is about ${repos.length === 1 ? "that repository" : "them"}${repos.length === 1 ? "" : "; when a job could be in more than one, ask which"}.`
+          : "It is tied to no repository: treat it as a subject of its own, and ask which repository when a job needs one.",
+      ].join("\n");
+    }
     // A space's chat (docs/APP.md): the address says which repository the conversation is about.
     if (topic && "space" in topic) {
       const repo = repoRegistry.list().find((r) => r.alias === topic.space);

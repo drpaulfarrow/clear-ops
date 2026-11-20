@@ -520,6 +520,8 @@ interface State {
    * (src/realcost.ts, priced after each turn). Only the current day is kept.
    */
   chatCost?: { ymd: string; models: Array<{ model: string; usd: number; calls: number }> };
+  /** Project spaces of Paul's own, made from the web app (src/spaces.ts). Each managed repository's space is not kept here: it is made from the registry. */
+  spaces?: Array<{ id: string; name: string; repos: string[]; createdAt: string }>;
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -934,6 +936,17 @@ export class Store {
   }
   addCreatedRepo(alias: string, repo: CreatedRepo): void {
     this.state.repos = { ...(this.state.repos ?? {}), [alias]: repo };
+    this.save();
+  }
+  /** Paul's own project spaces (src/spaces.ts), oldest first. Anything in the file that is not one is left out. */
+  spaces(): Array<{ id: string; name: string; repos: string[]; createdAt: string }> {
+    const kept = Array.isArray(this.state.spaces) ? this.state.spaces : [];
+    return kept
+      .filter((s) => s && typeof s.id === "string" && /^own-[a-f0-9]{8}$/.test(s.id) && typeof s.name === "string" && Array.isArray(s.repos) && s.repos.every((r) => typeof r === "string") && typeof s.createdAt === "string")
+      .map((s) => ({ id: s.id, name: s.name, repos: [...s.repos], createdAt: s.createdAt }));
+  }
+  setSpaces(list: Array<{ id: string; name: string; repos: string[]; createdAt: string }>): void {
+    this.state.spaces = list.map((s) => ({ id: s.id, name: s.name, repos: [...s.repos], createdAt: s.createdAt }));
     this.save();
   }
   siteRules(): { added: string[]; removed: string[] } {

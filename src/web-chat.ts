@@ -394,6 +394,16 @@ export class WebChat {
     return true;
   }
 
+  /** Empties a space's chat, when the space itself is removed. Only a space's chat can be named here. */
+  forget(address: string): boolean {
+    if (!WEB_SPACE.test(address)) return false;
+    for (const m of this.messages) if (m.thread === address && m.picture) this.discard(m.picture);
+    this.messages = this.messages.filter((m) => m.thread !== address);
+    this.notes = undefined;
+    this.save();
+    return true;
+  }
+
   private in(thread: string | undefined): WebMessage[] {
     return this.messages.filter((m) => m.thread === thread);
   }
