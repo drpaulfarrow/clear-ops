@@ -52,12 +52,14 @@ test("a space is a managed repository, with what is active there and what waits 
   mk("write", "Elsewhere", "an-old-alias", { status: "queued" });
   const spaces = board().spaces;
   const of = (id: string) => spaces.find((sp) => sp.id === id);
-  assert.deepEqual(of("self"), { id: "self", name: "workforce", active: 2, waiting: 1 });
-  assert.deepEqual(of("product"), { id: "product", name: "Clear Exchange", active: 0, waiting: 1 });
+  assert.deepEqual(of("self"), { id: "self", name: "workforce", active: 2, waiting: 1, managed: true });
+  assert.deepEqual(of("product"), { id: "product", name: "Clear Exchange", active: 0, waiting: 1, managed: true });
   // A repository with nothing happening is still a space, so it can be chosen before its first job.
-  assert.deepEqual(of("site"), { id: "site", name: "drpaulfarrow.com", active: 0, waiting: 0 });
+  assert.deepEqual(of("site"), { id: "site", name: "drpaulfarrow.com", active: 0, waiting: 0, managed: true });
   // A card whose repository is not a managed one still has somewhere to be found.
   assert.equal(of("an-old-alias")!.active, 1);
+  // It has no chat of its own, though: only a repository the service manages does.
+  assert.equal(of("an-old-alias")!.managed, false);
   assert.equal(new Set(spaces.map((sp) => sp.id)).size, spaces.length, "each space once");
   // The counts are the board's own cards, so the rail never disagrees with it.
   for (const sp of spaces) {
@@ -140,6 +142,18 @@ test("narrowing the board to a space never hides what waits on Paul's decision",
   // The rail is drawn only with what the board sent, as text.
   const rail = js.slice(js.indexOf("function rail(board)"), js.indexOf("/* ---------- Board views ---------- */"));
   assert.doesNotMatch(rail, /innerHTML|rendered\(/);
+});
+
+test("in a space the chat on screen is that space's own, and decisions stay where they were", () => {
+  const js = fs.readFileSync("public/app/app.js", "utf8");
+  // Only a managed repository has a chat; any other space narrows the board and leaves the chat alone.
+  assert.match(js, /const spaceChat = \(\) => \(state\.space && \(!state\.board \|\| spaceOf\(\)\?\.managed\) \? state\.space : ""\);/);
+  assert.match(js, /const threadOnScreen = \(\) => \(spaceChat\(\) \? `space:\$\{spaceChat\(\)\}` : /);
+  // What is sent and what is read both name the conversation on screen, so a reply cannot land in another.
+  assert.match(js, /const where = threadOnScreen\(\);\s*const said = await postMessage\(\{ text, \.\.\.\(where \? \{ thread: where \} : \{\}\)/);
+  assert.match(js, /const text = await getJson\(where \? `\/chat\?thread=\$\{encodeURIComponent\(where\)\}` : "\/chat"\);\s*if \(threadOnScreen\(\) !== where\) return false;/);
+  // The things waiting on his decision are listed in the main conversation only, as before.
+  assert.match(js, /const waiting = state\.own \|\| spaceChat\(\) \? \[\] : state\.board\?\.waiting \?\? \[\];/);
 });
 
 test("the app has an icon of its own, served from the fixed table of files", () => {

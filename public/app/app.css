@@ -412,3 +412,5 @@ a.rail-person:hover{background:var(--surface);color:var(--text)}
   .rail-row{min-height:44px;font-size:15px}
 }
 @media (max-width:640px){.brand-name{display:none}}
+.chat-space{min-width:0;min-height:40px;display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 4px}
+.rail-row .new-dot{margin:0}

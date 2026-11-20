@@ -460,6 +460,15 @@ export class Orchestrator {
         "A job about it works in that repository, on that same pull request and its branch: it opens no new pull request and merges nothing.",
       ].join("\n");
     }
+    // A space's chat (docs/APP.md): the address says which repository the conversation is about.
+    if (topic && "space" in topic) {
+      const repo = repoRegistry.list().find((r) => r.alias === topic.space);
+      if (!repo) return "";
+      return [
+        `This message is in the app's chat for one project space: the ${repo.alias} repository${repo.slug ? ` (${repo.slug})` : ""}. That is from the service, not from Paul.`,
+        `Unless he says otherwise, what he asks for here is about that repository: a job started from this chat that works in a repository works in ${repo.alias}. He does not need to name it.`,
+      ].join("\n");
+    }
     if (!topic && !threadMention(from)) return "";
     const job = topic
       ? this.store.getJob(topic.job)

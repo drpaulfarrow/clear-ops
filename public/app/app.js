@@ -389,6 +389,15 @@ function header(board) {
 /** The space the board is narrowed to, as the board last listed it; undefined for all of them. */
 const spaceOf = () => (state.space ? (state.board?.spaces ?? []).find((s) => s.id === state.space) : undefined);
 
+/**
+ * The space whose own chat is on screen, or "" when it is the main conversation or one of Paul's own
+ * chats. Before the board has arrived the stored choice is taken at its word, so the right conversation
+ * is asked for first; the service says so if there is no such space.
+ */
+const spaceChat = () => (state.space && (!state.board || spaceOf()?.managed) ? state.space : "");
+/** The conversation on screen, as the service is asked for it; undefined for the main one. */
+const threadOnScreen = () => (spaceChat() ? `space:${spaceChat()}` : state.own === "new" ? "chat:new" : state.own ? `chat:${state.own}` : undefined);
+
 /** The board with only one space's jobs and pull requests. What waits on Paul's decision is never narrowed away. */
 const scoped = (board) => (spaceOf() ? { ...board, jobs: board.jobs.filter((j) => j.repository === state.space), pulls: (board.pulls ?? []).filter((p) => p.repo === state.space) } : board);
 
@@ -399,30 +408,41 @@ function setRail(open) {
 }
 
 /**
- * Narrows the board to one space, or back to all of them. Until a space has a chat of its own the
- * board is all that changes, so choosing one from the chat brings the board into view.
+ * Goes into one space, or back to all of them: the board is narrowed to it and the chat becomes that
+ * space's own. A space that is not a managed repository has no chat, so there the board is all that
+ * changes, and choosing it from the chat brings the board into view.
  */
 function setSpace(id) {
+  const was = threadOnScreen();
   state.space = id;
   store("clearops.space", id);
   state.history = [];
   state.historyNext = undefined;
   state.railOpen = false;
-  if (id && layout() === "chat") state.layout = "board";
+  if (id && !spaceChat() && layout() === "chat") state.layout = "board";
+  if (threadOnScreen() !== was) {
+    state.chatsOpen = false;
+    state.chatEdit = undefined;
+    state.chat = state.own === "new" && !spaceChat() ? { generatedAt: new Date().toISOString(), messages: [], jobs: [], typing: false } : undefined;
+    state.chatRaw = "";
+    state.chatProblem = undefined;
+    stickNext = true;
+  }
   draw();
+  void chatTick();
 }
 
 function rail(board) {
   if (!board) return [];
   const count = (waiting, active) => (waiting ? h("span", { class: "rail-count wait" }, `${waiting} waiting`) : active ? h("span", { class: "rail-count", "aria-label": `${active} active` }, String(active)) : null);
-  const row = (id, name, waiting, active) => h("button", { class: "rail-row", type: "button", "aria-current": String(state.space === id || (!id && !spaceOf())), onclick: () => setSpace(id) }, h("span", { class: "rail-name" }, name), count(waiting, active));
+  const row = (id, name, waiting, active, fresh) => h("button", { class: "rail-row", type: "button", "aria-current": String(state.space === id || (!id && !spaceOf())), onclick: () => setSpace(id) }, fresh ? h("span", { class: "new-dot", role: "img", "aria-label": "Something new in its chat" }) : null, h("span", { class: "rail-name" }, name), count(waiting, active));
   const sum = (key) => board.spaces.reduce((n, s) => n + s[key], 0);
   const spaces = h(
     "section",
     { "aria-label": "Spaces" },
     h("h2", { class: "rail-head" }, "Spaces"),
-    row("", "All spaces", board.waiting.length + sum("waiting"), sum("active")),
-    board.spaces.map((s) => row(s.id, s.name, s.waiting, s.active)),
+    row("", "All spaces", board.waiting.length + sum("waiting"), sum("active"), !!spaceChat() && ["", ...state.chats.map((c) => c.id)].some(hasNew)),
+    board.spaces.map((s) => row(s.id, s.name, s.waiting, s.active, hasNewAt(`space:${s.id}`, s.saidAt))),
   );
   const person = (r) => {
     const title = h("div", { class: "rail-who" }, h("b", {}, r.name ?? r.role.charAt(0).toUpperCase() + r.role.slice(1)), r.name ? h("span", { class: "muted" }, ` ${r.role}`) : null);
@@ -1507,11 +1527,11 @@ function chatItems() {
       lastFrom = "clearops";
     }
   }
-  if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, state.own ? `A chat of its own. ${CHIEF} starts fresh here: what you said in your other chats is not carried over.` : `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
+  if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, spaceChat() ? `The chat for ${spaceOf()?.name ?? "this space"}. ${CHIEF} knows what is said here is about that repository, and starts fresh: your other chats are not carried over.` : state.own ? `A chat of its own. ${CHIEF} starts fresh here: what you said in your other chats is not carried over.` : `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
   // Whatever is waiting for his decision sits at the foot of the conversation, with the same buttons as
   // on the board, wherever it was first put to him.
   // In the main conversation only: a chat of his own stays on its subject, and the header still says something waits.
-  const waiting = state.own ? [] : state.board?.waiting ?? [];
+  const waiting = state.own || spaceChat() ? [] : state.board?.waiting ?? [];
   if (waiting.length) {
     out.push(h("div", { class: "chat-day wait" }, waiting.length === 1 ? "Waiting on you" : `${waiting.length} things waiting on you`));
     for (const item of waiting) out.push(h("div", { class: "chat-card" }, waitingCard(item, now)));
@@ -1545,23 +1565,25 @@ const seen = (() => {
 const saidAtOf = (own) => (own ? state.chats.find((c) => c.id === own)?.saidAt : state.mainSaidAt);
 function keepSeen(key, at) {
   seen[key] = at;
-  // Chats that are gone are forgotten here too.
-  for (const k of Object.keys(seen)) if (k !== "main" && !state.chats.some((c) => c.id === k)) delete seen[k];
+  // Chats that are gone are forgotten here too. A space's chat is kept under "space:<id>".
+  for (const k of Object.keys(seen)) if (k !== "main" && !k.startsWith("space:") && !state.chats.some((c) => c.id === k)) delete seen[k];
   store("clearops.seen", JSON.stringify(seen));
 }
-function hasNew(own) {
-  const at = saidAtOf(own);
-  if (!at || own === state.own) return false;
-  const key = own || "main";
+/** The conversation on screen, as it is kept here: "main", a chat's id, "new", or "space:<id>". */
+const seenKey = () => (spaceChat() ? `space:${spaceChat()}` : state.own || "main");
+function hasNewAt(key, at) {
+  if (!at || key === seenKey()) return false;
   if (!seen[key]) keepSeen(key, at);
   return at > seen[key];
 }
+const hasNew = (own) => hasNewAt(own || "main", saidAtOf(own));
 /** The conversation on screen has been looked at up to what the service last said in it. */
 function lookedAt() {
-  if (state.own === "new" || document.hidden) return;
-  const at = saidAtOf(state.own);
-  const key = state.own || "main";
-  if (at && seen[key] !== at) keepSeen(key, at);
+  const key = seenKey();
+  if (key === "new" || document.hidden) return;
+  // A space's chat is read off the conversation itself: the board's word of it can be a few seconds behind.
+  const at = spaceChat() ? [...(state.chat?.messages ?? [])].reverse().find((m) => m.from === "clearops" && !m.live)?.at : saidAtOf(state.own);
+  if (at && !(seen[key] >= at)) keepSeen(key, at);
 }
 
 /** Renames or removes the chat being shown: his own tap, sent as this site's own JSON like every other change. */
@@ -1644,6 +1666,8 @@ function drawChatBar(now = Date.now(), fromRefresh = false) {
       h("span", { class: "chat-row-title" }, hasNew(own) ? h("span", { class: "new-dot", role: "img", "aria-label": "Something new" }) : null, title),
       note ? h("span", { class: "muted num" }, note) : null,
     );
+  // A space has one chat: its name, and no list to choose from.
+  if (spaceChat()) return void chatBarEl.replaceChildren(...[h("div", { class: "chat-bar-top" }, h("div", { class: "chat-space" }, h("b", {}, spaceOf()?.name ?? "This space"), h("span", { class: "muted" }, `· this space's chat with ${CHIEF}`)))]);
   // replaceChildren writes anything that is not an element as text, the word "null" included, so the
   // list is left out when it is closed rather than passed as nothing.
   chatBarEl.replaceChildren(
@@ -1752,10 +1776,10 @@ async function send(raw) {
   state.sending = true;
   sendButton.disabled = true;
   try {
-    const own = state.own;
-    const said = await postMessage({ text, ...(own ? { thread: own === "new" ? "chat:new" : `chat:${own}` } : {}), ...(files ? { files: await mainFiles.payload() } : {}) });
+    const where = threadOnScreen();
+    const said = await postMessage({ text, ...(where ? { thread: where } : {}), ...(files ? { files: await mainFiles.payload() } : {}) });
     // A new chat exists once its first message is in: the service names it and says which it is.
-    const opened = own === "new" && /^chat:[a-f0-9]{8}$/.test(said.thread ?? "") ? said.thread.slice(5) : undefined;
+    const opened = where === "chat:new" && /^chat:[a-f0-9]{8}$/.test(said.thread ?? "") ? said.thread.slice(5) : undefined;
     if (opened && state.own === "new") {
       state.own = opened;
       store("clearops.chat", opened);
@@ -1934,16 +1958,21 @@ async function refreshJob(id) {
 }
 
 async function refreshChat() {
-  const own = state.own;
+  const where = threadOnScreen();
   // A chat not yet begun has nothing to read: it exists once its first message is sent.
-  if (own === "new") return false;
+  if (where === "chat:new") return false;
   try {
-    const text = await getJson(own ? `/chat?thread=${encodeURIComponent(`chat:${own}`)}` : "/chat");
-    if (state.own !== own) return false;
-    // A chat that is no longer kept: back to the main conversation.
+    const text = await getJson(where ? `/chat?thread=${encodeURIComponent(where)}` : "/chat");
+    if (threadOnScreen() !== where) return false;
+    // A chat that is no longer kept, or a space that is no longer there: back to the main conversation.
     if (text === undefined) {
-      state.own = "";
-      store("clearops.chat", "");
+      if (where?.startsWith("space:")) {
+        state.space = "";
+        store("clearops.space", "");
+      } else {
+        state.own = "";
+        store("clearops.chat", "");
+      }
       state.chat = undefined;
       state.chatRaw = "";
       return refreshChat();
