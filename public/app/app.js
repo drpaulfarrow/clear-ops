@@ -1038,7 +1038,12 @@ function said(m) {
     src ? h("a", { class: "pic", href: src, target: "_blank", rel: "noopener" }, h("img", { src, alt: m.caption || "A picture from a job", loading: "lazy", decoding: "async" })) : null,
     m.html ? rendered(m.html, "report said") : null,
     // A finished job's report: one tap from the message that announces it.
-    m.report ? h("a", { class: "report-link", href: `#/job/${m.report.job}/report` }, icon("doc", 18), h("span", { class: "report-link-main" }, h("b", {}, "Open the report"), h("span", { class: "muted" }, m.report.title))) : null,
+    // Only when there is one. A job that wrote none is named as that, with the way to run it again.
+    m.report?.missing
+      ? h("a", { class: "report-link none", href: `#/job/${m.report.job}` }, icon("doc", 18), h("span", { class: "report-link-main" }, h("b", {}, "No report was written"), h("span", { class: "muted" }, "Open the job to run it again")))
+      : m.report
+        ? h("a", { class: "report-link", href: `#/job/${m.report.job}/report` }, icon("doc", 18), h("span", { class: "report-link-main" }, h("b", {}, "Open the report"), h("span", { class: "muted" }, m.report.title)))
+        : null,
   ];
 }
 
@@ -1318,7 +1323,10 @@ function jobPage() {
   // thread and a long trace where a phone hid it (20 Nov 2026). It starts short, so the rest of the page
   // stays within reach, and opens in full on a tap or when the link in the chat brought him here.
   let output = null;
-  if (detail.outputHtml !== undefined) {
+  if (detail.noReport) {
+    // Recorded as done, but nothing was written: said plainly where the report would be.
+    output = h("section", { class: "pane report-pane open", id: "report", "aria-label": "Report" }, h("h2", {}, "No report"), h("p", { class: "prose" }, detail.noReport));
+  } else if (detail.outputHtml !== undefined) {
     const open = state.reportOpen === job.id;
     output = h(
       "section",

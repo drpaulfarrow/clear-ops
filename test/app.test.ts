@@ -1368,7 +1368,12 @@ test("a finished job's message carries its report, so the app links to it where 
   const { finishedText } = await import("../src/jobs.js");
   const { reportPointer, REPORT_POINTER } = await import("../src/messages.js");
   const cookie = await session();
-  const job = store.createJob("analyse", "Do a deep review of the repository.", WEB_SENDER, "product", WEB_CONVERSATION, { title: "Deep review" });
+  const finished = (title: string, summary: string, output?: string) => {
+    const j = store.createJob("analyse", "Do a deep review of the repository.", WEB_SENDER, "product", WEB_CONVERSATION, { title });
+    if (output !== undefined) store.writeOutput(j.id, output);
+    return store.updateJob(j.id, { status: "done", finishedAt: new Date().toISOString(), summary })!;
+  };
+  const job = finished("Deep review", "The queue is sound. Billing can double charge.", "# Deep review\n\nThe queue is sound.");
   // What the service sends is the same on every channel: the worker's words, then a command to type.
   const sent = finishedText(job, "The queue is sound. Billing can double charge.");
   assert.ok(sent.endsWith(reportPointer(job.id)) && REPORT_POINTER.test(sent));
@@ -1387,9 +1392,43 @@ test("a finished job's message carries its report, so the app links to it where 
   // The transcript itself is unchanged, so what the chief reads back is what every channel was sent.
   assert.ok(chat.view().messages.some((m) => m.text === sent));
 
+  // A link is a promise that there is something to read. A job recorded as done whose whole output is
+  // the line saying the run was stopped (one that ran out of turns before 20 Nov 2026) wrote no report:
+  // the app says that, in plain words, and points at the job so it can be run again.
+  const STOP = "The agent stopped early (error_max_turns).";
+  const empty = finished("Feature ideas", STOP, STOP);
+  await chat.send(WEB_CONVERSATION, finishedText(empty, STOP));
+  // And a job with nothing saved at all keeps the sentence as it was sent: no link, and no claim either way.
+  const bare = finished("Nothing saved", "Done.");
+  await chat.send(WEB_CONVERSATION, finishedText(bare, "Done."));
+  const later = ((await chatView(cookie)) as unknown as { messages: Array<{ html?: string; report?: { job: string; title: string; missing?: boolean } }>; jobs: Array<{ id: string; said?: string; outcome?: { state: string; text: string } }> });
+  const [none, kept] = later.messages.slice(-2);
+  assert.deepEqual(none!.report, { job: empty.id, title: "Feature ideas", missing: true });
+  assert.match(none!.html!, /It ran out of turns before writing a report\./);
+  assert.ok(!none!.html!.includes("error_max_turns") && !none!.html!.includes("stopped early"), "no SDK jargon reaches him");
+  assert.equal(kept!.report, undefined);
+  assert.match(kept!.html!, new RegExp(`Full report: show job ${bare.id}\\.`));
+  // Its card says it did not do what was asked, and does not repeat the stop line as the worker's words.
+  const card = later.jobs.find((j) => j.id === empty.id)!;
+  assert.deepEqual([card.outcome!.state, card.said], ["not_met", undefined]);
+  assert.match(card.outcome!.text, /^It ran out of turns before writing a report\. There is nothing to read; run it again to get one\.$/);
+  assert.equal(later.jobs.find((j) => j.id === job.id)!.outcome!.state, "unconfirmed", "a job with a real report is judged as before");
+  // Its page has no report to show, and says why, where the report would be.
+  const emptyPage = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${empty.id}`, cookie))) as { outputHtml?: string; noReport?: string };
+  assert.equal(emptyPage.outputHtml, undefined);
+  assert.match(emptyPage.noReport!, /^It ran out of turns before writing a report\. There is nothing to read\. Run it again to get one/);
+  const real = JSON.parse(await text(await get(`${APP_PATH}/api/jobs/${job.id}`, cookie))) as { outputHtml?: string; noReport?: string };
+  assert.ok(real.outputHtml!.includes("The queue is sound") && real.noReport === undefined);
+  // A failed job, and a running one, are never "done with nothing": the rule reads only a done job's stop line.
+  const { stoppedEarly, plainStop } = await import("../src/messages.js");
+  assert.equal(stoppedEarly(STOP), "error_max_turns");
+  for (const not of [undefined, "", "Done.", `${STOP} And more.`, `It said: ${STOP}`]) assert.equal(stoppedEarly(not), undefined, String(not));
+  assert.equal(plainStop(`Finished: x.\n${STOP}`), "Finished: x.\nIt ran out of turns before writing a report.");
+
   // The page follows that link to the job with its report opened in full, and shows the report first.
   const script = appAsset("app.js")!.body.toString();
   assert.match(script, /href: `#\/job\/\$\{m\.report\.job\}\/report`/);
+  assert.match(script, /m\.report\?\.missing\s*\? h\("a", \{ class: "report-link none", href: `#\/job\/\$\{m\.report\.job\}` \}/, "no link to a report that does not exist");
   assert.match(script, /const m = \/\^#\\\/job\\\/\(\[A-Za-z0-9_-\]\{1,64\}\)\(\\\/report\)\?\$\/\.exec\(location\.hash\);/);
   const page = script.slice(script.indexOf("    detail.pull ? pullPane(detail.pull) : null,"), script.indexOf("/* ---------- Chat ---------- */"));
   assert.ok(page.indexOf("output,") > 0 && page.indexOf("output,") < page.indexOf("threadPane(),") && page.indexOf("threadPane(),") < page.indexOf("about, trace"), "the report comes before the thread and the trace");

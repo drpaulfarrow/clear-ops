@@ -25,7 +25,7 @@ import { failureLabel } from "./failures.js";
 import { boardHealth } from "./health.js";
 import { describeJob, kindName, liveStep, repoLabel } from "./job-descriptions.js";
 import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
-import { REPORT_POINTER, shortText } from "./messages.js";
+import { plainStop, REPORT_POINTER, shortText, stoppedEarly, stoppedEarlyWords } from "./messages.js";
 import { PER_JOB_MODELS, resolveModel, runRoute } from "./llm.js";
 import { londonYmd } from "./london.js";
 import { renderMarkdown, reportFor } from "./reports.js";
@@ -207,6 +207,8 @@ export interface AppJobDetail {
   trace: { lines: TraceLine[]; total: number; figures: TraceFigures };
   /** The saved output as HTML rendered by src/reports.ts, which escapes everything. */
   outputHtml?: string;
+  /** Set when the job is recorded as done but wrote no report: why, and what to do, in place of `outputHtml`. */
+  noReport?: string;
   /** What the app's buttons may do to it right now. */
   actions: AppJobActions;
   /** The jobs around it: what it reviews, and what followed it. */
@@ -311,6 +313,10 @@ function ownPr(job: Job, github: PrInfo): boolean {
 
 function recorded(store: Store, job: Job, ev: Evidence, gh: Github = {}): Omit<AppOutcome, "by"> {
   if (job.status === "failed") return { state: "not_met", text: `Stopped before it finished: ${failureLabel(job.failure)}.` };
+  // Recorded as done with nothing but the line saying it was stopped (a job from before 20 Nov 2026
+  // that ran out of turns): it wrote no report, so it did not do what was asked, whatever its status says.
+  const stopped = wroteNothing(job);
+  if (stopped) return { state: "not_met", text: `${stoppedEarlyWords(stopped)} There is nothing to read; run it again to get one.` };
   // A job that was allowed to buy, send, change DNS or sign up: the gate's own record says whether it did.
   for (const what of askedFor(job)) {
     const mine = (ev.acts.get(job.id) ?? []).filter((a) => a.what === what);
@@ -357,9 +363,19 @@ function recorded(store: Store, job: Job, ev: Evidence, gh: Github = {}): Omit<A
   return { state: "unconfirmed", text: "The run finished. Nothing here can confirm it did what you asked." };
 }
 
+/**
+ * Why a job that is recorded as done has no report: its whole output is the line saying the run was
+ * stopped. Undefined for a job with a real report, and for one that is not done.
+ */
+function wroteNothing(job: Job): string | undefined {
+  return job.status === "done" ? stoppedEarly(job.summary) : undefined;
+}
+
 /** The first of what the worker told Paul, for kinds whose words are not about his private things. */
 function saidOf(job: Job): string | undefined {
   if (!job.summary || PRIVATE_KINDS.includes(job.kind) || job.docSnapshot) return undefined;
+  // The stop line is the service's, not the worker's, and the outcome already says it in plain words.
+  if (wroteNothing(job)) return undefined;
   return shortText(redact(job.summary.replace(/\s+/g, " ").trim()), APP_SAID_MAX) || undefined;
 }
 
@@ -648,8 +664,8 @@ export interface AppChatMessage {
   /** A picture the service sent with it: the name the app asks its picture route for, and the caption as plain words for its description. */
   picture?: string;
   caption?: string;
-  /** The job whose report this message announces, so the app links straight to it. */
-  report?: { job: string; title: string };
+  /** The job whose report this message announces, so the app links straight to it. `missing`: the job wrote none, so the app says so. */
+  report?: { job: string; title: string; missing?: true };
 }
 
 export interface AppChat {
@@ -668,6 +684,25 @@ export const APP_CHAT_JOBS = 40;
 
 /** One of the app's conversations with the chief (the main one, or a thread), and the jobs it started. */
 /**
+ * Whether a finished job has a report the app would show (`reportFor`: saved, and not withheld),
+ * remembered per job. A chat is read every few seconds and a finished job's output does not change, so
+ * the file is read once per finish and not on every read of the chat. Nothing is written anywhere.
+ */
+const reportKnown = new WeakMap<Store, Map<string, { at: string; has: boolean }>>();
+function hasReport(store: Store, job: Job): boolean {
+  if (job.status !== "done") return false;
+  const known = reportKnown.get(store) ?? new Map<string, { at: string; has: boolean }>();
+  reportKnown.set(store, known);
+  const at = job.finishedAt ?? "";
+  const kept = known.get(job.id);
+  if (kept?.at === at) return kept.has;
+  if (known.size > 500) known.clear();
+  const has = reportFor(store, job.id) !== undefined;
+  known.set(job.id, { at, has });
+  return has;
+}
+
+/**
  * One message from the service, for the app. A finished job's message ends by saying where its report
  * is, as a command to type (`reportPointer`). The app can do better than that: when the job is one the
  * store holds, the sentence is taken off and the message carries the job, so the app shows a link that
@@ -676,8 +711,14 @@ export const APP_CHAT_JOBS = 40;
 function said(source: AppSource, m: WebMessage): AppChatMessage {
   const pointed = REPORT_POINTER.exec(m.text);
   const job = pointed ? source.store.getJob(pointed[1]!) : undefined;
-  const text = job ? m.text.slice(0, pointed!.index) : m.text;
-  return { id: m.id, at: m.at, from: m.from, html: renderMarkdown(text), ...(m.picture ? { picture: m.picture, caption: m.text } : {}), ...(job ? { report: { job: job.id, title: jobTitle(job) } } : {}) };
+  // A job recorded as done that wrote nothing (an older one that ran out of turns): there is no report,
+  // and the app says so with the way to the job's page. Otherwise the link is offered only for a report
+  // the app would show. A job whose output is withheld or gone keeps the sentence exactly as it was sent.
+  const stopped = job ? wroteNothing(job) : undefined;
+  const linked = !!job && (!!stopped || hasReport(source.store, job));
+  // The run's own stop line ("The agent stopped early (error_max_turns).") is said in plain words here.
+  const text = plainStop(linked ? m.text.slice(0, pointed!.index) : m.text);
+  return { id: m.id, at: m.at, from: m.from, html: renderMarkdown(text), ...(m.picture ? { picture: m.picture, caption: m.text } : {}), ...(linked ? { report: { job: job!.id, title: jobTitle(job!), ...(stopped ? { missing: true as const } : {}) } } : {}) };
 }
 
 export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial<Pick<WebChat, "ownChats">>, conversation: string = WEB_CONVERSATION): AppChat {
@@ -730,7 +771,8 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
     links,
     limits: { maxTurns: limits.maxTurns, ...(limits.realBudgetUsd !== undefined ? { budgetUsd: limits.realBudgetUsd } : {}) },
     trace: { lines: lines.slice(-APP_TRACE_LINES), total: lines.length, figures: traceFigures(lines) },
-    ...(report?.markdown !== undefined ? { outputHtml: renderMarkdown(report.markdown) } : {}),
+    // The stop line is not a report: the page says the job wrote none, in plain words, in its place.
+    ...(wroteNothing(job) ? { noReport: `${stoppedEarlyWords(wroteNothing(job)!)} There is nothing to read. Run it again to get one: a job that runs out of turns now writes up what it has.` } : report?.markdown !== undefined ? { outputHtml: renderMarkdown(report.markdown) } : {}),
     actions: actionsOf(job, !!pull),
     ...(pull ? { pull: { repo: pull.repo, number: pull.number, ...(pull.wrote ? { wrote: pull.wrote } : {}) } } : {}),
     related,
