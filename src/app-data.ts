@@ -54,6 +54,9 @@ export const APP_HISTORY_PAGE = 50;
 /** The most trace lines one answer carries: the newest, which is what a watcher wants. */
 export const APP_TRACE_LINES = 500;
 
+/** The voice of ClearOps in the app (src/web-voice.ts). She has no jobs of her own: she hands what is asked to the chief. */
+export const CLEO = "Cleo";
+
 export interface AppSource {
   store: Store;
   queue: Pick<JobRunner, "isHeld" | "queuePosition" | "latestStep" | "liveness" | "spendState" | "capReached">;
@@ -68,6 +71,8 @@ export interface AppSource {
   openPulls?: () => { pulls: PullSummary[]; unread: string[]; loading: boolean };
   /** The app's threads that have anything in them, by address (src/web-chat.ts). */
   threads?: () => Map<string, { count: number; lastAt: string; saidAt?: string }>;
+  /** Whether Cleo can be talked to from the app just now. */
+  voice?: () => boolean;
   /** The approval gates, for what waits on Paul as each gate itself words it. Absent: named only. */
   gates?: AppGates;
   /** Where traces are read from, for the tests. */
@@ -203,6 +208,8 @@ export interface AppBoard {
   pullsUnread: string[];
   /** The list has not been read yet since the service started. */
   pullsLoading: boolean;
+  /** Whether Cleo can be talked to from the app just now (src/web-voice.ts): voice is switched on and can be transcribed. */
+  voice: boolean;
   /** The project spaces: one per managed repository, made automatically. */
   spaces: AppSpace[];
   /** Who is on shift and what each is doing this minute. */
@@ -751,8 +758,10 @@ export function appBoard(source: AppSource): AppBoard {
     paused: !!source.store.queueHold(),
     waiting: appWaiting(source.store, source.gates, now),
     jobs,
+    voice: !!source.voice?.(),
     spaces: spacesOf(jobs, open.pulls, threads, ev.spaces),
-    roster: rosterOf(jobs, spend.capReached),
+    // Cleo is on shift only when she can actually be talked to.
+    roster: [...rosterOf(jobs, spend.capReached), ...(source.voice?.() ? [{ kind: "voice", name: CLEO, role: "voice", state: "here" as const, line: "Ready to talk" }] : [])],
     hasOlder: finished.length > recent.length,
     pulls: open.pulls.map((p) => {
       const note = threads?.get(`web:pull:${p.repo}:${p.number}`);
@@ -795,6 +804,8 @@ export interface AppChatMessage {
   files?: string[];
   /** What was heard in the voice note(s) he sent with it. Empty: they could not be transcribed. Absent: none, or not transcribed yet. */
   heard?: string;
+  /** It was speech with Cleo: his words as transcribed, or hers. Shown as text. */
+  spoken?: true;
   /** A picture the service sent with it: the name the app asks its picture route for, and the caption as plain words for its description. */
   picture?: string;
   caption?: string;
@@ -869,7 +880,8 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
   return {
     generatedAt: new Date(now).toISOString(),
     messages: view.messages.map((m) =>
-      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}), ...(m.heard !== undefined ? { heard: m.heard } : {}) } : said(source, m),
+      // His own words, the chief's status line and what Cleo said aloud are plain text; what the service wrote is rendered.
+      m.from === "paul" || m.live || m.spoken ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.spoken ? { spoken: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}), ...(m.heard !== undefined ? { heard: m.heard } : {}) } : said(source, m),
     ),
     typing: view.typing,
     jobs: jobs.map((j) => toAppJob(source, j, ev)),
@@ -1037,6 +1049,23 @@ export function appAgent(source: AppSource, kind: string): AppAgent | undefined 
       windows: [],
       usual: [],
       ...(chat?.ymd === londonYmd(new Date(now)) && chat.models.length ? { repliesToday: chat.models.map((m) => ({ ...m })) } : {}),
+      jobs: [],
+    };
+  }
+  if (kind === "voice") {
+    const on = !!source.voice?.();
+    return {
+      ...base,
+      name: CLEO,
+      role: "voice",
+      does: "listens when you tap her button, hands what you ask to the chief, and says the answer aloud",
+      now: on ? { state: "here", line: "Ready to talk" } : { state: "idle", line: "Switched off" },
+      model: resolveModel(config.voice.model),
+      modelNote: "Her own quick model, set where the service runs. She speaks with a text-to-speech voice and hears through the same transcription a voice note uses.",
+      tools: ["Hand your request to the chief, in your words", "Nothing else: she cannot see your jobs, mail or files herself, and nothing said aloud can approve anything"],
+      refused: 0,
+      windows: [],
+      usual: [],
       jobs: [],
     };
   }

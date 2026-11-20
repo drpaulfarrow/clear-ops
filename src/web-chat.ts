@@ -258,6 +258,8 @@ export interface WebMessage {
    * not transcribed yet.
    */
   heard?: string;
+  /** It was speech: what Paul said to Cleo as transcribed, or what Cleo said back (src/web-voice.ts). */
+  spoken?: true;
 }
 
 export interface WebChatOptions {
@@ -392,6 +394,27 @@ export class WebChat {
     this.notes = undefined;
     this.save();
     return true;
+  }
+
+  /**
+   * A message that was spoken: what Paul said to Cleo as it was transcribed, or what Cleo said back
+   * (src/web-voice.ts). It is kept like any other message, marked so the app can show it was speech.
+   * It does not go through the messenger, so nothing is waiting on it as the chief's answer.
+   */
+  async spoken(to: string, from: "paul" | "clearops", text: string): Promise<void> {
+    const message = this.add(from, text, false, to);
+    message.spoken = true;
+    this.save();
+  }
+
+  /** The last thing the service wrote (not spoke) in a conversation: that message's id, or undefined. */
+  lastSaid(to: string): string | undefined {
+    const thread = this.threadOf(to);
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i]!;
+      if (m.from === "clearops" && !m.live && !m.spoken && m.thread === thread) return m.id;
+    }
+    return undefined;
   }
 
   /** Every message the transcript keeps, oldest first, in every conversation: for the app's search. The chief's status line is not one. */

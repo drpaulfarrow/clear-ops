@@ -895,6 +895,45 @@ test("live voice listens only to the allowlisted speaker and can never approve a
   assert.doesNotMatch(voice + bridge, /writeFile|appendFile|createWriteStream/, "voice audio is never saved");
 });
 
+test("Cleo in the web app hears only the signed-in browser, keeps no audio, and can never approve anything", () => {
+  // The eighth route under /app that changes something (20 Nov 2026): one spoken turn with Cleo. It is
+  // the same brain as the Discord voice channel's, so the same rule holds by the same code: what was
+  // said reaches the chief only through voiceRequestText, whose prefix no approval command can match.
+  const index = src("index.ts");
+  const route = index.slice(index.indexOf("app.post(`${APP_PATH}/api/voice`, async (req, res) => {"), index.indexOf("// One space's page: his notes for it"));
+  const own = route.indexOf("if (!ownScript(req)) return void res.status(403)");
+  const on = route.indexOf("if (!webVoiceOn()) return void res.status(503)");
+  const where = route.indexOf("const where = appThread(body.thread);");
+  const turn = route.indexOf("await webVoice.turn(where, webVoiceAudio(body.audio))");
+  assert.ok(own > 0 && on > own && where > on && turn > where, "this site's own script, then switched on, then a conversation that exists, and only then is anything listened to");
+  assert.doesNotMatch(route, /orchestrator|\.handle\(|parse[A-Z]\w*Command|approver|outbound|purchase|dns\b|signup|uploads|chat\.(send|inbound)\(/, "the route itself hands nothing to the chief and decides nothing");
+  // The larger body is read only for a browser that is already signed in, as with the chat's.
+  assert.match(index, /const voiceBody = express\.json\(\{ limit: WEB_VOICE_BODY_LIMIT \}\);\s*app\.post\(`\$\{APP_PATH\}\/api\/voice`, \(req, res, next\) => \(\(deps\.appAuth \?\? serviceAppAuth\)\.sessionValid\(deps\.store, req\.headers\.cookie\) \? voiceBody\(req, res, next\) : next\(\)\)\);/);
+  // What she hands the chief goes as the app's own sender, to the conversation he has open, and nowhere else.
+  assert.match(index, /new WebVoice\(\{ ask: \(sender, address, text\) => orchestrator\.handle\(sender, text, \{ replyTo: address, web: true \}\), tap, chat \}\)/);
+  const web = src("web-voice.ts");
+  const voice = src("voice.ts");
+  // The only thing that ever calls `ask` is the voice brain, and it wraps the request first.
+  assert.doesNotMatch(web, /deps\.ask\(|\.handle\(|orchestrator/, "the web voice never hands a request on itself");
+  assert.deepEqual(voice.match(/this\.deps\.ask\([^\n]*/g), ["this.deps.ask(session.sender, session.address, voiceRequestText(request)).catch((err) => console.warn(`voice: ask failed: ${err instanceof Error ? err.message : err}`));"]);
+  assert.match(web, /this\.brain = new VoiceBrain\(\{ ask: deps\.ask, tap: deps\.tap, system: WEB_VOICE_SYSTEM,/);
+  assert.match(web, /this\.brain\.setSession\(\{ address, sender: WEB_SENDER \}\);/);
+  // She is told she cannot approve, and how approval is given in the app.
+  assert.match(web, /You cannot approve anything: sending an email or invitation, a DNS change, a purchase or a merge is approved only by Paul's own tap on that item in the app/);
+  // The recording and her speech are held in memory and written nowhere, and nothing about them is logged.
+  assert.doesNotMatch(web, /writeFile|appendFile|createWriteStream|mkdirSync|uploads|console\.(log|error|warn)/, "voice audio is never saved or logged");
+  assert.match(web, /if \(given\.data\.length > Math\.ceil\(\(WEB_VOICE_BYTES \* 4\) \/ 3\) \+ 4\) throw new WebVoiceError\(413/, "a recording is measured before it is decoded");
+  // One turn at a time, and nothing is listened for between turns.
+  assert.match(web, /if \(this\.busy\) throw new WebVoiceError\(409/);
+  assert.match(web, /finally \{\s*\/\/ Nothing is listened for between turns[^\n]*\n\s*this\.brain\.setSession\(undefined\);/);
+  // The page records only while he has tapped to talk, and plays her answer without a media element.
+  const page = fs.readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
+  const cleo = page.slice(page.indexOf("/* ---------- Cleo: tap, speak, tap, and hear the answer ---------- */"), page.indexOf("const chatEl = h("));
+  assert.match(cleo, /for \(const track of stream\.getTracks\(\)\) track\.stop\(\);/, "the microphone is let go the moment he stops");
+  assert.match(cleo, /cleo\.timer = setTimeout\(\(\) => stopTalking\(true\), CLEO_MAX_MS\);/, "a turn cannot run on");
+  assert.doesNotMatch(cleo, /new Audio\(|createObjectURL|innerHTML|localStorage|store\(/, "nothing of a turn is kept in the browser");
+});
+
 test("a purchase is placed ONLY through the purchase gate, after Paul's own decision", () => {
   const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
   for (const f of files) {
@@ -1201,11 +1240,11 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
   // Two routes under /app are not a GET: the one that ends the session, and Paul's own message to the
   // chief (slice 2). Nothing under /app approves, starts, stops or edits anything directly.
-  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`", "`${APP_PATH}/api/chats`", "`${APP_PATH}/api/settings`", "`${APP_PATH}/api/spaces`"]);
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`", "`${APP_PATH}/api/chats`", "`${APP_PATH}/api/settings`", "`${APP_PATH}/api/spaces`", "`${APP_PATH}/api/voice`"]);
   // Every one of the six that does something is taken from this site's own script only. The sixth
   // (20 Nov 2026) renames or removes one of Paul's own chats and touches nothing else.
   assert.match(routes, /const ownScript = \(req: express\.Request\): boolean => \{[\s\S]*?return !!req\.is\("application\/json"\) && \(origin === undefined \|\| origin === new URL\(config\.publicUrl\)\.origin\) && \(site === undefined \|\| site === "same-origin"\);/);
-  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 7);
+  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 8);
   // The seventh (20 Nov 2026) makes, changes or removes a project space of Paul's own (src/spaces.ts): a
   // name, a chat and some of the repositories the service already manages. It can name no other
   // repository, it starts nothing, touches no job and reaches no model, and it cannot name a
@@ -1296,7 +1335,10 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(src("orchestrator.ts"), /if \(topic && "space" in topic\) \{\s*const repo = repoRegistry\.list\(\)\.find\(\(r\) => r\.alias === topic\.space\);\s*if \(!repo\) return "";/);
   assert.match(src("orchestrator.ts"), /This message is in the app's chat for one project space: the \$\{repo\.alias\} repository[^\n]*That is from the service, not from Paul\./);
   assert.match(webChatSrc, /export function isWebConversation\(address: string\): boolean \{\s*return address === WEB_CONVERSATION \|\| WEB_THREAD\.test\(address\);\s*\}/);
-  assert.equal((index.match(/web: true/g) ?? []).length, 1, "the app's route is the only caller that says a message is from the app");
+  // Two callers say a message is from the app, and both are the app: its chat route, and (20 Nov 2026)
+  // Cleo's voice in the same signed-in app, whose request the voice brain has already wrapped in its own
+  // prefix (see the web voice's own test). Nothing else in the service may.
+  assert.deepEqual(index.match(/[^\n]*web: true[^\n]*/g)?.map((l) => (/orchestrator\.handle\(WEB_SENDER, text, \{ replyTo: where, web: true,/.test(l) ? "the chat route" : /new WebVoice\(\{ ask: \(sender, address, text\) => orchestrator\.handle\(sender, text, \{ replyTo: address, web: true \}\), tap, chat \}\)/.test(l) ? "Cleo's voice" : l.trim())), ["Cleo's voice", "the chat route"], "the app's chat route and its voice are the only callers that say a message is from the app");
   for (const listener of ["discord.ts", "telegram.ts", "whatsapp.ts", "voice-bridge.ts", "instinct-chat.ts", "instinct-bridge.ts", "device.ts"]) assert.doesNotMatch(src(listener), /\bweb: true\b|WEB_SENDER/, `${listener} cannot speak as the app`);
   // In the orchestrator the app's sender passes only as exactly itself, in exactly one of its own
   // conversations (the main one or a well-formed thread), and every approval word is refused before any command is parsed.

@@ -165,6 +165,10 @@ export interface VoiceBrainDeps {
   fetch?: typeof fetch;
   /** Seconds to wait for the chief before saying the answer will come in chat. */
   answerWaitMs?: number;
+  /** What Cleo is told about where she is speaking. The Discord voice channel unless given (the web app gives its own). */
+  system?: string;
+  /** Whether she says "One moment" while the chief works. Yes in a live call, where silence is felt; no where her whole answer is spoken at once. */
+  holding?: boolean;
 }
 
 /** Strips what a voice must not say aloud: links, markdown, ids in code marks. */
@@ -211,14 +215,15 @@ export class VoiceBrain {
     const quiet = !last || last.role !== "user" || last.content?.replace(/\.+/g, "").trim() === "";
     // A pause ("...") with no news: say nothing, and make no model call.
     if (quiet && !news.length) return;
-    const system = news.length ? `${VOICE_SYSTEM}\n\nNews from ClearOps since you last spoke (pass it on briefly):\n${news.map((n) => `- ${speakable(n)}`).join("\n")}` : VOICE_SYSTEM;
+    const base = this.deps.system ?? VOICE_SYSTEM;
+    const system = news.length ? `${base}\n\nNews from ClearOps since you last spoke (pass it on briefly):\n${news.map((n) => `- ${speakable(n)}`).join("\n")}` : base;
     const messages: ChatMessage[] = [{ role: "system", content: system }, ...history];
 
     const first = await this.complete(messages, true, write, signal);
     if (!first.toolCall) return;
     // Say something now, ending the sentence with a space so it is spoken straight away, and never leave
     // Paul in silence while ClearOps works.
-    write(first.text.trim() ? " " : "One moment. ");
+    write(first.text.trim() ? " " : this.deps.holding === false ? "" : "One moment. ");
     let request = "";
     try {
       request = String(JSON.parse(first.toolCall.function.arguments || "{}").request ?? "").trim();
