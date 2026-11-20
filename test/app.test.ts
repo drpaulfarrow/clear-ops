@@ -692,10 +692,10 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal(typeof board.health.headline, "string");
 });
 
-test("six things under /app are not a GET, and the data module never writes", () => {
+test("seven things under /app are not a GET, and the data module never writes", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const appRoutes = index.slice(index.indexOf("const appAuthz ="), index.indexOf("return { app, orchestrator"));
-  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`", "post `${APP_PATH}/api/settings`"]);
+  assert.deepEqual([...appRoutes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => `${m[1]} ${m[2]}`), ["post APP_SIGN_OUT_PATH", "post `${APP_PATH}/api/chat`", "post `${APP_PATH}/api/approvals`", "post `${APP_PATH}/api/jobs/:id/action`", "post `${APP_PATH}/api/pulls/:repo/:number/merge`", "post `${APP_PATH}/api/chats`", "post `${APP_PATH}/api/settings`"]);
   assert.match(appRoutes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some/, "one gate over everything under /app");
   const data = fs.readFileSync(new URL("../src/app-data.ts", import.meta.url), "utf8");
   assert.doesNotMatch(data, /\.(updateJob|createJob|importJob|setSetting|setCapDays|setQueueHold|writeOutput|put[A-Z]\w*|update[A-Z]\w*|create[A-Z]\w*|disableSchedule|addNote)\(/);
@@ -1572,7 +1572,8 @@ test("a new chat is opened by its first message from Paul's signed-in browser, a
     for (let i = 0; i < 100 && chat.view(address).messages.at(-1)?.from !== "clearops"; i++) await new Promise((r) => setTimeout(r, 10));
     // The service named it from his first line, and it is in the list every conversation carries.
     const mine = await view(said.thread);
-    assert.deepEqual(mine.body!.chats.find((c) => `chat:${c.id}` === said.thread), { id: said.thread!.slice(5), title: "Plan the Prebid offsite", count: 2, lastAt: mine.body!.chats.find((c) => `chat:${c.id}` === said.thread)!.lastAt } as never);
+    const listed = mine.body!.chats.find((c) => `chat:${c.id}` === said.thread)!;
+    assert.deepEqual([listed.id, listed.title, listed.count], [said.thread!.slice(5), "Plan the Prebid offsite", 2]);
     assert.deepEqual(mine.body!.messages.map((m) => m.from), ["paul", "clearops"]);
     assert.match(mine.body!.messages[1]!.html!, /Lisbon is warm enough/);
     // The chief gets his words and nothing attached: a chat of his own is about no job.
@@ -1602,6 +1603,107 @@ test("a new chat is opened by its first message from Paul's signed-in browser, a
   } finally {
     chiefSays = undefined;
   }
+});
+
+test("one of Paul's own chats can be renamed and removed, and each conversation says when the service last spoke in it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-chat-manage-"));
+  let t = Date.UTC(2026, 10, 20, 8, 0, 0);
+  const own = new WebChat({ dir, now: () => (t += 1000) });
+  const a = own.open("First subject");
+  const b = own.open("Second subject");
+  const A = webOwnChat(a.id)!;
+  // A name is tidied as a first line is; nothing left of it, or a chat that is not kept, changes nothing.
+  assert.equal(own.rename(a.id, "  Malwear   launch\nideas  ")!.title, "Malwear launch");
+  assert.equal(own.rename(a.id, "x".repeat(200))!.title.length, WEB_CHAT_TITLE_MAX);
+  assert.equal(own.rename(a.id, "Malwear launch")!.title, "Malwear launch");
+  for (const bad of ["", "   ", "\n", 7, undefined, null, {}]) assert.equal(own.rename(a.id, bad), undefined, JSON.stringify(bad));
+  assert.equal(own.rename("00000000", "A name"), undefined);
+  assert.equal(own.chat(a.id)!.title, "Malwear launch");
+  assert.equal(new WebChat({ dir }).chat(a.id)!.title, "Malwear launch", "kept across a restart");
+
+  // When the service last spoke: his own messages do not count, and neither does a line still being written.
+  assert.equal(own.mainSaidAt(), undefined);
+  own.inbound("Hello", A);
+  assert.equal(own.ownChats().find((c) => c.id === a.id)!.saidAt, undefined);
+  await own.send(A, "A reply");
+  const said = own.ownChats().find((c) => c.id === a.id)!.saidAt!;
+  assert.equal(said, own.view(A).messages.at(-1)!.at);
+  own.inbound("And another thing", A);
+  assert.equal(own.ownChats().find((c) => c.id === a.id)!.saidAt, said, "his own later message does not move it");
+  await own.sendEditable(A, "working…");
+  assert.equal(own.ownChats().find((c) => c.id === a.id)!.saidAt, said);
+  await own.send(WEB_CONVERSATION, "In the main conversation");
+  assert.equal(own.mainSaidAt(), own.view().messages.at(-1)!.at);
+  assert.equal(own.ownChats().find((c) => c.id === b.id)!.saidAt, undefined);
+
+  // Removing one takes its messages and pictures with it, and leaves everything else.
+  const png = path.join(dir, "shot.png");
+  fs.writeFileSync(png, PNG);
+  await own.sendImage(A, png, "A picture in it");
+  const picture = own.view(A).messages.at(-1)!.picture!;
+  own.inbound("Stays", webOwnChat(b.id)!);
+  assert.equal(own.close("00000000"), false);
+  assert.equal(own.close(a.id), true);
+  assert.equal(own.chat(a.id), undefined);
+  assert.equal(own.picture(picture), undefined);
+  assert.ok(!fs.existsSync(path.join(dir, "app", "pictures", picture)));
+  assert.deepEqual(own.ownChats().map((c) => c.id), [b.id]);
+  assert.deepEqual(own.view(webOwnChat(b.id)!).messages.map((m) => m.text), ["Stays"]);
+  assert.equal(own.view().messages.at(-1)!.text, "In the main conversation");
+  assert.equal(own.close(a.id), false, "already gone");
+  assert.equal(new WebChat({ dir }).chat(a.id), undefined);
+});
+
+test("renaming and removing a chat is Paul's own tap from his signed-in browser, on a chat the service keeps and nothing else", async () => {
+  const cookie = await session();
+  const manage = (body: unknown, c?: string, extra: Record<string, string> = {}) => postApi("/chats", body, c, extra);
+  chiefSays = "Here to help.";
+  let id = "";
+  let address = "";
+  try {
+    const opened = (await (await postChat({ text: "A chat to manage", thread: WEB_NEW_CHAT }, cookie)).json()) as { thread: string };
+    id = opened.thread.slice(5);
+    address = `web:chat:${id}`;
+    for (let i = 0; i < 200 && store.getSession(address) === undefined; i++) await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    chiefSays = undefined;
+  }
+  assert.ok(store.getSession(address), "the chief has a conversation there");
+
+  // Not signed in, another site's page, or a form post: nothing.
+  assert.equal((await manage({ id, action: "delete" })).status, 401);
+  assert.equal((await manage({ id, action: "delete" }, cookie, { origin: "https://evil.example" })).status, 403);
+  assert.equal((await fetch(`${base}${APP_PATH}/api/chats`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", origin: process.env.PUBLIC_URL!, cookie }, body: `id=${id}&action=delete` })).status, 403);
+  assert.ok(chat.chat(id), "none of that removed it");
+  // Only a chat the transcript keeps, by its own id: not Main, not a thread, not a path, not another shape.
+  for (const bad of ["main", "", "00000000", `chat:${id}`, address, "web:main", "job:abc123", "../" + id, 7, null, [id]]) assert.equal((await manage({ id: bad, action: "delete" }, cookie)).status, 404, JSON.stringify(bad));
+  // Only renaming and removing.
+  for (const action of ["open", "clear", "", undefined, "DELETE"]) assert.equal((await manage({ id, action }, cookie)).status, 400, String(action));
+  assert.equal((await manage({ id, action: "rename", title: "   " }, cookie)).status, 400);
+  assert.equal((await manage({ id, action: "rename" }, cookie)).status, 400);
+
+  const renamed = await manage({ id, action: "rename", title: "  A better   name " }, cookie);
+  assert.deepEqual([renamed.status, await renamed.json()], [200, { ok: true, title: "A better name" }]);
+  const view = (await chatView(cookie)) as unknown as { chats: Array<{ id: string; title: string; saidAt?: string }>; mainSaidAt?: string };
+  assert.equal(view.chats.find((c) => c.id === id)!.title, "A better name");
+  assert.equal(view.mainSaidAt, chat.mainSaidAt());
+  assert.equal(view.chats.find((c) => c.id === id)!.saidAt, chat.ownChats().find((c) => c.id === id)!.saidAt);
+
+  const main = chat.view().messages.length;
+  assert.deepEqual([(await manage({ id, action: "delete" }, cookie)).status, chat.chat(id)], [200, undefined]);
+  assert.equal(store.getSession(address), undefined, "the chief's side of it is forgotten");
+  assert.equal((await get(`${APP_PATH}/api/chat?thread=${encodeURIComponent(`chat:${id}`)}`, cookie)).status, 404);
+  assert.equal((await postChat({ text: "into the void", thread: `chat:${id}` }, cookie)).status, 404);
+  assert.equal((await manage({ id, action: "delete" }, cookie)).status, 404, "gone is gone");
+  assert.equal(chat.view().messages.length, main, "Main is untouched");
+  // A job that reports to it later is heard in Main.
+  await chat.send(address, "Finished: a job started in the chat that is gone");
+  assert.equal(chat.view().messages.at(-1)!.text, "Finished: a job started in the chat that is gone");
+
+  // In the page: deleting takes a second tap, and nothing opens a browser dialog.
+  const script = appAsset("app.js")!.body.toString();
+  assert.match(script, /state\.chatEdit === "delete"[\s\S]{0,400}?onclick: \(\) => void manageChat\("delete"\) \}, "Delete it"\)/);
+  assert.doesNotMatch(script, /\b(?:confirm|alert)\(|window\.prompt\(/);
 });
 
 test("a message in a job's thread reaches the chief with that job attached, and stays in that thread", async () => {

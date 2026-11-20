@@ -660,7 +660,9 @@ export interface AppChat {
   /** The jobs started from this conversation, newest last, so the app can show each as a live card. */
   jobs: AppJob[];
   /** Paul's own chats beside the main one, the one spoken in most recently first. */
-  chats: Array<{ id: string; title: string; count: number; lastAt: string }>;
+  chats: Array<{ id: string; title: string; count: number; lastAt: string; saidAt?: string }>;
+  /** When the service last spoke in the main conversation and in each chat (`saidAt`), so the app can mark what has something new. */
+  mainSaidAt?: string;
 }
 
 /** How many of the conversation's jobs ride along with the chat. */
@@ -680,7 +682,7 @@ function said(source: AppSource, m: WebMessage): AppChatMessage {
   return { id: m.id, at: m.at, from: m.from, html: renderMarkdown(text), ...(m.picture ? { picture: m.picture, caption: m.text } : {}), ...(job ? { report: { job: job.id, title: jobTitle(job) } } : {}) };
 }
 
-export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial<Pick<WebChat, "ownChats">>, conversation: string = WEB_CONVERSATION): AppChat {
+export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial<Pick<WebChat, "ownChats" | "mainSaidAt">>, conversation: string = WEB_CONVERSATION): AppChat {
   const now = source.now ?? Date.now();
   const view = chat.view(conversation);
   const ev = evidenceOf(source.store);
@@ -697,7 +699,8 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
     typing: view.typing,
     jobs: jobs.map((j) => toAppJob(source, j, ev)),
     // Paul's own chats, for the list he switches between: the same whichever conversation was asked for.
-    chats: (chat.ownChats?.() ?? []).map((c) => ({ id: c.id, title: c.title, count: c.count, lastAt: c.lastAt })),
+    chats: (chat.ownChats?.() ?? []).map((c) => ({ id: c.id, title: c.title, count: c.count, lastAt: c.lastAt, ...(c.saidAt ? { saidAt: c.saidAt } : {}) })),
+    ...(chat.mainSaidAt?.() ? { mainSaidAt: chat.mainSaidAt() } : {}),
   };
 }
 

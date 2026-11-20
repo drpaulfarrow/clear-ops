@@ -365,3 +365,13 @@ a.spend{text-decoration:none;color:inherit}
 .report-pane .report-body::after{content:"";position:absolute;left:0;right:0;bottom:0;height:72px;background:linear-gradient(to bottom,transparent,var(--surface));pointer-events:none}
 .report-pane.open .report-body{max-height:none;overflow:visible}
 .report-pane.open .report-body::after{display:none}
+
+/* ---------- Managing a chat, and the mark for something new ---------- */
+.new-dot{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:8px;vertical-align:middle}
+.chat-pick .new-dot{margin:0}
+.chat-manage{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:6px;padding:10px 6px 4px;border-top:1px solid var(--line)}
+.chat-manage-label{font-size:12px;padding:0 6px;margin-right:auto}
+.chat-manage-ask{flex:1 1 100%;font-size:13px;color:var(--text-2);padding:0 6px}
+.chat-name{flex:1 1 180px;min-width:0;border-radius:12px;font-size:16px}
+.btn.danger{border:0;background:var(--bad);color:#1A0606;font-weight:600}
+.btn.danger:hover{background:var(--bad-text);color:#1A0606}

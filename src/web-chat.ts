@@ -60,6 +60,12 @@ export const WEB_CHATS_MAX = 50;
 /** The longest name a chat is given. */
 export const WEB_CHAT_TITLE_MAX = 48;
 
+/** A chat's name from some words: their first line, tidied and cut short. Empty when nothing is left. */
+function chatTitle(words: string): string {
+  const line = redact(words).split("\n").find((l) => l.trim())?.replace(/\s+/g, " ").trim() ?? "";
+  return line.length > WEB_CHAT_TITLE_MAX ? `${line.slice(0, WEB_CHAT_TITLE_MAX - 1).trimEnd()}\u2026` : line;
+}
+
 /** One of Paul's own chats: the id the service gave it and the name it took from his first words. */
 export interface OwnChat {
   id: string;
@@ -254,7 +260,8 @@ export class WebChat {
   private seq = 0;
   private typingUntil = new Map<string, number>();
   /** `threads()` as last worked out, until a message is added or removed. The board asks every few seconds. */
-  private notes?: Map<string, { count: number; lastAt: string }>;
+  private notes?: Map<string, { count: number; lastAt: string; saidAt?: string }>;
+  private mainSaid?: string;
   private readonly file?: string;
   /** Where kept pictures live, beside the transcript. Absent (no data directory): they are held in memory. */
   private readonly pictures?: string;
@@ -316,8 +323,7 @@ export class WebChat {
    * WEB_CHATS_MAX the chat quiet for longest goes, with its messages and pictures.
    */
   open(firstWords: string): OwnChat {
-    const line = redact(firstWords).split("\n").find((l) => l.trim())?.replace(/\s+/g, " ").trim() ?? "";
-    const title = line.length > WEB_CHAT_TITLE_MAX ? `${line.slice(0, WEB_CHAT_TITLE_MAX - 1).trimEnd()}\u2026` : line || "New chat";
+    const title = chatTitle(firstWords) || "New chat";
     let id = randomBytes(4).toString("hex");
     while (this.chats.some((c) => c.id === id)) id = randomBytes(4).toString("hex");
     const opened: OwnChat = { id, title, createdAt: new Date(this.now()).toISOString() };
@@ -340,11 +346,39 @@ export class WebChat {
   }
 
   /** His own chats for the app's list: the one spoken in most recently first. */
-  ownChats(): Array<OwnChat & { count: number; lastAt: string }> {
+  ownChats(): Array<OwnChat & { count: number; lastAt: string; saidAt?: string }> {
     const notes = this.threads();
     return this.chats
-      .map((c) => ({ ...c, count: notes.get(`web:chat:${c.id}`)?.count ?? 0, lastAt: notes.get(`web:chat:${c.id}`)?.lastAt ?? c.createdAt }))
+      .map((c) => {
+        const note = notes.get(`web:chat:${c.id}`);
+        return { ...c, count: note?.count ?? 0, lastAt: note?.lastAt ?? c.createdAt, ...(note?.saidAt ? { saidAt: note.saidAt } : {}) };
+      })
       .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+  }
+
+  /** A new name for one of his own chats, tidied as its first name was. Undefined: no such chat, or nothing left of the name. */
+  rename(id: string, title: unknown): OwnChat | undefined {
+    const chat = this.chats.find((c) => c.id === id);
+    const name = typeof title === "string" ? chatTitle(title) : "";
+    if (!chat || !name) return undefined;
+    chat.title = name;
+    this.save();
+    return chat;
+  }
+
+  /**
+   * Removes one of his own chats for good, with its messages and pictures. There is no way back, so the
+   * app asks first. A job started there that finishes later reports in the main conversation (`threadOf`).
+   */
+  close(id: string): boolean {
+    const address = `web:chat:${id}`;
+    if (!this.chats.some((c) => c.id === id)) return false;
+    for (const m of this.messages) if (m.thread === address && m.picture) this.discard(m.picture);
+    this.chats = this.chats.filter((c) => c.id !== id);
+    this.messages = this.messages.filter((m) => m.thread !== address);
+    this.notes = undefined;
+    this.save();
+    return true;
   }
 
   private in(thread: string | undefined): WebMessage[] {
@@ -432,11 +466,27 @@ export class WebChat {
   }
 
   /** Every thread that has anything in it: how many messages, and when the last was. */
-  threads(): Map<string, { count: number; lastAt: string }> {
+  threads(): Map<string, { count: number; lastAt: string; saidAt?: string }> {
     if (this.notes) return this.notes;
-    const out = new Map<string, { count: number; lastAt: string }>();
-    for (const m of this.messages) if (m.thread && !m.live) out.set(m.thread, { count: (out.get(m.thread)?.count ?? 0) + 1, lastAt: m.at });
+    const out = new Map<string, { count: number; lastAt: string; saidAt?: string }>();
+    this.mainSaid = undefined;
+    for (const m of this.messages) {
+      if (m.live) continue;
+      // The main conversation is not a thread: only when the service last spoke in it is kept, beside the map.
+      if (!m.thread) {
+        if (m.from === "clearops") this.mainSaid = m.at;
+        continue;
+      }
+      const was = out.get(m.thread);
+      out.set(m.thread, { count: (was?.count ?? 0) + 1, lastAt: m.at, ...(m.from === "clearops" ? { saidAt: m.at } : was?.saidAt ? { saidAt: was.saidAt } : {}) });
+    }
     return (this.notes = out);
+  }
+
+  /** When the service last said something in the main conversation, so the app can mark it as having something new. */
+  mainSaidAt(): string | undefined {
+    this.threads();
+    return this.mainSaid;
   }
 
   /* ---------- The Messenger side: what the service says to the conversation ---------- */

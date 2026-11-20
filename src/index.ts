@@ -1051,6 +1051,29 @@ export function buildApp(given: AppDeps) {
   });
   // One setting changed from the Spend page (src/live-settings.ts): a cap or a role's model, or either
   // put back to the deploy's own. Paul's own tap, from this site's own script; nothing else writes these.
+  /**
+   * Paul's own tap on one of his own chats: a new name, or removing it for good. Only a chat the
+   * transcript keeps, named by the id the service made; nothing else can be renamed or removed here.
+   * Removing also forgets the chief's side of that conversation.
+   */
+  app.post(`${APP_PATH}/api/chats`, (req, res) => {
+    appHeaders(res);
+    if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
+    const body = (req.body ?? {}) as { id?: unknown; action?: unknown; title?: unknown };
+    const id = typeof body.id === "string" ? body.id : "";
+    const address = chat.chat(id) ? webOwnChat(id) : undefined;
+    if (!address) return void res.status(404).json({ error: "There is no such chat." });
+    if (body.action === "rename") {
+      const renamed = chat.rename(id, body.title);
+      return void (renamed ? res.json({ ok: true, title: renamed.title }) : res.status(400).json({ error: "A chat needs a name." }));
+    }
+    if (body.action === "delete") {
+      chat.close(id);
+      deps.store.clearSession(address);
+      return void res.json({ ok: true });
+    }
+    res.status(400).json({ error: "That is not something a chat can do." });
+  });
   app.post(`${APP_PATH}/api/settings`, (req, res) => {
     appHeaders(res);
     if (!ownScript(req)) return void res.status(403).json({ error: "refused" });

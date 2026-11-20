@@ -155,7 +155,11 @@ Paul asked on 19 Nov 2026 to start a new chat on a new subject whenever he likes
 - **Main is where the service reports**: decisions, settings changes and the cards for what is waiting on him appear there only. A chat of his own stays on its subject, and the header still says when something waits.
 - **Limits.** 50 chats, each keeping as much as the main conversation. Opening one more drops the chat quiet for longest, with its messages and pictures. A job that finishes after its chat has gone reports in Main.
 
-Not here yet: renaming or deleting a chat, and a marker for a chat with something new in it.
+Renaming, deleting and a mark for something new came the next day (`rename`, `close` and `mainSaidAt` in `src/web-chat.ts`; `docs/app/chat-manage.png`):
+
+- **Rename and Delete** sit under the list for the chat being shown. Main has neither. Deleting cannot be undone, so it takes a second tap, in the page and never in a browser dialog. It removes the chat's messages and pictures and the chief's side of that conversation. Jobs started there are kept, and one that finishes later reports in Main.
+- **Something new.** A dot marks a conversation the service has spoken in since it was last looked at, in the list and on the bar when it is another conversation than the one on screen. What has been looked at is kept in the browser only, so a phone and a laptop each keep their own, and the first sight of a conversation counts as looked at.
+- **One more route that is not a GET**, `POST /app/api/chats`, taken from the site's own script like the rest. It names a chat only by an id the transcript keeps and can only rename or remove it. The invariant test's list of such routes grows by one and pins that.
 
 ### What this changes in the rules
 
