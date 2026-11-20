@@ -269,6 +269,13 @@ function jobLine(job, now) {
   return h("div", { class: `card-line${tone}` }, h("span", {}, `${job.outcome?.text ?? "The run finished."} ${ago(job.finishedAt, now) ?? ""}`));
 }
 
+/**
+ * For a job with no figure of its own yet: what finished jobs of its kind on its model usually cost.
+ * Worded as what jobs like it cost, never as this job's cost.
+ */
+const usualLine = (job) => (job.usual ? h("div", { class: "card-line usual" }, h("span", {}, `Jobs like this usually cost about ${money(job.usual.usd)}`)) : null);
+const usualWords = (u) => `Jobs like this usually cost about ${money(u.usd)} on this model${u.lowUsd !== u.highUsd ? `, mostly ${money(u.lowUsd)} to ${money(u.highUsd)}` : ""}. An estimate from ${u.jobs} past jobs, not this job's cost.`;
+
 /** That something has been said in a job's or a pull request's own thread. */
 const threadNote = (note, now) => (note ? h("div", { class: "card-line" }, h("span", {}, `Thread: ${note.count} ${note.count === 1 ? "message" : "messages"}, the last ${ago(note.lastAt, now)}.`)) : null);
 
@@ -284,6 +291,7 @@ function jobCard(job, now) {
       job.costUsd !== undefined ? h("div", { class: "card-cost num" }, money(job.costUsd)) : null,
     ),
     jobLine(job, now),
+    usualLine(job),
     job.said ? h("div", { class: "card-said" }, job.said) : null,
     threadNote(job.thread, now),
   );
@@ -563,7 +571,11 @@ function jobActions(detail) {
   if (a.retry) out.push(h("button", { class: "btn", type: "button", disabled: busy, onclick: () => { say("Asked for a retry. The answer is in the chat."); void send(`retry ${job.id}`); draw(); } }, "Try again"));
   if (a.rerunModels.length) {
     const chosen = a.rerunModels.includes(state.rerunModel) ? state.rerunModel : a.rerunModels[0];
-    const select = h("select", { class: "pick", "aria-label": "Model to run it on", onchange: (e) => { state.rerunModel = e.target.value; } }, a.rerunModels.map((m) => h("option", { value: m, selected: m === chosen }, modelName(m))));
+    const select = h("select", { class: "pick", "aria-label": "Model to run it on", onchange: (e) => { state.rerunModel = e.target.value; } }, a.rerunModels.map((m) => {
+      // Where enough jobs of this kind have finished on a model to say, what one usually costs there.
+      const usual = (a.rerunUsual ?? []).find((u) => u.model === m);
+      return h("option", { value: m, selected: m === chosen }, usual ? `${modelName(m)} · usually ${money(usual.usd)}` : modelName(m));
+    }));
     out.push(
       h(
         "span",
@@ -810,7 +822,18 @@ function spendPage() {
   );
   const caps = h("section", { class: "pane", "aria-label": "Caps" }, h("h2", {}, "Caps"), h("p", { class: "muted" }, "A change applies at once and stays until you change it back. A job already running keeps the cap it started with."), page.settings.caps.map(capRow));
   const models = h("section", { class: "pane", "aria-label": "Models" }, h("h2", {}, "Models"), h("p", { class: "muted" }, "Which model each role runs on. It applies to the next run. The assistant for mail and calendar always runs on Claude and is not here."), page.settings.roles.map((r) => roleRow(r, page.settings.choices)));
-  return h("main", { class: "page" }, back, noticeBar(), today, went, caps, models);
+  // What a job usually costs, so a model can be chosen with the price in view. Placed above the models
+  // themselves: it is what a change there would change.
+  const usual = h(
+    "section",
+    { class: "pane", "aria-label": "What a job usually costs" },
+    h("h2", {}, "What a job usually costs"),
+    h("p", { class: "muted" }, "From the provider's own figures for jobs that finished: the middle of what each kind cost on each model, and the range most fell in. An estimate, so it needs at least three finished jobs of a kind on one model and follows the newest thirty."),
+    (page.usual ?? []).length
+      ? h("div", { class: "rows" }, page.usual.map((u) => h("div", { class: "row plain" }, h("div", { class: "row-main" }, h("div", { class: "card-title" }, `${u.who} on ${modelName(u.model)}`), h("div", { class: "card-sub" }, `${u.lowUsd !== u.highUsd ? `mostly ${money(u.lowUsd)} to ${money(u.highUsd)}, ` : ""}from ${u.jobs} jobs`)), h("div", { class: "row-right num" }, `about ${money(u.usd)}`))))
+      : h("p", { class: "muted" }, "Not enough finished jobs with a real figure yet to say."),
+  );
+  return h("main", { class: "page" }, back, noticeBar(), today, went, usual, caps, models);
 }
 
 /* ---------- Files and voice notes that go with a message ---------- */
@@ -1267,7 +1290,7 @@ function jobPage() {
     if (cap) fill.style.width = `${Math.min(100, Math.round((job.costUsd / cap) * 100))}%`;
     cost = stat("Cost", [money(job.costUsd), cap ? h("small", {}, ` of ${money(cap)} job cap`) : null], "The provider's own figure.", cap ? h("div", { class: "meter thin", "aria-hidden": "true" }, fill) : null);
   } else {
-    cost = stat("Cost", h("small", {}, "No real figure"), job.status === "running" ? "A job's cost is recorded when it finishes." : "The store holds no provider figure for this job.");
+    cost = stat("Cost", h("small", {}, job.usual ? "No figure yet" : "No real figure"), job.usual ? usualWords(job.usual) : job.status === "running" ? "A job's cost is recorded when it finishes." : "The store holds no provider figure for this job.");
   }
   const model = stat("Model", modelName(job.model) ?? h("small", {}, "Not recorded"), job.modelPinned ? "Pinned for this job." : job.model ? "This role's current model." : "Only pinned and live jobs say which.");
   const steps = stat("Steps", [String(f.steps), h("small", {}, ` · limit ${detail.limits.maxTurns} turns`)], f.errors ? `${f.errors} of them failed.` : detail.trace.total ? "None failed." : "No trace is saved for this job.");

@@ -187,9 +187,23 @@ Paul's ask on 20 Nov 2026: when a job makes a document, it should come up in the
 - **A link only where there is something to read.** A job recorded as done whose whole output is the line saying the run was stopped (one that ran out of turns before 20 Nov 2026) wrote no report. Its message says "No report was written" and points at the job, its card says it did not do what was asked, and its page says why where the report would be. The SDK's own wording never reaches him. A job whose output is withheld or gone keeps the sentence as it was sent.
 - **The report is first on the job's page**, directly under the figures. It was last, below the thread and a long trace, where a phone hid it. It starts short so the rest of the page stays within reach, with "Read it all" to open it.
 
+## What a job usually costs, before it has a figure (`src/estimates.ts`)
+
+A job has no cost until it has finished and the provider has priced it. Until then the app says what finished jobs of its kind have usually cost on its model, so Paul can see roughly what is coming and which model is cheaper for the same work. `docs/app/estimate.png` shows it with made-up figures.
+
+- **Where it appears.** On a queued or running job's card ("Jobs like this usually cost about $0.61"), in its page's cost tile under "No figure yet", beside each model in the picker for running a job again ("glm-5.3 · usually $0.61"), and as a table on the Spend page, the dearest first.
+- **What it is worked out from.** Only the provider's own figures (`realCost`) for jobs that ran to the end. The Agent SDK's estimate is never read. A failed, stopped or cancelled job is left out, and so is a figure the provider gave as a lower bound. A job's model is the one it was pinned to, or the one more than half of its charges were for (a worker's small helper calls go to a cheaper model and are part of what the job costs). Deep research is counted apart from ordinary research.
+- **What the number is.** The median of the newest 30 such jobs (`ESTIMATE_RECENT`), with the range the middle half fell in, so one runaway job does not move it and old prices fall out.
+- **When there is none.** With fewer than three such jobs of a kind on a model (`ESTIMATE_MIN_JOBS`), or when the job's model is not known, nothing is shown. Nothing is guessed.
+- **What it is not.** It is not the job's cost and is never put where a cost goes: the card's own figure and the tile's number stay empty until the provider's figure arrives. It is always worded as what jobs like it usually cost. It feeds no cap and holds nothing up.
+
+### What this changes in the rules
+
+"Money is the provider's own figure or nothing" gains one stated exception, on Paul's ask for an estimate before a job starts (20 Nov 2026): this figure is not any one job's, it is worked out from provider figures only, and it is always labelled as an estimate. `test/estimates.test.ts` and `test/invariants.test.ts` hold it to that.
+
 ## Still to come
 
-What it does not do yet: a cost estimate before a job starts, project spaces of Paul's own (each with its own chat), live voice with Cleo, push notifications, search. Each is a later slice.
+What it does not do yet: project spaces of Paul's own (each with its own chat), live voice with Cleo, push notifications, search. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 
@@ -239,7 +253,7 @@ One middleware over everything under `/app`, matched the way Express matches rou
 
 The app shows more than the jobs board at `/jobs`, on Paul's instruction: spend, a job's cost and its trace. The rules those already live by are unchanged.
 
-- **Money is the provider's own figure or nothing.** Today's spend goes through `spendDisplay`; when OpenRouter cannot be read the app says so and shows no number. A job's cost is `realCost` (`src/worker-stats.ts`), which never returns the Agent SDK's estimate. Until jobs record a provider figure, a job's cost reads "No real figure".
+- **Money is the provider's own figure or nothing.** Today's spend goes through `spendDisplay`; when OpenRouter cannot be read the app says so and shows no number. A job's cost is `realCost` (`src/worker-stats.ts`), which never returns the Agent SDK's estimate. Until jobs record a provider figure, a job's cost reads "No real figure". The one figure that is not a job's own is what finished jobs of its kind usually cost on its model (`src/estimates.ts`): worked out from those provider figures alone, shown only as an estimate, and never where a cost goes.
 - **A trace is served as `src/trace.ts` stored it**: clipped, redacted, and names and outcomes only for the kinds that work over Paul's mail, calendar, CV and zones.
 - **A saved output is served only where the reports view would serve it** (`reportFor`), rendered by `src/reports.ts`, which escapes everything.
 - **A model is shown only where it is known**: a pinned job's own, or a running or queued job's current role model. A finished, unpinned job says "Not recorded".

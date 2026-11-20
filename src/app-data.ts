@@ -9,6 +9,9 @@
  *  - Money is the provider's own figure or nothing. Today's spend goes through `spendDisplay`, so when
  *    OpenRouter cannot be read the app says so and shows no number; a job's cost is `realCost`, which
  *    never returns the Agent SDK's estimate.
+ *    The one figure that is not a job's own is what finished jobs of its kind usually cost on its model
+ *    (src/estimates.ts): worked out from those provider figures alone, sent apart from any cost
+ *    (`usual`), and shown only as an estimate.
  *  - A trace is served exactly as src/trace.ts stored it: already clipped and redacted, and names and
  *    outcomes only for the kinds that work over Paul's mail, calendar, CV and zones.
  *  - A saved output is served only where src/reports.ts would serve it (`reportFor`), so an assistant,
@@ -34,6 +37,7 @@ import { spendDisplay } from "./spend.js";
 import { jobTitle } from "./titles.js";
 import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
 import { realCost } from "./worker-stats.js";
+import { costEstimates, estimateFor, type CostEstimate } from "./estimates.js";
 import { WEB_CONVERSATION, type WebChat, type WebMessage } from "./web-chat.js";
 import type { ProbeResult } from "./health.js";
 import type { PrInfo } from "./pr-state.js";
@@ -89,6 +93,12 @@ export interface AppJob {
   modelPinned?: boolean;
   /** What the job really cost, where the store holds the provider's own figure. Never an estimate. */
   costUsd?: number;
+  /**
+   * For a job waiting or running with no figure of its own yet: what finished jobs of its kind on its
+   * model usually cost (the middle, and the range the middle half fell in), and how many that is from.
+   * An estimate from history, shown as one; never this job's cost.
+   */
+  usual?: { usd: number; lowUsd: number; highUsd: number; jobs: number };
   /** A pull request address, where the job has one. */
   pr?: string;
   /** Its thread in the app, when anything has been said there. */
@@ -226,6 +236,8 @@ interface Evidence {
   acts: Map<string, Array<{ what: "purchase" | "email" | "dns" | "signup"; status: string; line: string }>>;
   /** The newest review of each engineering job, by that job's id. */
   reviews: Map<string, Job>;
+  /** What each kind of job usually costs on each model, from finished jobs' real figures (src/estimates.ts). */
+  estimates: CostEstimate[];
 }
 
 function evidenceOf(store: Store): Evidence {
@@ -244,7 +256,7 @@ function evidenceOf(store: Store): Evidence {
     const seen = reviews.get(j.reviewOf);
     if (!seen || (seen.finishedAt ?? "") < (j.finishedAt ?? "")) reviews.set(j.reviewOf, j);
   }
-  return { acts, reviews };
+  return { acts, reviews, estimates: costEstimates(store.allJobs()) };
 }
 
 /** A finished review's own verdict lines, read once: a saved output does not change. */
@@ -398,6 +410,8 @@ function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
   const pr = source.jobPull?.(job)?.url ?? (job.pr && PR_URL.test(job.pr) ? job.pr : undefined);
   const note = source.threads?.().get(`web:job:${job.id}`);
   const said = job.status === "done" || job.status === "failed" ? saidOf(job) : undefined;
+  // What jobs like it usually cost, only while it has no figure of its own and its model is known.
+  const usual = cost === undefined && (job.status === "queued" || job.status === "running") ? estimateFor(ev.estimates, job, modelOf(job).model) : undefined;
   const base: AppJob = {
     id: job.id,
     title: jobTitle(job),
@@ -412,6 +426,7 @@ function toAppJob(source: AppSource, job: Job, ev: Evidence): AppJob {
     ...(job.lastActivityAt ? { lastActivityAt: job.lastActivityAt } : {}),
     ...modelOf(job),
     ...(cost !== undefined ? { costUsd: cost } : {}),
+    ...(usual ? { usual: { usd: usual.usd, lowUsd: usual.lowUsd, highUsd: usual.highUsd, jobs: usual.jobs } } : {}),
     ...(pr ? { pr } : {}),
     ...(note ? { thread: note } : {}),
     ...(job.fixRound ? { fixRound: job.fixRound } : {}),
@@ -480,6 +495,8 @@ export interface AppSpendPage {
   unattributedUsd?: number;
   /** Jobs that finished today with no figure of their own. */
   withoutFigure: number;
+  /** What each kind of job usually costs on each model, from finished jobs' real figures; the dearest first. */
+  usual: Array<CostEstimate & { who: string }>;
   settings: LiveView;
 }
 
@@ -536,6 +553,10 @@ export function appSpend(source: AppSource): AppSpendPage {
       .slice(0, APP_SPEND_JOBS)
       .map(({ job, usd }) => ({ id: job.id, title: jobTitle(job), kind: job.kind, who: kindName(job.kind), repositoryName: repoLabel(lockKey(job) ?? job.target ?? "product"), costUsd: usd })),
     byAgentModel: [...rows.values()].sort((a, b) => b.usd - a.usd),
+    usual: costEstimates(source.store.allJobs()).map((e) => {
+      const who = e.kind === "research, deep" ? `${kindName("research")} (deep)` : kindName(e.kind);
+      return { ...e, who: who.charAt(0).toUpperCase() + who.slice(1) };
+    }),
     byProject: group((j) => repoLabel(lockKey(j) ?? j.target ?? "product")),
     attributedUsd: attributed,
     ...(spend.usd !== undefined && spend.usd >= attributed ? { unattributedUsd: spend.usd - attributed } : {}),
@@ -584,19 +605,27 @@ export interface AppJobActions {
   retry: boolean;
   /** The models it may be run again on; empty when it may not. */
   rerunModels: string[];
+  /** What a job of this kind usually costs on each of those models, where enough have finished to say. */
+  rerunUsual?: Array<{ model: string; usd: number; jobs: number }>;
   /** It has a pull request the app can show and, when nothing blocks it, merge (src/app-pulls.ts). */
   review: boolean;
 }
 
-function actionsOf(job: Job, review: boolean): AppJobActions {
+function actionsOf(job: Job, review: boolean, estimates: readonly CostEstimate[] = []): AppJobActions {
   const active = job.status === "running" || job.status === "queued";
+  const models = rerunRefusal(job) ? [] : [...PER_JOB_MODELS];
+  const usual = models.flatMap((model) => {
+    const e = estimateFor(estimates, job, model);
+    return e ? [{ model, usd: e.usd, jobs: e.jobs }] : [];
+  });
   return {
     verdict: job.status === "done" || job.status === "failed",
     ...(job.verdict ? { yourVerdict: job.verdict.met } : {}),
     cancel: active,
     front: job.status === "queued" && !!job.waitingFor && job.waitingFor !== job.id,
     retry: job.status === "failed",
-    rerunModels: rerunRefusal(job) ? [] : [...PER_JOB_MODELS],
+    rerunModels: models,
+    ...(usual.length ? { rerunUsual: usual } : {}),
     review,
   };
 }
@@ -753,7 +782,8 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
   const job = source.store.getJob(id);
   if (!job) return undefined;
   const now = source.now ?? Date.now();
-  const app = toAppJob(source, job, evidenceOf(source.store));
+  const ev = evidenceOf(source.store);
+  const app = toAppJob(source, job, ev);
   const links = app.pr ? [{ what: "pull request", url: app.pr }] : [];
   const pull = source.jobPull?.(job);
   const described = describeJob(job, { hasPullRequest: !!app.pr }, app.repository);
@@ -776,7 +806,7 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
     trace: { lines: lines.slice(-APP_TRACE_LINES), total: lines.length, figures: traceFigures(lines) },
     // The stop line is not a report: the page says the job wrote none, in plain words, in its place.
     ...(wroteNothing(job) ? { noReport: `${stoppedEarlyWords(wroteNothing(job)!)} There is nothing to read. Run it again to get one: a job that runs out of turns now writes up what it has.` } : report?.markdown !== undefined ? { outputHtml: renderMarkdown(report.markdown) } : {}),
-    actions: actionsOf(job, !!pull),
+    actions: actionsOf(job, !!pull, ev.estimates),
     ...(pull ? { pull: { repo: pull.repo, number: pull.number, ...(pull.wrote ? { wrote: pull.wrote } : {}) } } : {}),
     related,
   };
