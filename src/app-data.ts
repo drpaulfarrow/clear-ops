@@ -28,11 +28,11 @@ import { failureLabel } from "./failures.js";
 import { boardHealth } from "./health.js";
 import { describeJob, kindName, liveStep, repoLabel } from "./job-descriptions.js";
 import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
-import { plainStop, REPORT_POINTER, shortText, stoppedEarly, stoppedEarlyWords } from "./messages.js";
+import { AGENT_NAMES, plainStop, REPORT_POINTER, shortText, stoppedEarly, stoppedEarlyWords } from "./messages.js";
 import { PER_JOB_MODELS, resolveModel, runRoute } from "./llm.js";
 import { londonYmd } from "./london.js";
 import { renderMarkdown, reportFor } from "./reports.js";
-import { redact } from "./repos.js";
+import { redact, repoRegistry } from "./repos.js";
 import { spendDisplay } from "./spend.js";
 import { jobTitle } from "./titles.js";
 import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
@@ -200,6 +200,38 @@ export interface AppBoard {
   pullsUnread: string[];
   /** The list has not been read yet since the service started. */
   pullsLoading: boolean;
+  /** The project spaces: one per managed repository, made automatically. */
+  spaces: AppSpace[];
+  /** Who is on shift and what each is doing this minute. */
+  roster: AppRosterEntry[];
+}
+
+/**
+ * A project space. For now a space is a managed repository and nothing more: its id is the alias its
+ * jobs are queued under, so "the jobs in a space" is exactly "the jobs on that repository".
+ */
+export interface AppSpace {
+  id: string;
+  name: string;
+  /** Jobs running or queued there now. */
+  active: number;
+  /** Finished jobs there that the board shows as waiting on Paul. */
+  waiting: number;
+}
+
+/**
+ * One line of the roster: the chief, each named worker, and any other kind that has work in hand. It is
+ * read off the same job cards the board shows, so it can never say something the board does not.
+ */
+export interface AppRosterEntry {
+  kind: string;
+  /** The worker's name, for the kinds that have one (`AGENT_NAMES`). */
+  name?: string;
+  role: string;
+  state: "here" | "working" | "stuck" | "waiting" | "held" | "queued" | "idle";
+  line: string;
+  /** The job the line is about, when it is about one. */
+  jobId?: string;
 }
 
 export interface AppJobDetail {
@@ -634,6 +666,54 @@ const finishedDesc = (a: Job, b: Job) => (b.finishedAt ?? b.createdAt).localeCom
 const isFinished = (j: Job) => j.status === "done" || j.status === "failed";
 
 /** The board: everything active, what waits on Paul, and the recently finished. */
+/** The spaces: every managed repository that has an address, then any other a card on the board belongs to. */
+function spacesOf(jobs: readonly AppJob[], pulls: ReadonlyArray<{ repo: string }>): AppSpace[] {
+  const ids = repoRegistry.list().filter((r) => r.slug).map((r) => r.alias);
+  for (const id of [...jobs.map((j) => j.repository), ...pulls.map((p) => p.repo)]) if (!ids.includes(id)) ids.push(id);
+  return ids.map((id) => {
+    const mine = jobs.filter((j) => j.repository === id);
+    return {
+      id,
+      name: repoLabel(id),
+      active: mine.filter((j) => j.status === "running" || j.status === "queued").length,
+      waiting: mine.filter((j) => j.outcome?.state === "waiting").length,
+    };
+  });
+}
+
+/** The workers that are always on the roster, in the order Paul meets them. */
+const ROSTER_KINDS = ["engineer", "maintain", "research", "design"] as const;
+
+function rosterOf(jobs: readonly AppJob[], capReached: boolean): AppRosterEntry[] {
+  const names: Record<string, string> = AGENT_NAMES;
+  const number = (j: AppJob) => /\/pull\/(\d+)$/.exec(j.pr ?? "")?.[1];
+  const what = (j: AppJob) => (number(j) ? `#${number(j)}` : j.title);
+  const waiting = jobs.filter((j) => j.outcome?.state === "waiting");
+  // A change that was reviewed and left for Paul is the maintainer's hand-off, not the engineer's wait.
+  const reviewed = new Set(jobs.filter((j) => j.kind === "maintain" && j.reviewOf).map((j) => j.reviewOf));
+  const entry = (kind: string): AppRosterEntry => {
+    const base = { kind, ...(names[kind] ? { name: names[kind] } : {}), role: kindName(kind) };
+    const mine = jobs.filter((j) => j.kind === kind);
+    const running = mine.filter((j) => j.status === "running");
+    if (running.length) {
+      const quiet = running.find((j) => j.alive === false);
+      const j = quiet ?? running[0]!;
+      const more = running.length > 1 ? ` and ${running.length - 1} more` : "";
+      if (quiet) return { ...base, state: "stuck", line: `Gone quiet on ${what(j)}`, jobId: j.id };
+      return { ...base, state: "working", line: `${kind === "engineer" ? "Building" : kind === "maintain" ? "Reviewing" : "Working on"} ${what(j)}${more}`, jobId: j.id };
+    }
+    const handed = kind === "maintain" ? waiting.find((j) => reviewed.has(j.id)) : waiting.find((j) => j.kind === kind && !reviewed.has(j.id));
+    if (handed) return { ...base, state: "waiting", line: `Waiting on you: ${what(handed)}`, jobId: handed.id };
+    const queued = mine.filter((j) => j.status === "queued");
+    const next = queued.find((j) => !j.held) ?? queued[0];
+    if (next?.held) return { ...base, state: "held", line: capReached ? "Held by the cap" : "Held until the queue is resumed", jobId: next.id };
+    if (next) return { ...base, state: "queued", line: `Next up: ${next.title}`, jobId: next.id };
+    return { ...base, state: "idle", line: "Idle" };
+  };
+  const busy = [...new Set(jobs.filter((j) => j.status === "running" || j.status === "queued").map((j) => j.kind))].filter((k) => !(ROSTER_KINDS as readonly string[]).includes(k));
+  return [{ kind: "chief", name: AGENT_NAMES.chief, role: "chief", state: "here", line: "With you" }, ...[...ROSTER_KINDS, ...busy].map(entry)];
+}
+
 export function appBoard(source: AppSource): AppBoard {
   const now = source.now ?? Date.now();
   const all = source.store.allJobs();
@@ -645,13 +725,17 @@ export function appBoard(source: AppSource): AppBoard {
   const open = source.openPulls?.() ?? { pulls: [], unread: [], loading: false };
   const threads = source.threads?.();
   const health = boardHealth({ store: source.store, uptime: source.uptime, probes: source.probes, activeWorkers: source.activeWorkers, liveness: (id) => source.queue.liveness(id), now });
+  const jobs = [...running, ...queued, ...recent].map((j) => toAppJob(source, j, ev));
+  const spend = spendOf(source, now);
   return {
     generatedAt: new Date(now).toISOString(),
-    spend: spendOf(source, now),
+    spend,
     health: { level: health.level, headline: health.headline, live: health.live },
     paused: !!source.store.queueHold(),
     waiting: appWaiting(source.store, source.gates, now),
-    jobs: [...running, ...queued, ...recent].map((j) => toAppJob(source, j, ev)),
+    jobs,
+    spaces: spacesOf(jobs, open.pulls),
+    roster: rosterOf(jobs, spend.capReached),
     hasOlder: finished.length > recent.length,
     pulls: open.pulls.map((p) => {
       const note = threads?.get(`web:pull:${p.repo}:${p.number}`);
@@ -663,11 +747,13 @@ export function appBoard(source: AppSource): AppBoard {
 }
 
 /** Finished jobs older than a moment, newest first, a page at a time: the whole history is reachable. */
-export function appHistory(source: AppSource, before: string | undefined, limit = APP_HISTORY_PAGE): { jobs: AppJob[]; next?: string } {
+export function appHistory(source: AppSource, before: string | undefined, limit = APP_HISTORY_PAGE, space?: string): { jobs: AppJob[]; next?: string } {
   const cutoff = before && !Number.isNaN(Date.parse(before)) ? before : new Date(source.now ?? Date.now()).toISOString();
   const older = source.store
     .allJobs()
     .filter(isFinished)
+    // One space's history: the same rule a card's own repository is worked out by.
+    .filter((j) => !space || (lockKey(j) ?? j.target ?? "product") === space)
     .filter((j) => (j.finishedAt ?? j.createdAt) < cutoff)
     .sort(finishedDesc);
   const page = older.slice(0, Math.max(1, Math.min(limit, APP_HISTORY_PAGE)));

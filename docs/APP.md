@@ -201,9 +201,22 @@ A job has no cost until it has finished and the provider has priced it. Until th
 
 "Money is the provider's own figure or nothing" gains one stated exception, on Paul's ask for an estimate before a job starts (20 Nov 2026): this figure is not any one job's, it is worked out from provider figures only, and it is always labelled as an estimate. `test/estimates.test.ts` and `test/invariants.test.ts` hold it to that.
 
+## The rail: spaces, and who is on shift (`spacesOf` and `rosterOf` in `src/app-data.ts`)
+
+The first step towards project spaces and the agent roster, from Paul's mockup of 20 Nov 2026. `docs/app/rail.png` and `docs/app/rail-phone.png` show it with made-up jobs. On a screen wider than 900 pixels it is a column beside the chat; on a phone it is a drawer opened from the button at the top left. Beside the rail, the chat and the board fit together only on a screen wider than 1180 pixels; below that it is one or the other.
+
+- **Spaces.** One per managed repository, made automatically, plus any other repository a card on the board belongs to. Each says how many of its jobs wait on Paul, or failing that how many are running or queued. The counts are the board's own cards, so the rail never disagrees with it.
+- **Choosing a space narrows the board** to that repository's jobs and pull requests, in all three views and in the history (`/app/api/history?space=<alias>`). What waits on Paul's own decision (a send, a purchase, a DNS change, a sign-up) belongs to no repository and is never narrowed away. Until a space has a chat of its own the board is all that changes, so choosing one from the chat brings the board into view. The choice is kept in the browser, and a space the board no longer lists is forgotten.
+- **On shift.** Marlo, then Fitz, Vera, Scout and Pip, then any other kind of worker that has a job running or queued. Each line is read off the board's cards: building or reviewing (with the pull request's number where there is one), gone quiet (no live worker on a running job), waiting on Paul, held by the cap or by a paused queue, next up, or idle. A change that was reviewed and left for Paul is shown as the maintainer's hand-off, not the engineer's wait. A line about a job opens that job.
+- **The icon.** The ClearOps mark is the tab icon and the home-screen icon (`icon.svg`, `icon-32.png`, `icon-180.png` in `public/app`, served from the same fixed table as the stylesheet and script).
+
+### What this changes in the rules
+
+Nothing. The rail is read-only and built from what the board already sent; the history route gains one optional filter, taken only in the shape of an alias. No new route, and nothing here writes.
+
 ## Still to come
 
-What it does not do yet: project spaces of Paul's own (each with its own chat), live voice with Cleo, push notifications, search. Each is a later slice.
+What it does not do yet: a chat, files and notes of its own for each space, spaces of Paul's own that are not a repository, a page for each agent (model, tools, recent jobs, success rate and cost), live voice with Cleo, push notifications, search. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

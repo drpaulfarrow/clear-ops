@@ -853,7 +853,8 @@ export function buildApp(given: AppDeps) {
   });
   app.get(`${APP_PATH}/api/history`, (req, res) => {
     appHeaders(res);
-    res.json(appHistory(appSource(), typeof req.query.before === "string" ? req.query.before : undefined));
+    const space = typeof req.query.space === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(req.query.space) ? req.query.space : undefined;
+    res.json(appHistory(appSource(), typeof req.query.before === "string" ? req.query.before : undefined, undefined, space));
   });
   /**
    * Which of the app's conversations a request means: the main one when it names none, or the thread of

@@ -4,8 +4,8 @@
  *
  * The app is the first page here that runs script, so its policy is written for that and nothing more:
  * script, styles and fonts from this service only, requests to this service only, no inline script or
- * style, no frames, no form posted anywhere else. The files are fixed at build time (`public/app` and
- * three open-licensed fonts from the npm packages), named in one table, and hold no data: everything
+ * style, no frames, no form posted anywhere else. The files are fixed at build time (`public/app`, which
+ * includes the tab and home-screen icons, and three open-licensed fonts from the npm packages), named in one table, and hold no data: everything
  * the app shows arrives from the signed-in JSON routes.
  */
 import fs from "node:fs";
@@ -27,6 +27,10 @@ const font = (pkg: string, file: string) => path.join(ROOT, "node_modules", "@fo
 const ASSETS: Record<string, { file: string; type: string }> = {
   "app.css": { file: path.join(ROOT, "public", "app", "app.css"), type: "text/css; charset=utf-8" },
   "app.js": { file: path.join(ROOT, "public", "app", "app.js"), type: "text/javascript; charset=utf-8" },
+  // The tab icon and the home-screen icon: the ClearOps mark, drawn once and kept as files.
+  "icon.svg": { file: path.join(ROOT, "public", "app", "icon.svg"), type: "image/svg+xml" },
+  "icon-32.png": { file: path.join(ROOT, "public", "app", "icon-32.png"), type: "image/png" },
+  "icon-180.png": { file: path.join(ROOT, "public", "app", "icon-180.png"), type: "image/png" },
   "inter.woff2": { file: font("inter", "inter-latin-wght-normal.woff2"), type: "font/woff2" },
   "space-grotesk.woff2": { file: font("space-grotesk", "space-grotesk-latin-wght-normal.woff2"), type: "font/woff2" },
   "jetbrains-mono.woff2": { file: font("jetbrains-mono", "jetbrains-mono-latin-wght-normal.woff2"), type: "font/woff2" },
@@ -53,6 +57,7 @@ export function appAsset(name: string): { body: Buffer; type: string } | undefin
 const head = (title: string) =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">` +
   `<meta name="theme-color" content="#0B0E13"><meta name="color-scheme" content="dark"><meta name="robots" content="noindex"><title>${escapeHtml(title)}</title>` +
+  `<link rel="icon" href="${APP_ASSETS_PATH}/icon-32.png" sizes="32x32" type="image/png"><link rel="icon" href="${APP_ASSETS_PATH}/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="${APP_ASSETS_PATH}/icon-180.png">` +
   `<link rel="stylesheet" href="${APP_ASSETS_PATH}/app.css"></head>`;
 
 /** The page the app runs in: an empty frame and one script. Everything else is fetched once signed in. */
