@@ -1201,11 +1201,25 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   assert.match(routes, /if \(!under\(req\.path, APP_PATH\) \|\| APP_OPEN\.some\(\(p\) => under\(req\.path, p\)\)\) return next\(\);\s*if \(appAuthz\.sessionValid\(deps\.store, req\.headers\.cookie\)\) return next\(\);/);
   // Two routes under /app are not a GET: the one that ends the session, and Paul's own message to the
   // chief (slice 2). Nothing under /app approves, starts, stops or edits anything directly.
-  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`", "`${APP_PATH}/api/chats`", "`${APP_PATH}/api/settings`"]);
+  assert.deepEqual([...routes.matchAll(/app\.(post|put|patch|delete)\(([^,]+),/g)].map((m) => m[2]), ["APP_SIGN_OUT_PATH", "`${APP_PATH}/api/chat`", "`${APP_PATH}/api/approvals`", "`${APP_PATH}/api/jobs/:id/action`", "`${APP_PATH}/api/pulls/:repo/:number/merge`", "`${APP_PATH}/api/chats`", "`${APP_PATH}/api/settings`", "`${APP_PATH}/api/spaces`"]);
   // Every one of the six that does something is taken from this site's own script only. The sixth
   // (20 Nov 2026) renames or removes one of Paul's own chats and touches nothing else.
   assert.match(routes, /const ownScript = \(req: express\.Request\): boolean => \{[\s\S]*?return !!req\.is\("application\/json"\) && \(origin === undefined \|\| origin === new URL\(config\.publicUrl\)\.origin\) && \(site === undefined \|\| site === "same-origin"\);/);
-  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 6);
+  assert.equal((routes.match(/if \(!ownScript\(req\)\) return void res\.status\(403\)/g) ?? []).length, 7);
+  // The seventh (20 Nov 2026) makes, changes or removes a project space of Paul's own (src/spaces.ts): a
+  // name, a chat and some of the repositories the service already manages. It can name no other
+  // repository, it starts nothing, touches no job and reaches no model, and it cannot name a
+  // repository's own space, the main conversation, a thread or one of his chats.
+  const spacesRoute = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/spaces`"), routes.indexOf("app.get(`${APP_PATH}/api/jobs/:id`,"));
+  assert.ok(spacesRoute.indexOf("if (!ownScript(req)) return void res.status(403)") > 0 && spacesRoute.indexOf("createSpace(") > spacesRoute.indexOf("if (!ownScript(req)) return void res.status(403)"), "the same-site check comes before anything is made");
+  assert.deepEqual([...spacesRoute.matchAll(/body\.action === "([a-z]+)"/g)].map((m) => m[1]), ["create", "update", "delete"]);
+  assert.doesNotMatch(spacesRoute, /appThread|webThread|orchestrator|\.handle\(|jobs\.|readFileSync|path\.join|repoRegistry\.add|chat\.(close|rename|open|send|inbound)\(/);
+  assert.match(spacesRoute, /const gone = removeSpace\(deps\.store, body\.id\);\s*if \(!gone\) return void res\.status\(404\)[^\n]*\n\s*chat\.forget\(ownSpaceAddress\(gone\.id\)\);\s*deps\.store\.clearSession\(ownSpaceAddress\(gone\.id\)\);/, "removing a space empties its own chat and forgets the chief's side of it, and only its own");
+  const spacesSrc = src("spaces.ts");
+  // A space's repositories are checked against the registry's own list, and its id is made here at random.
+  assert.match(spacesSrc, /if \(typeof r !== "string" \|\| !managed\.includes\(r\)\) return undefined;/);
+  assert.match(spacesSrc, /let id = `own-\$\{randomBytes\(4\)\.toString\("hex"\)\}`;/);
+  assert.match(src("web-chat.ts"), /forget\(address: string\): boolean \{\s*if \(!WEB_SPACE\.test\(address\)\) return false;/, "only a space's chat can be emptied this way");
   const manage = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/chats`"), routes.indexOf("app.post(`${APP_PATH}/api/settings`"));
   // It names a chat only by an id the transcript keeps, checked after the same-site check and before
   // anything is done; it can rename and remove and nothing else; and no address, path or conversation
@@ -1253,8 +1267,8 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
     "deps.store.getJob(job[1]!) ? webThread({ job: job[1]! }) : undefined",
     "repoRegistry.list().some((r) => r.alias === pull[1] && r.slug) ? webThread({ pull: { repo: pull[1]!, number: Number(pull[2]) } }) : undefined",
     "chat.chat(own[1]!) ? webOwnChat(own[1]!) : undefined",
-    // A space's chat: only for a repository in the registry, by its own alias.
-    "repoRegistry.list().some((r) => r.alias === space[1]) ? webSpace(space[1]!) : undefined",
+    // A space's chat: only for a repository in the registry, by its own alias, or a space of his own that the store keeps.
+    "repoRegistry.list().some((r) => r.alias === space[1]) || deps.store.spaces().some((sp) => sp.id === space[1]) ? webSpace(space[1]!) : undefined",
     "undefined",
   ]);
   const webChatSrc = src("web-chat.ts");

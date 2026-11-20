@@ -143,6 +143,8 @@ const state = {
   space: /^[A-Za-z0-9._-]{1,64}$/.test(store("clearops.space") ?? "") ? store("clearops.space") : "",
   /** On a phone the rail is a drawer: whether it is open. */
   railOpen: false,
+  /** A space of Paul's own being made or changed: { id?, name, repos, busy, error, removing }. */
+  spaceForm: undefined,
   /** The job whose report is shown in full on its page. */
   reportOpen: undefined,
   /** The job whose report a link asked for, and the one already scrolled to, so each happens once per visit. */
@@ -398,11 +400,15 @@ const spaceChat = () => (state.space && (!state.board || spaceOf()?.managed) ? s
 /** The conversation on screen, as the service is asked for it; undefined for the main one. */
 const threadOnScreen = () => (spaceChat() ? `space:${spaceChat()}` : state.own === "new" ? "chat:new" : state.own ? `chat:${state.own}` : undefined);
 
+/** Whether a job is in a space: on that repository, or for one of Paul's own, on one of its repositories or started from its chat. */
+const inSpace = (sp) => (j) => (sp.own ? sp.repos.includes(j.repository) || j.space === sp.id : j.repository === sp.id);
+
 /** The board with only one space's jobs and pull requests. What waits on Paul's decision is never narrowed away. */
-const scoped = (board) => (spaceOf() ? { ...board, jobs: board.jobs.filter((j) => j.repository === state.space), pulls: (board.pulls ?? []).filter((p) => p.repo === state.space) } : board);
+const scoped = (board) => (spaceOf() ? { ...board, jobs: board.jobs.filter(inSpace(spaceOf())), pulls: (board.pulls ?? []).filter((p) => (spaceOf().own ? spaceOf().repos.includes(p.repo) : p.repo === state.space)) } : board);
 
 function setRail(open) {
   state.railOpen = open;
+  if (!open) state.spaceForm = undefined;
   draw();
   if (open) railEl.querySelector("[aria-current='true']")?.focus({ preventScroll: true });
 }
@@ -419,6 +425,7 @@ function setSpace(id) {
   state.history = [];
   state.historyNext = undefined;
   state.railOpen = false;
+  state.spaceForm = undefined;
   if (id && !spaceChat() && layout() === "chat") state.layout = "board";
   if (threadOnScreen() !== was) {
     state.chatsOpen = false;
@@ -432,17 +439,86 @@ function setSpace(id) {
   void chatTick();
 }
 
+/** Makes, changes or removes a space of Paul's own: his own tap, sent as this site's own JSON like every other change. */
+async function saveSpace(action) {
+  const f = state.spaceForm;
+  if (!f || f.busy) return;
+  f.busy = true;
+  f.error = undefined;
+  drawRail(true);
+  try {
+    const res = await postJson("/spaces", action === "delete" ? { action, id: f.id } : { action, ...(f.id ? { id: f.id } : {}), name: f.name, repos: [...f.repos] });
+    if (!res.ok) {
+      f.busy = false;
+      f.error = res.data.error || "That could not be done just now.";
+      return void drawRail(true);
+    }
+    state.spaceForm = undefined;
+    state.boardRaw = "";
+    await refreshBoard();
+    // A new space is gone into; a removed one is left for all of them.
+    if (action === "create" && res.data.id) return void setSpace(res.data.id);
+    if (action === "delete") return void setSpace("");
+    draw();
+  } catch (err) {
+    f.busy = false;
+    f.error = err.message === "signed out" ? undefined : "The service could not be reached, so nothing was changed.";
+    drawRail(true);
+  }
+}
+
+function spaceForm(board) {
+  const f = state.spaceForm;
+  const set = (patch) => () => { Object.assign(f, patch); drawRail(true); };
+  if (f.removing) {
+    return h(
+      "div",
+      { class: "space-form" },
+      h("p", { class: "space-form-ask" }, `Remove "${f.name}"? Its chat goes for good. Its jobs are kept and stay where they are.`),
+      f.error ? h("p", { class: "refused", role: "alert" }, f.error) : null,
+      h("div", { class: "space-form-row" }, h("button", { class: "btn danger", type: "button", disabled: f.busy, onclick: () => void saveSpace("delete") }, "Remove it"), h("button", { class: "btn quiet", type: "button", disabled: f.busy, onclick: set({ removing: false, error: undefined }) }, "Keep it")),
+    );
+  }
+  const repos = board.spaces.filter((sp) => sp.managed && !sp.own);
+  const name = h("input", { class: "chat-name", id: "space-name", type: "text", maxlength: "48", autocomplete: "off", placeholder: "Name", value: f.name, "aria-label": "The space's name", oninput: (e) => { f.name = e.target.value; } });
+  return h(
+    "form",
+    { class: "space-form", onsubmit: (e) => { e.preventDefault(); void saveSpace(f.id ? "update" : "create"); } },
+    h("b", {}, f.id ? "Change this space" : "A space of your own"),
+    name,
+    repos.length
+      ? h(
+          "fieldset",
+          { class: "space-form-repos" },
+          h("legend", { class: "muted" }, "Repositories in it, if any"),
+          repos.map((sp) => h("label", { class: "space-form-repo" }, h("input", { type: "checkbox", checked: f.repos.has(sp.id), onchange: (e) => { if (e.target.checked) f.repos.add(sp.id); else f.repos.delete(sp.id); } }), h("span", {}, sp.name))),
+        )
+      : null,
+    f.error ? h("p", { class: "refused", role: "alert" }, f.error) : null,
+    h("div", { class: "space-form-row" }, h("button", { class: "btn primary", type: "submit", disabled: f.busy }, f.id ? "Save" : "Create"), h("button", { class: "btn quiet", type: "button", disabled: f.busy, onclick: () => { state.spaceForm = undefined; drawRail(true); } }, "Cancel")),
+    f.id ? h("button", { class: "btn quiet space-form-remove", type: "button", disabled: f.busy, onclick: set({ removing: true, error: undefined }) }, "Remove this space") : null,
+  );
+}
+
 function rail(board) {
   if (!board) return [];
   const count = (waiting, active) => (waiting ? h("span", { class: "rail-count wait" }, `${waiting} waiting`) : active ? h("span", { class: "rail-count", "aria-label": `${active} active` }, String(active)) : null);
   const row = (id, name, waiting, active, fresh) => h("button", { class: "rail-row", type: "button", "aria-current": String(state.space === id || (!id && !spaceOf())), onclick: () => setSpace(id) }, fresh ? h("span", { class: "new-dot", role: "img", "aria-label": "Something new in its chat" }) : null, h("span", { class: "rail-name" }, name), count(waiting, active));
-  const sum = (key) => board.spaces.reduce((n, s) => n + s[key], 0);
+  // Each job is on one repository, so the repositories' spaces add up to everything; his own spaces
+  // hold some of the same jobs again and are left out of the total.
+  const sum = (key) => board.spaces.filter((s) => !s.own).reduce((n, s) => n + s[key], 0);
   const spaces = h(
     "section",
     { "aria-label": "Spaces" },
     h("h2", { class: "rail-head" }, "Spaces"),
     row("", "All spaces", board.waiting.length + sum("waiting"), sum("active"), !!spaceChat() && ["", ...state.chats.map((c) => c.id)].some(hasNew)),
     board.spaces.map((s) => row(s.id, s.name, s.waiting, s.active, hasNewAt(`space:${s.id}`, s.saidAt))),
+    state.spaceForm
+      ? spaceForm(board)
+      : [
+          spaceOf()?.own ? h("button", { class: "rail-row rail-do", type: "button", onclick: () => { state.spaceForm = { id: spaceOf().id, name: spaceOf().name, repos: new Set(spaceOf().repos) }; drawRail(true); document.getElementById("space-name")?.focus(); } }, h("span", { class: "rail-name" }, "Change this space")) : null,
+          h("button", { class: "rail-row rail-do", type: "button", onclick: () => { state.spaceForm = { name: "", repos: new Set() }; drawRail(true); document.getElementById("space-name")?.focus(); } }, icon("plus", 14), h("span", { class: "rail-name" }, "New space")),
+        ],
   );
   const person = (r) => {
     const title = h("div", { class: "rail-who" }, h("b", {}, r.name ?? r.role.charAt(0).toUpperCase() + r.role.slice(1)), r.name ? h("span", { class: "muted" }, ` ${r.role}`) : null);
@@ -1527,7 +1603,7 @@ function chatItems() {
       lastFrom = "clearops";
     }
   }
-  if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, spaceChat() ? `The chat for ${spaceOf()?.name ?? "this space"}. ${CHIEF} knows what is said here is about that repository, and starts fresh: your other chats are not carried over.` : state.own ? `A chat of its own. ${CHIEF} starts fresh here: what you said in your other chats is not carried over.` : `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
+  if (!stream.length) out.push(h("div", { class: "chat-empty" }, avatar("chief", "lg"), h("p", {}, spaceChat() ? (spaceOf()?.own ? `The chat for ${spaceOf().name}, a space of your own. ${CHIEF} knows which space this is and what you put in it, and starts fresh: your other chats are not carried over.` : `The chat for ${spaceOf()?.name ?? "this space"}. ${CHIEF} knows what is said here is about that repository, and starts fresh: your other chats are not carried over.`) : state.own ? `A chat of its own. ${CHIEF} starts fresh here: what you said in your other chats is not carried over.` : `Ask ${CHIEF} for anything. Jobs it starts appear here as cards you can open.`)));
   // Whatever is waiting for his decision sits at the foot of the conversation, with the same buttons as
   // on the board, wherever it was first put to him.
   // In the main conversation only: a chat of his own stays on its subject, and the header still says something waits.
@@ -1734,6 +1810,14 @@ const chatEl = h(
   ),
 );
 const railEl = h("nav", { class: "rail", id: "rail", "aria-label": "Spaces and who is on shift" });
+/**
+ * Draws the rail. A routine redraw leaves it alone while a space is being made or changed: rebuilding
+ * it would wipe what he is typing. The form's own buttons ask for it outright.
+ */
+function drawRail(asked = false) {
+  if (!asked && state.spaceForm && railEl.querySelector(".space-form")) return;
+  railEl.replaceChildren(...rail(state.board));
+}
 // Behind the rail when it is a drawer: a tap outside it closes it.
 const scrimEl = h("button", { class: "scrim", type: "button", tabindex: "-1", "aria-label": "Close", onclick: () => setRail(false) });
 const homeEl = h("div", { class: "home" }, railEl, scrimEl, chatEl, boardEl, fullBoardEl);
@@ -1861,7 +1945,7 @@ function draw() {
   const mode = layout();
   shellEl.className = `shell${mode === "board" ? "" : " fixed"}`;
   homeEl.className = `home show-${mode}${state.railOpen && narrow.matches ? " rail-open" : ""}`;
-  railEl.replaceChildren(...rail(state.board));
+  drawRail();
   if (homeEl.parentNode !== bodyEl) {
     bodyEl.replaceChildren(homeEl);
     stickNext = true;

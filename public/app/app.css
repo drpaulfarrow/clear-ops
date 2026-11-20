@@ -414,3 +414,18 @@ a.rail-person:hover{background:var(--surface);color:var(--text)}
 @media (max-width:640px){.brand-name{display:none}}
 .chat-space{min-width:0;min-height:40px;display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 4px}
 .rail-row .new-dot{margin:0}
+.rail-do{color:var(--muted);gap:8px}
+.rail-do svg{flex:none}
+.space-form{display:flex;flex-direction:column;gap:10px;margin:6px 2px 0;padding:12px;border-radius:14px;background:var(--surface);border:1px solid var(--line);font-size:14px}
+.space-form .chat-name{flex:none;width:100%;min-height:40px;padding:0 12px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-family:inherit}
+.space-form-repos{display:flex;flex-direction:column;gap:2px;border:0;padding:0;margin:0;min-width:0}
+.space-form-repos legend{font-size:12px;padding:0 0 4px}
+.space-form-repo{display:flex;align-items:center;gap:10px;min-height:36px;color:var(--text-2)}
+.space-form-repo input{width:18px;height:18px;flex:none;accent-color:var(--accent)}
+.space-form-repo span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.space-form-row{display:flex;flex-wrap:wrap;gap:8px}
+.space-form-row .btn{flex:1 1 auto}
+.space-form-ask{color:var(--text-2)}
+.space-form .refused{font-size:13px;color:var(--bad-text)}
+.space-form-remove{align-self:flex-start;color:var(--bad-text);padding:0 4px;border:0;min-height:36px}
+@media (max-width:900px){.space-form-repo{min-height:44px}}
