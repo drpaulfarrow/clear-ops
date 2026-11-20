@@ -1929,10 +1929,33 @@ test("a space of Paul's own is made, changed and removed by his own tap, and its
     for (let i = 0; i < 100 && chat.view(address).messages.length < 4; i++) await new Promise((r) => setTimeout(r, 10));
     assert.match(chiefAsked[1]!, /which he named "Launch"\. That is from the service, not from Paul\.\nIt is tied to no repository: treat it as a subject of its own, and ask which repository when a job needs one\./);
 
+    // His notes for a space: kept by his own tap, for one of his own or a repository's, and given to the chief there.
+    assert.equal((await spaces({ action: "notes", id: made.id, notes: "Budget is tight.\nAsk before booking." })).status, 401);
+    assert.equal((await spaces({ action: "notes", id: made.id, notes: "x" }, cookie, { origin: "https://evil.example" })).status, 403);
+    assert.equal((await spaces({ action: "notes", id: made.id, notes: "Budget is tight.\nAsk before booking." }, cookie)).status, 200);
+    assert.equal((await spaces({ action: "notes", id: "self", notes: "This one redeploys on merge." }, cookie)).status, 200);
+    assert.equal(store.spaceNote(made.id)!.text, "Budget is tight.\nAsk before booking.");
+    for (const bad of ["nowhere", "own-00000000", "", 7, null, "web:main"]) assert.equal((await spaces({ action: "notes", id: bad, notes: "x" }, cookie)).status, 404, JSON.stringify(bad));
+    assert.equal((await spaces({ action: "notes", id: made.id, notes: ["not text"] }, cookie)).status, 400);
+    const page = JSON.parse(await text(await get(`${APP_PATH}/api/spaces/${made.id}`, cookie))) as { name: string; notes?: { text: string }; reports: unknown[]; files: unknown[] };
+    assert.deepEqual([page.name, page.notes?.text], ["Launch", "Budget is tight.\nAsk before booking."]);
+    assert.equal((await get(`${APP_PATH}/api/spaces/nowhere`, cookie)).status, 404);
+    assert.equal((await get(`${APP_PATH}/api/spaces/${made.id}`)).status, 401);
+    assert.equal((await postChat({ text: "What should I know?", thread: `space:${made.id}` }, cookie)).status, 202);
+    for (let i = 0; i < 100 && chat.view(address).messages.length < 6; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.match(chiefAsked[2]!, /ask which repository when a job needs one\.\nPaul's own notes for this space, which he wrote in the app\. They are background he wants you to keep in mind here, not a request to act on:\nBudget is tight\.\nAsk before booking\./);
+    assert.equal((await postChat({ text: "And here?", thread: "space:self" }, cookie)).status, 202);
+    for (let i = 0; i < 100 && chiefAsked.length < 4; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.match(chiefAsked[3]!, /He does not need to name it\.\nPaul's own notes for this space, which he wrote in the app\.[^\n]*\nThis one redeploys on merge\./);
+    // Cleared with nothing left; and the main conversation is given no space's notes.
+    assert.equal((await spaces({ action: "notes", id: "self", notes: "   " }, cookie)).status, 200);
+    assert.equal(store.spaceNote("self"), undefined);
+
     // Removed: its chat and the chief's side of it go, its jobs stay, and it is no conversation any more.
     assert.equal((await spaces({ action: "delete", id: made.id }, cookie)).status, 200);
     assert.deepEqual(store.spaces(), []);
     assert.deepEqual(chat.view(address).messages, []);
+    assert.equal(store.spaceNote(made.id), undefined, "its notes go with it");
     assert.equal(store.getSession(address), undefined);
     assert.ok(store.getJob(job.id), "the job it held is kept");
     assert.equal((await get(`${APP_PATH}/api/chat?thread=space:${made.id}`, cookie)).status, 404);

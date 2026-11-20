@@ -49,14 +49,14 @@ import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex,
 import { beatFor } from "./beats.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
-import { appAgent, appBoard, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
+import { appAgent, appBoard, appSpace, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
 import { mintAppApproval } from "./app-approver.js";
 import { PrStates } from "./pr-state.js";
 import { AppPulls, PullError } from "./app-pulls.js";
 import type { Attachment } from "./uploads.js";
 import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
-import { createSpace, ownSpaceAddress, removeSpace, SpaceError, updateSpace } from "./spaces.js";
+import { createSpace, ownSpaceAddress, removeSpace, SpaceError, spaceNotes, updateSpace } from "./spaces.js";
 import { appSearch } from "./app-search.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
@@ -1097,12 +1097,13 @@ export function buildApp(given: AppDeps) {
    * Paul's own project spaces (src/spaces.ts): made, renamed, given other repositories, or removed, by
    * his own tap. A space is a name, a chat and some of the repositories ClearOps already manages: this
    * can name no other repository, starts nothing and touches no job. Removing one empties its chat and
-   * forgets the chief's side of it; a repository's own space cannot be named here at all.
+   * forgets the chief's side of it; a repository's own space cannot be made, changed or removed here.
+   * The one thing that can be done to any space, a repository's included, is to keep Paul's own notes for it.
    */
   app.post(`${APP_PATH}/api/spaces`, (req, res) => {
     appHeaders(res);
     if (!ownScript(req)) return void res.status(403).json({ error: "refused" });
-    const body = (req.body ?? {}) as { action?: unknown; id?: unknown; name?: unknown; repos?: unknown };
+    const body = (req.body ?? {}) as { action?: unknown; id?: unknown; name?: unknown; repos?: unknown; notes?: unknown };
     const managed = repoRegistry.list().map((r) => ({ alias: r.alias, name: repoLabel(r.alias) }));
     try {
       if (body.action === "create") {
@@ -1118,7 +1119,17 @@ export function buildApp(given: AppDeps) {
         if (!gone) return void res.status(404).json({ error: "There is no such space." });
         chat.forget(ownSpaceAddress(gone.id));
         deps.store.clearSession(ownSpaceAddress(gone.id));
+        deps.store.setSpaceNote(gone.id, undefined);
         return void res.json({ ok: true });
+      }
+      // His own notes for a space: a repository's space or one of his own. Text only, kept in the store.
+      if (body.action === "notes") {
+        const id = typeof body.id === "string" && (managed.some((m) => m.alias === body.id) || deps.store.spaces().some((sp) => sp.id === body.id)) ? body.id : undefined;
+        if (!id) return void res.status(404).json({ error: "There is no such space." });
+        const text = spaceNotes(body.notes);
+        if (text === undefined) return void res.status(400).json({ error: "Notes are text." });
+        deps.store.setSpaceNote(id, text || undefined);
+        return void res.json({ ok: true, text });
       }
     } catch (err) {
       return void res.status(400).json({ error: err instanceof SpaceError ? err.message : "That could not be done." });
@@ -1130,6 +1141,13 @@ export function buildApp(given: AppDeps) {
     const detail = appJob(appSource(), String(req.params.id ?? ""));
     if (!detail) return void res.status(404).json({ error: "no such job" });
     res.json(detail);
+  });
+  // One space's page: his notes for it, its reports, and the names of the files he sent in its chat. Read-only.
+  app.get(`${APP_PATH}/api/spaces/:id`, (req, res) => {
+    appHeaders(res);
+    const space = appSpace(appSource(), chat, String(req.params.id ?? ""));
+    if (!space) return void res.status(404).json({ error: "no such space" });
+    res.json(space);
   });
   // One agent's page: who it is, what it may use and how it has been doing. Read-only.
   app.get(`${APP_PATH}/api/agents/:kind`, (req, res) => {

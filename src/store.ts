@@ -522,6 +522,8 @@ interface State {
   chatCost?: { ymd: string; models: Array<{ model: string; usd: number; calls: number }> };
   /** Project spaces of Paul's own, made from the web app (src/spaces.ts). Each managed repository's space is not kept here: it is made from the registry. */
   spaces?: Array<{ id: string; name: string; repos: string[]; createdAt: string }>;
+  /** Paul's own notes for a project space, by the space's id (a repository's alias or one of his own spaces). Written only from the web app. */
+  spaceNotes?: Record<string, { text: string; updatedAt: string }>;
 }
 
 const empty = (): State => ({ sessions: {}, jobs: {}, actions: {}, schedules: {}, notes: [], followups: {}, holdGroups: {}, settings: {} });
@@ -947,6 +949,19 @@ export class Store {
   }
   setSpaces(list: Array<{ id: string; name: string; repos: string[]; createdAt: string }>): void {
     this.state.spaces = list.map((s) => ({ id: s.id, name: s.name, repos: [...s.repos], createdAt: s.createdAt }));
+    this.save();
+  }
+  /** Paul's own notes for one project space, or undefined when he has written none. */
+  spaceNote(id: string): { text: string; updatedAt: string } | undefined {
+    const kept = Object.hasOwn(this.state.spaceNotes ?? {}, id) ? this.state.spaceNotes![id] : undefined;
+    return kept && typeof kept.text === "string" && typeof kept.updatedAt === "string" ? { text: kept.text, updatedAt: kept.updatedAt } : undefined;
+  }
+  /** Keeps a space's notes, or with no text forgets them. */
+  setSpaceNote(id: string, text: string | undefined, at: string = new Date().toISOString()): void {
+    const all = { ...(this.state.spaceNotes ?? {}) };
+    if (text) all[id] = { text, updatedAt: at };
+    else delete all[id];
+    this.state.spaceNotes = all;
     this.save();
   }
   siteRules(): { added: string[]; removed: string[] } {

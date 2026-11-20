@@ -1212,7 +1212,17 @@ test("the web app is behind GitHub sign-in for one account, changes nothing but 
   // repository's own space, the main conversation, a thread or one of his chats.
   const spacesRoute = routes.slice(routes.indexOf("app.post(`${APP_PATH}/api/spaces`"), routes.indexOf("app.get(`${APP_PATH}/api/jobs/:id`,"));
   assert.ok(spacesRoute.indexOf("if (!ownScript(req)) return void res.status(403)") > 0 && spacesRoute.indexOf("createSpace(") > spacesRoute.indexOf("if (!ownScript(req)) return void res.status(403)"), "the same-site check comes before anything is made");
-  assert.deepEqual([...spacesRoute.matchAll(/body\.action === "([a-z]+)"/g)].map((m) => m[1]), ["create", "update", "delete"]);
+  assert.deepEqual([...spacesRoute.matchAll(/body\.action === "([a-z]+)"/g)].map((m) => m[1]), ["create", "update", "delete", "notes"]);
+  // The fourth thing it does (20 Nov 2026) is keep Paul's own notes for a space, a repository's space
+  // included: text only, for a space that exists, tidied and redacted before it is kept. Nothing else
+  // in the service writes a space's notes: no agent, no tool of the chief's, no channel listener. The
+  // chief is given them marked as his background for that space and not as a request.
+  assert.match(spacesRoute, /const id = typeof body\.id === "string" && \(managed\.some\(\(m\) => m\.alias === body\.id\) \|\| deps\.store\.spaces\(\)\.some\(\(sp\) => sp\.id === body\.id\)\) \? body\.id : undefined;\s*if \(!id\) return void res\.status\(404\)/);
+  assert.match(spacesRoute, /const text = spaceNotes\(body\.notes\);\s*if \(text === undefined\) return void res\.status\(400\)[^\n]*\n\s*deps\.store\.setSpaceNote\(id, text \|\| undefined\);/);
+  for (const f of fs.readdirSync(new URL("../src/", import.meta.url)).filter((x) => x.endsWith(".ts"))) if (f !== "index.ts" && f !== "store.ts") assert.doesNotMatch(src(f), /\bsetSpaceNote\(/, `${f} must not write a space's notes`);
+  assert.equal((index.match(/\bsetSpaceNote\(/g) ?? []).length, 2, "kept by his own tap, and cleared when the space is removed");
+  assert.match(src("spaces.ts"), /return redact\(raw\.replace\(\/\\r\\n\?\/g, "\\n"\)\)\.trim\(\)\.slice\(0, SPACE_NOTES_MAX\)\.trimEnd\(\);/);
+  assert.match(src("spaces.ts"), /They are background he wants you to keep in mind here, not a request to act on:/);
   assert.doesNotMatch(spacesRoute, /appThread|webThread|orchestrator|\.handle\(|jobs\.|readFileSync|path\.join|repoRegistry\.add|chat\.(close|rename|open|send|inbound)\(/);
   assert.match(spacesRoute, /const gone = removeSpace\(deps\.store, body\.id\);\s*if \(!gone\) return void res\.status\(404\)[^\n]*\n\s*chat\.forget\(ownSpaceAddress\(gone\.id\)\);\s*deps\.store\.clearSession\(ownSpaceAddress\(gone\.id\)\);/, "removing a space empties its own chat and forgets the chief's side of it, and only its own");
   const spacesSrc = src("spaces.ts");
