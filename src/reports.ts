@@ -139,6 +139,13 @@ export function reportEntries(store: Store): ReportEntry[] {
   return out;
 }
 
+/** The text of a saved output this module would serve, for the app's search; undefined for one it would not. */
+export function reportText(store: Store, id: string): string | undefined {
+  if (!ID.test(id)) return undefined;
+  const job = store.getJob(id);
+  return job ? servable(store, job) : undefined;
+}
+
 /** One saved output, ready to serve: the .html page beside it when there is one, else its Markdown. */
 export function reportFor(store: Store, id: string): ReportPage | undefined {
   if (!ID.test(id)) return undefined;

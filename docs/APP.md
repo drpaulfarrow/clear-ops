@@ -220,9 +220,23 @@ Spaces of Paul's own add one route that is not a GET, `POST /app/api/spaces`, ta
 
 A space's chat adds one kind of address to the app's conversations (`space:<alias>` beside a job's thread, a pull request's thread and Paul's own chats), which `test/invariants.test.ts` pins. It is taken only for a repository in the registry, and it changes nothing about who may say what: a message there comes in by the same route, as the same sender on no allowlist, and is refused every typed approval word before any model, exactly as in the main conversation. The line the chief is given about the repository is the service's own and says so.
 
+## Search (`src/app-search.ts`)
+
+The magnifying glass in the header opens a page with one box (`docs/app/search.png`). It finds, by plain words:
+
+- **Jobs**, by title, and by brief unless the job is a kind that works over Paul's mail, calendar, CV or zones, or over a document of his. Those are found by title alone, as their cards show them.
+- **Reports**, only where `src/reports.ts` would serve them (`reportText`), so an assistant, CV or upload-derived output is never read. The newest 400 finished jobs are looked through, and a report's Markdown marks are left out of what is shown.
+- **Chats**: what has been said in the app's own conversations (the main one, Paul's own chats, each space's chat, and the threads of jobs and pull requests), by a message's words, by what was heard in a voice note, or by the name of a file sent with it. A file's contents are not read. A message whose conversation is gone is not offered.
+
+Every word typed has to be there, in any order and any case; two letters is the least it takes. No pattern is built from what he types. Each list shows the newest few (8 jobs, 8 reports, 12 messages) and says when there are more. A job opens its page, a report opens in full, and a message opens its conversation, at the newest message rather than the one found. What is being looked for is kept in the address (`#/search/<words>`), so a reload or the back button keeps it.
+
+`GET /app/api/search?q=` is behind the same gate as everything else, read-only, and reaches no model. A result is drawn as text with the found words marked, never as markup.
+
+On a phone's board, "Sign out" moved from the header into the rail's drawer to make room for the magnifying glass. On every other page it is where it was.
+
 ## Still to come
 
-What it does not do yet: files and notes of its own for each space, a page for each agent (model, tools, recent jobs, success rate and cost), live voice with Cleo, push notifications, search. Each is a later slice.
+What it does not do yet: files and notes of its own for each space, a page for each agent (model, tools, recent jobs, success rate and cost), live voice with Cleo, push notifications, searching inside the files Paul has sent. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

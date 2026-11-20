@@ -394,6 +394,11 @@ export class WebChat {
     return true;
   }
 
+  /** Every message the transcript keeps, oldest first, in every conversation: for the app's search. The chief's status line is not one. */
+  kept(): WebMessage[] {
+    return this.messages.filter((m) => !m.live).map((m) => ({ ...m }));
+  }
+
   /** Empties a space's chat, when the space itself is removed. Only a space's chat can be named here. */
   forget(address: string): boolean {
     if (!WEB_SPACE.test(address)) return false;
