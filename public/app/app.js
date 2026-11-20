@@ -176,6 +176,10 @@ const state = {
   pull: undefined,
   jobMissing: false,
   problem: undefined,
+  /** The agent whose page is open, as last read. */
+  agent: undefined,
+  agentRaw: "",
+  agentMissing: false,
   /** The search page: what is being looked for, what came back, and what went wrong. */
   search: { q: "", data: undefined, loading: false, problem: undefined },
 };
@@ -185,6 +189,8 @@ const route = () => {
   const m = /^#\/job\/([A-Za-z0-9_-]{1,64})(\/report)?$/.exec(location.hash);
   if (m) return { name: "job", id: m[1], report: !!m[2] };
   if (location.hash === "#/spend") return { name: "spend" };
+  const a = /^#\/agent\/([a-z_]{1,24})$/.exec(location.hash);
+  if (a) return { name: "agent", kind: a[1] };
   // The search page, with what is being looked for kept in the address so a reload or the back button keeps it.
   const s = /^#\/search(?:\/(.*))?$/.exec(location.hash);
   if (s) {
@@ -543,10 +549,107 @@ function rail(board) {
   const person = (r) => {
     const title = h("div", { class: "rail-who" }, h("b", {}, r.name ?? r.role.charAt(0).toUpperCase() + r.role.slice(1)), r.name ? h("span", { class: "muted" }, ` ${r.role}`) : null);
     const kids = [avatar(r.kind, "sm"), h("div", { class: "rail-main" }, title, h("div", { class: `rail-line ${r.state}` }, r.state === "working" ? h("i", { class: "live-dot", "aria-hidden": "true" }) : null, r.line))];
-    return r.jobId ? h("a", { class: "rail-person", href: `#/job/${r.jobId}` }, kids) : h("div", { class: "rail-person" }, kids);
+    return h("a", { class: "rail-person", href: `#/agent/${r.kind}` }, kids);
   };
   const shift = h("section", { "aria-label": "On shift" }, h("h2", { class: "rail-head" }, "On shift"), (board.roster ?? []).map(person));
   return [spaces, shift, signOut("in-rail")];
+}
+
+/* ---------- One agent ---------- */
+
+async function refreshAgent(kind) {
+  try {
+    const text = await getJson(`/agents/${kind}`);
+    if (route().kind !== kind) return false;
+    if (text === undefined) {
+      state.agentMissing = true;
+      state.agent = undefined;
+      return true;
+    }
+    const changed = text !== state.agentRaw || state.problem || state.agentMissing;
+    state.problem = undefined;
+    state.agentMissing = false;
+    if (changed) {
+      state.agentRaw = text;
+      state.agent = JSON.parse(text);
+      return true;
+    }
+  } catch (err) {
+    if (err.message === "signed out") return false;
+    const had = state.problem;
+    state.problem = "The service could not be reached. Trying again.";
+    return !had;
+  }
+  return false;
+}
+
+function agentPage() {
+  const back = h("a", { class: "btn", href: "#/" }, icon("back"), "Back");
+  const a = state.agent;
+  if (state.agentMissing) return h("main", { class: "page" }, h("div", { class: "job-head" }, back), h("p", { class: "muted" }, "There is no such agent."));
+  if (!a) return h("main", { class: "page" }, h("div", { class: "job-head" }, back), h("p", { class: "muted" }, state.problem ?? "Loading."));
+  const now = Date.parse(a.generatedAt);
+  const title = a.name ?? a.role.charAt(0).toUpperCase() + a.role.slice(1);
+  const head = h(
+    "div",
+    { class: "job-head" },
+    back,
+    avatar(a.kind, "lg"),
+    h("div", { class: "job-id" }, h("div", { class: "job-title" }, h("h1", {}, title)), h("div", { class: "muted" }, `${a.name ? `The ${a.role}: ` : ""}${a.does}.`)),
+  );
+  const doing = h("div", { class: `agent-now ${a.now.state}` }, a.now.state === "working" ? h("i", { class: "live-dot", "aria-hidden": "true" }) : null, a.now.jobId ? h("a", { href: `#/job/${a.now.jobId}` }, a.now.line) : a.now.line);
+  const tiles = h(
+    "div",
+    { class: "stats" },
+    stat("Model", modelName(a.model) ?? h("small", {}, "Not known"), a.modelNote),
+    a.limits ? stat("One job may run", [String(a.limits.maxTurns), h("small", {}, " turns")], a.limits.budgetUsd !== undefined ? `and spend up to ${money(a.limits.budgetUsd)}.` : "No money cap is set for its jobs.") : null,
+  );
+  const tools = h(
+    "section",
+    { class: "pane", "aria-label": "What it may use" },
+    h("h2", {}, "What it may use"),
+    h("ul", { class: "plain-list" }, a.tools.map((t) => h("li", {}, t))),
+    a.refused ? h("p", { class: "muted" }, `${a.refused} ${a.refused === 1 ? "command is" : "commands are"} refused to it outright, whatever it is asked.`) : null,
+  );
+  // Finished is not the same as done, so the outcomes are counted apart and no single rate is made of them.
+  const record = a.windows.length
+    ? h(
+        "section",
+        { class: "pane", "aria-label": "How it has been doing" },
+        h("h2", {}, "How it has been doing"),
+        a.windows.map((w) => {
+          const parts = [[w.met, "confirmed done", "good"], [w.unconfirmed, "not confirmed", ""], [w.waiting, "waiting on you", "wait"], [w.notMet, "did not get there", "bad"]].filter(([n]) => n);
+          return h(
+            "div",
+            { class: "block" },
+            h("h3", {}, `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}`),
+            w.finished
+              ? [
+                  h("div", { class: "agent-count" }, h("b", { class: "num" }, String(w.finished)), ` finished: `, parts.map(([n, words, tone], i) => [i ? ", " : "", h("span", { class: tone ? `tone-${tone}` : "" }, `${n} ${words}`)]), "."),
+                  w.why ? h("p", { class: "muted" }, `Why the ones that stopped did: ${w.why}.`) : null,
+                  w.run ? h("p", { class: "muted" }, `${w.run.charAt(0).toUpperCase()}${w.run.slice(1)}.`) : null,
+                  w.wait ? h("p", { class: "muted" }, `${w.wait.charAt(0).toUpperCase()}${w.wait.slice(1)}.`) : null,
+                  h("p", { class: "muted" }, w.costUsd !== undefined ? `Cost: ${money(w.costUsd)} in all, the provider's own figures, for ${w.costedJobs} of the ${w.finished}.` : "Cost: the store holds no provider figure for these jobs."),
+                ]
+              : h("p", { class: "muted" }, "Nothing finished."),
+          );
+        }),
+      )
+    : null;
+  const usual = a.usual.length
+    ? h(
+        "section",
+        { class: "pane", "aria-label": "What a job of its usually costs" },
+        h("h2", {}, "What a job of its usually costs"),
+        h("div", { class: "rows" }, a.usual.map((u) => h("div", { class: "row plain" }, h("div", { class: "row-main" }, h("div", { class: "card-title" }, `${u.kind === "research, deep" ? "Deep research on " : "On "}${modelName(u.model)}`), h("div", { class: "card-sub" }, `${u.lowUsd !== u.highUsd ? `mostly ${money(u.lowUsd)} to ${money(u.highUsd)}, ` : ""}from ${u.jobs} jobs`)), h("div", { class: "row-right num" }, `about ${money(u.usd)}`)))),
+        h("p", { class: "muted" }, "An estimate from finished jobs' own figures, not a price."),
+      )
+    : null;
+  const replies = a.repliesToday?.length
+    ? h("section", { class: "pane", "aria-label": "Its replies today" }, h("h2", {}, "Its replies today"), h("div", { class: "rows" }, a.repliesToday.map((m) => h("div", { class: "row plain" }, h("div", { class: "row-main" }, h("div", { class: "card-title" }, modelName(m.model)), h("div", { class: "card-sub" }, `${m.calls} ${m.calls === 1 ? "call" : "calls"}`)), h("div", { class: "row-right" }, h("span", { class: "card-cost num" }, money(m.usd)))))), h("p", { class: "muted" }, "The provider's own charges."))
+    : null;
+  const jobs = a.kind === "chief" ? null : h("section", { "aria-label": "Its newest jobs" }, h("h2", { class: "day" }, "Its newest jobs"), a.jobs.length ? h("div", { class: "grid" }, a.jobs.map((j) => jobCard(j, now))) : h("div", { class: "empty" }, "It has not had a job yet."));
+  return h("main", { class: "page" }, head, state.problem ? h("div", { class: "banner" }, h("b", {}, "Not up to date. "), state.problem) : null, doing, tiles, tools, record, usual, replies, jobs);
 }
 
 /* ---------- Search ---------- */
@@ -2034,7 +2137,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.ra
 
 function draw() {
   const r = route();
-  document.title = r.name === "search" ? "Search · ClearOps" : r.name === "spend" ? "Spend · ClearOps" : r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
+  document.title = r.name === "agent" && state.agent ? `${state.agent.name ?? state.agent.role} · ClearOps` : r.name === "search" ? "Search · ClearOps" : r.name === "spend" ? "Spend · ClearOps" : r.name === "job" && state.job ? `${state.job.job.title} · ClearOps` : r.name === "pull" ? `Pull request #${r.number} · ClearOps` : "ClearOps";
   if (!shellEl.isConnected) root.replaceChildren(shellEl);
   headerEl.replaceChildren(header(state.board));
   if (r.name === "job" || r.name === "pull") {
@@ -2056,6 +2159,11 @@ function draw() {
       threadInput.focus({ preventScroll: true });
       threadInput.setSelectionRange(caret[0], caret[1]);
     }
+    return;
+  }
+  if (r.name === "agent") {
+    shellEl.className = "shell";
+    bodyEl.replaceChildren(...[agentPage()]);
     return;
   }
   if (r.name === "search") {
@@ -2237,12 +2345,12 @@ async function tick() {
   const r = route();
   let wait = BOARD_EVERY_MS;
   if (!document.hidden) {
-    const [boardChanged, jobChanged] = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : r.name === "spend" ? refreshSpend() : false]);
+    const [boardChanged, jobChanged] = await Promise.all([refreshBoard(), r.name === "job" ? refreshJob(r.id) : r.name === "agent" ? refreshAgent(r.kind) : r.name === "spend" ? refreshSpend() : false]);
     // Away from the board, a new reading of the board only refreshes the header: redrawing the page
     // under someone reading a diff would lose their place.
     if (r.name === "board" ? boardChanged : jobChanged) draw();
     else if (boardChanged) headerEl.replaceChildren(header(state.board));
-    if (r.name === "pull" || r.name === "spend") wait = JOB_IDLE_EVERY_MS;
+    if (r.name === "pull" || r.name === "spend" || r.name === "agent") wait = JOB_IDLE_EVERY_MS;
     if (r.name === "job") wait = state.job && (state.job.job.status === "running" || state.job.job.status === "queued") ? JOB_LIVE_EVERY_MS : JOB_IDLE_EVERY_MS;
   }
   timer = setTimeout(tick, wait);
@@ -2259,6 +2367,9 @@ window.addEventListener("hashchange", () => {
   state.job = undefined;
   state.jobRaw = "";
   state.jobMissing = false;
+  state.agent = undefined;
+  state.agentRaw = "";
+  state.agentMissing = false;
   state.problem = undefined;
   state.reportAsked = state.reportShown = undefined;
   window.scrollTo(0, 0);

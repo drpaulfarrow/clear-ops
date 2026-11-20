@@ -209,7 +209,7 @@ The first step towards project spaces and the agent roster, from Paul's mockup o
 - **Choosing a space narrows the board** to that repository's jobs and pull requests, in all three views and in the history (`/app/api/history?space=<alias>`). What waits on Paul's own decision (a send, a purchase, a DNS change, a sign-up) belongs to no repository and is never narrowed away. The choice is kept in the browser, and a space the board no longer lists is forgotten.
 - **Each space has a chat of its own** (`web:space:<alias>`, 20 Nov 2026; `docs/app/space-chat.png`). Choosing a space shows its conversation with the chief in place of the main one, and "All spaces" goes back to the main conversation and Paul's own chats. It is a conversation in full: it keeps as much as the main one, has its own session with the chief, and jobs started in it report in it. Every message sent there reaches the chief with one line from the service saying which repository the chat is about, so Paul does not have to name it (`threadContext` in `src/orchestrator.ts`). A space's row carries a mark when the service has said something there that he has not looked at. Only a repository in the registry has a chat; a space that is only an old alias on a card narrows the board and leaves the chat alone. The things waiting on his decision are listed in the main conversation only, as with his own chats.
 - **Spaces of Paul's own** (`src/spaces.ts`, 20 Nov 2026; `docs/app/new-space.png`). "New space" in the rail makes one: a name, and any of the managed repositories, or none. It has a chat of its own like a repository's space, and its board shows the jobs on its repositories plus any job started from its chat. Nothing is moved: a space is a way of looking at the same jobs, so a job on a repository still shows in that repository's space too, and "All spaces" counts each job once. In its chat the chief is told the name Paul gave it and which repositories he put in it, or that it is tied to none. "Change this space" renames it, changes its repositories or removes it; removing one empties its chat and forgets the chief's side of it, and keeps every job. At most 20 are kept, a name is one line of up to 48 characters, and two spaces cannot share a name.
-- **On shift.** Marlo, then Fitz, Vera, Scout and Pip, then any other kind of worker that has a job running or queued. Each line is read off the board's cards: building or reviewing (with the pull request's number where there is one), gone quiet (no live worker on a running job), waiting on Paul, held by the cap or by a paused queue, next up, or idle. A change that was reviewed and left for Paul is shown as the maintainer's hand-off, not the engineer's wait. A line about a job opens that job.
+- **On shift.** Marlo, then Fitz, Vera, Scout and Pip, then any other kind of worker that has a job running or queued. Each line is read off the board's cards: building or reviewing (with the pull request's number where there is one), gone quiet (no live worker on a running job), waiting on Paul, held by the cap or by a paused queue, next up, or idle. A change that was reviewed and left for Paul is shown as the maintainer's hand-off, not the engineer's wait. Each of them opens their own page.
 - **The icon.** The ClearOps mark is the tab icon and the home-screen icon (`icon.svg`, `icon-32.png`, `icon-180.png` in `public/app`, served from the same fixed table as the stylesheet and script).
 
 ### What this changes in the rules
@@ -219,6 +219,22 @@ The rail is read-only and built from what the board already sent; the history ro
 Spaces of Paul's own add one route that is not a GET, `POST /app/api/spaces`, taken from this site's own script only like the others (`test/invariants.test.ts` pins the list). It makes, changes or removes a space and nothing else: it can name only repositories already in the registry, it starts no job and touches none, it reaches no model, and it cannot name a repository's own space, the main conversation, a thread or one of his chats. A space's id is made by the service at random.
 
 A space's chat adds one kind of address to the app's conversations (`space:<alias>` beside a job's thread, a pull request's thread and Paul's own chats), which `test/invariants.test.ts` pins. It is taken only for a repository in the registry, and it changes nothing about who may say what: a message there comes in by the same route, as the same sender on no allowlist, and is refused every typed approval word before any model, exactly as in the main conversation. The line the chief is given about the repository is the service's own and says so.
+
+## One agent's page (`appAgent` in `src/app-data.ts`)
+
+Anyone on the roster opens a page of their own (`#/agent/<kind>`, `docs/app/agent.png`), read-only:
+
+- **Who it is and what it is doing**: its name and role, what it does in one line, and the roster's own line for this minute, which opens the job it is about.
+- **Its model**, and where that is decided: the Spend page for the workers, the engineers, the maintainer and the chief; the assistant is always on Claude and says so.
+- **How far one job may run**: its turn limit and its money cap, or that none is set.
+- **What it may use**, in plain words ("Search the web", "Run python3 only"), and how many commands are refused to it outright. Its prompt is not shown.
+- **How it has been doing**, over the last 24 hours and the last 7 days. Finished is not the same as done, so the outcomes are counted apart (confirmed done, not confirmed, waiting on Paul, did not get there) and no single success rate is made of them. Beside them: why the ones that stopped did, typical and worst run time and queue wait, and what those jobs cost in all, which is the provider's own figures added up with the number of jobs they cover, or a line saying there is none.
+- **What a job of its usually costs** on each model, where there is enough to say (the estimate described above).
+- **Its newest ten jobs.**
+
+The chief's page has no jobs of its own: it shows its model, what it may do, and what the provider charged today for its own replies.
+
+`GET /app/api/agents/<kind>` is behind the same gate as everything else and writes nothing. Only "chief" or a kind of worker is an agent; any other name is answered with 404.
 
 ## Search (`src/app-search.ts`)
 
@@ -236,7 +252,7 @@ On a phone's board, "Sign out" moved from the header into the rail's drawer to m
 
 ## Still to come
 
-What it does not do yet: files and notes of its own for each space, a page for each agent (model, tools, recent jobs, success rate and cost), live voice with Cleo, push notifications, searching inside the files Paul has sent. Each is a later slice.
+What it does not do yet: files and notes of its own for each space, live voice with Cleo, push notifications, searching inside the files Paul has sent. Each is a later slice.
 
 ## Switching it on (Paul, once, about five minutes)
 

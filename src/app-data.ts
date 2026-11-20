@@ -26,7 +26,7 @@ import { config } from "./config.js";
 import { PR_KINDS, runLimits, workerSpec } from "./agents.js";
 import { failureLabel } from "./failures.js";
 import { boardHealth } from "./health.js";
-import { describeJob, kindName, liveStep, repoLabel } from "./job-descriptions.js";
+import { describeJob, kindDoes, kindName, liveStep, repoLabel } from "./job-descriptions.js";
 import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
 import { AGENT_NAMES, plainStop, REPORT_POINTER, shortText, stoppedEarly, stoppedEarlyWords } from "./messages.js";
 import { PER_JOB_MODELS, resolveModel, runRoute } from "./llm.js";
@@ -36,7 +36,7 @@ import { redact, repoRegistry } from "./repos.js";
 import { spendDisplay } from "./spend.js";
 import { jobTitle } from "./titles.js";
 import { PRIVATE_KINDS, readTrace, traceFigures, type TraceFigures, type TraceLine } from "./trace.js";
-import { realCost } from "./worker-stats.js";
+import { boardEfficiency, realCost, STATS_WINDOWS } from "./worker-stats.js";
 import { costEstimates, estimateFor, type CostEstimate } from "./estimates.js";
 import { inOwnSpace, ownSpaceAddress, type OwnSpace } from "./spaces.js";
 import { WEB_CONVERSATION, type WebChat, type WebMessage } from "./web-chat.js";
@@ -876,6 +876,155 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
     // Paul's own chats, for the list he switches between: the same whichever conversation was asked for.
     chats: (chat.ownChats?.() ?? []).map((c) => ({ id: c.id, title: c.title, count: c.count, lastAt: c.lastAt, ...(c.saidAt ? { saidAt: c.saidAt } : {}) })),
     ...(chat.mainSaidAt?.() ? { mainSaidAt: chat.mainSaidAt() } : {}),
+  };
+}
+
+/* ---------- One agent: who it is, what it may use, and how it has been doing ---------- */
+
+export const APP_AGENT_JOBS = 10;
+
+/** One window of an agent's record. Finished is not the same as done, so the outcomes are counted apart. */
+export interface AppAgentWindow {
+  label: string;
+  finished: number;
+  /** Of those: confirmed done, finished with nothing confirming it, waiting on Paul, and did not get there. */
+  met: number;
+  unconfirmed: number;
+  waiting: number;
+  notMet: number;
+  /** Why the ones that stopped or failed did, in plain words with counts. */
+  why?: string;
+  run?: string;
+  wait?: string;
+  /** What those jobs cost in all, where the store holds the provider's own figures, and how many of them that covers. */
+  costUsd?: number;
+  costedJobs: number;
+}
+
+export interface AppAgent {
+  generatedAt: string;
+  kind: string;
+  name?: string;
+  role: string;
+  /** What it does, in one short line. */
+  does: string;
+  /** What it is doing this minute, as the roster says it. */
+  now: Pick<AppRosterEntry, "state" | "line" | "jobId">;
+  /** The model its next job runs on, and one line on where that is decided. */
+  model?: string;
+  modelNote: string;
+  /** How far one job of its may run. Absent for the chief, which runs no jobs. */
+  limits?: { maxTurns: number; budgetUsd?: number };
+  /** What it may use, in plain words, and how many commands are refused to it outright. */
+  tools: string[];
+  refused: number;
+  windows: AppAgentWindow[];
+  /** What a job of its usually costs on each model, where there is enough to say (src/estimates.ts). */
+  usual: CostEstimate[];
+  /** The chief only: what the provider charged today for its own replies, by model. */
+  repliesToday?: Array<{ model: string; usd: number; calls: number }>;
+  /** Its newest jobs, any status. */
+  jobs: AppJob[];
+}
+
+/** What a tool is for, in the words a card would use. A name not listed here is shown as it is. */
+const TOOL_WORDS: Array<[RegExp, string]> = [
+  [/^(Edit|Write|NotebookEdit)$/, "Edit and write files"],
+  [/^Read$/, "Read files"],
+  [/^(Glob|Grep)$/, "Search files"],
+  [/^Bash$/, "Run commands"],
+  [/^Bash\((.+?)[ :]\*?\)$/, "Run $1 only"],
+  [/^WebSearch$/, "Search the web"],
+  [/^WebFetch$/, "Read web pages"],
+  [/^mcp__design__screenshot$/, "Take screenshots of a site"],
+  [/^mcp__design__save_asset$/, "Save design assets"],
+  [/^mcp__google__/, "Your Gmail and Calendar, within its permits"],
+  [/^mcp__dns__/, "Your GoDaddy DNS: read, and prepare changes for you to approve"],
+];
+function toolWords(allowed: readonly string[]): string[] {
+  const out: string[] = [];
+  // Plain "Bash" covers every narrower "Bash(...)" beside it.
+  const all = allowed.includes("Bash") ? allowed.filter((t) => !t.startsWith("Bash(")) : allowed;
+  for (const tool of all) {
+    const hit = TOOL_WORDS.find(([shape]) => shape.test(tool));
+    const words = !hit ? tool : hit[1].includes("$1") ? tool.replace(hit[0], hit[1]) : hit[1];
+    if (!out.includes(words)) out.push(words);
+  }
+  return out;
+}
+
+const AGENT_KIND = /^[a-z_]{1,24}$/;
+const MODEL_ROLE: Record<string, string> = { engineer: "engineers", create_agent: "engineers", maintain: "maintainer" };
+
+/** One agent's page. `kind` is "chief" or a kind of worker; anything else is no agent at all. */
+export function appAgent(source: AppSource, kind: string): AppAgent | undefined {
+  if (!AGENT_KIND.test(kind)) return undefined;
+  const now = source.now ?? Date.now();
+  const names: Record<string, string> = AGENT_NAMES;
+  const board = appBoard(source);
+  const on = board.roster.find((r) => r.kind === kind);
+  const base = { generatedAt: new Date(now).toISOString(), kind, ...(names[kind] ? { name: names[kind] } : {}) };
+  if (kind === "chief") {
+    const chat = source.store.chatCost();
+    return {
+      ...base,
+      role: "chief",
+      does: "answers you, starts jobs and hands longer work to the others",
+      now: { state: "here", line: "With you" },
+      model: resolveModel(config.models.chief),
+      modelNote: "The chief's model, which you can change on the Spend page.",
+      tools: ["Start, stop and look up jobs", "Read the board, the spend and the health checks", "Prepare what needs your approval, and nothing past it"],
+      refused: 0,
+      windows: [],
+      usual: [],
+      ...(chat?.ymd === londonYmd(new Date(now)) && chat.models.length ? { repliesToday: chat.models.map((m) => ({ ...m })) } : {}),
+      jobs: [],
+    };
+  }
+  const does = kindDoes(kind);
+  if (!does) return undefined;
+  const spec = workerSpec(kind as Job["kind"]);
+  const route = runRoute({ kind }, spec.model);
+  const limits = runLimits(kind as Job["kind"]);
+  const mine = source.store.allJobs().filter((j) => j.kind === kind);
+  const ev = evidenceOf(source.store);
+  const figures = boardEfficiency({ jobs: mine, now });
+  const windows = STATS_WINDOWS.map((w, i): AppAgentWindow => {
+    const from = now - w.hours * 3_600_000;
+    const done = mine.filter((j) => isFinished(j) && j.finishedAt && Date.parse(j.finishedAt) >= from);
+    const count = (state: AppOutcome["state"]) => done.filter((j) => (outcomeOf(source.store, j, ev, source)?.state ?? "unconfirmed") === state).length;
+    const costs = done.map(realCost).filter((c): c is number => c !== undefined);
+    const stats = figures.windows[i]?.kinds[0];
+    return {
+      label: w.label,
+      finished: done.length,
+      met: count("met"),
+      unconfirmed: count("unconfirmed"),
+      waiting: count("waiting"),
+      notMet: count("not_met"),
+      ...(stats?.why ? { why: stats.why } : {}),
+      ...(stats?.run ? { run: stats.run } : {}),
+      ...(stats?.wait ? { wait: stats.wait } : {}),
+      ...(costs.length ? { costUsd: costs.reduce((n, c) => n + c, 0) } : {}),
+      costedJobs: costs.length,
+    };
+  });
+  return {
+    ...base,
+    role: kindName(kind),
+    does,
+    now: on ? { state: on.state, line: on.line, ...(on.jobId ? { jobId: on.jobId } : {}) } : { state: "idle", line: "Idle" },
+    model: route.provider === "anthropic" ? `anthropic/${route.model}` : resolveModel(route.model),
+    modelNote: route.provider === "anthropic" ? "Always Claude, on Anthropic's API directly. It is not changed from the app." : `The ${MODEL_ROLE[kind] ?? "workers"}' model, which you can change on the Spend page. A job you pin to a model runs on that one instead.`,
+    limits: { maxTurns: limits.maxTurns, ...(limits.realBudgetUsd !== undefined ? { budgetUsd: limits.realBudgetUsd } : {}) },
+    tools: toolWords(spec.allowedTools),
+    refused: spec.disallowedTools?.length ?? 0,
+    windows,
+    usual: ev.estimates.filter((e) => e.kind === kind || (kind === "research" && e.kind === "research, deep")),
+    jobs: mine
+      .sort((a, b) => (b.finishedAt ?? b.startedAt ?? b.createdAt).localeCompare(a.finishedAt ?? a.startedAt ?? a.createdAt))
+      .slice(0, APP_AGENT_JOBS)
+      .map((j) => toAppJob(source, j, ev)),
   };
 }
 

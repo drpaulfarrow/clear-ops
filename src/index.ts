@@ -49,7 +49,7 @@ import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex,
 import { beatFor } from "./beats.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
-import { appBoard, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
+import { appAgent, appBoard, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
 import { mintAppApproval } from "./app-approver.js";
 import { PrStates } from "./pr-state.js";
 import { AppPulls, PullError } from "./app-pulls.js";
@@ -1130,6 +1130,13 @@ export function buildApp(given: AppDeps) {
     const detail = appJob(appSource(), String(req.params.id ?? ""));
     if (!detail) return void res.status(404).json({ error: "no such job" });
     res.json(detail);
+  });
+  // One agent's page: who it is, what it may use and how it has been doing. Read-only.
+  app.get(`${APP_PATH}/api/agents/:kind`, (req, res) => {
+    appHeaders(res);
+    const agent = appAgent(appSource(), String(req.params.kind ?? ""));
+    if (!agent) return void res.status(404).json({ error: "no such agent" });
+    res.json(agent);
   });
   // Search (src/app-search.ts): read-only, over what the app already shows, by plain words.
   app.get(`${APP_PATH}/api/search`, (req, res) => {
