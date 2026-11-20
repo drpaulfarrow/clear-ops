@@ -330,3 +330,85 @@ test("the chief's start_job says a job was queued and behind which job; job_stat
   assert.match(replies[2], new RegExp(`^Outreach agent · create_agent · \\w+ · queued behind Workforce first \\(${first.id}\\), #1 on self$`, "m"));
   assert.match(systemPrompt, /Queueing is automatic/);
 });
+
+/* ---------- A job that runs out of turns ---------- */
+
+/** A runner that plays back one result per call and records what it was asked. */
+function scripted(results: Array<RunResult | Error>) {
+  const asked: RunOptions[] = [];
+  const runner: AgentRunner = async (o) => {
+    asked.push(o);
+    const next = results.shift();
+    if (!next) throw new Error("the runner was called more often than the test expected");
+    if (next instanceof Error) throw next;
+    return next;
+  };
+  return { runner, asked };
+}
+
+const OUT: RunResult = { text: "The agent stopped early (error_max_turns).", sessionId: "sess-1", costUsd: 0.1, outOfTurns: true };
+
+async function runOne(results: Array<RunResult | Error>) {
+  const { writeUpNote, WRITE_UP_TURNS } = await import("../src/jobs.js");
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-turns-")));
+  const messenger = new ConsoleMessenger();
+  const { runner, asked } = scripted(results);
+  const jobs = new JobRunner(store, messenger, runner, undefined, { failureNotices: { batchMs: 1 } });
+  const job = jobs.start("analyse", "Review the repository", FOUNDER, "product", undefined, { title: "Deep review" });
+  await waitFor(() => ["done", "failed"].includes(store.getJob(job.id)!.status));
+  // Either it is announced as finished, or the failure notice goes out (batched, here after a millisecond).
+  await waitFor(() => messenger.sent.some((m) => m.text.startsWith("Finished:") || /failed|out of|credit/i.test(m.text)));
+  return { store, messenger, asked, job: store.getJob(job.id)!, writeUpNote, WRITE_UP_TURNS };
+}
+
+test("a job that runs out of turns is given one short turn to write up what it has, and that is its report", async () => {
+  const { store, messenger, asked, job, writeUpNote, WRITE_UP_TURNS } = await runOne([
+    OUT,
+    { text: "## What I found\n\nThe queue is sound. I did not reach the billing module.\n\n<message_to_paul>The queue is sound. I ran out of turns before the billing module.</message_to_paul>", sessionId: "sess-1", costUsd: 0.02 },
+  ]);
+  // The second call carries on the same conversation, with the write-up note and only a few turns.
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1]!.resume, "sess-1");
+  assert.equal(asked[1]!.maxTurns, WRITE_UP_TURNS);
+  assert.equal(asked[1]!.prompt, writeUpNote(asked[0]!.maxTurns!));
+  assert.match(asked[1]!.prompt, /Do not call any tool\. Write your final report now, from what you have already found/);
+  assert.match(asked[1]!.prompt, /say plainly what you did not get to/);
+  assert.deepEqual([asked[1]!.systemPrompt, asked[1]!.model, asked[1]!.cwd], [asked[0]!.systemPrompt, asked[0]!.model, asked[0]!.cwd], "the same worker, in the same place");
+  // Done, with the write-up as the saved report, marked as what it had by then, and both runs' cost.
+  assert.equal(job.status, "done");
+  const report = store.readOutput(job.id)!;
+  assert.match(report, /The queue is sound\. I did not reach the billing module\./);
+  assert.match(report, new RegExp(`This job reached its limit of ${asked[0]!.maxTurns} turns before it finished\\. This report is its write-up of what it had found by then\\.`));
+  assert.ok(!report.includes("The agent stopped early"), "the one-line stop is never the report");
+  assert.ok(Math.abs(job.costUsd! - 0.12) < 1e-9);
+  // Paul is told it finished, that the report is partial, and where it is.
+  const told = messenger.sent.find((m) => m.text.startsWith("Finished:"))!.text;
+  assert.match(told, /The queue is sound\. I ran out of turns before the billing module\./);
+  assert.match(told, new RegExp(`It reached its limit of ${asked[0]!.maxTurns} turns, so the report is what it had found by then\\. Full report: show job ${job.id}\\.$`));
+});
+
+test("a job that runs out of turns and writes nothing up is failed, never done with nothing", async () => {
+  for (const second of [{ text: "", sessionId: "sess-1" }, { ...OUT, costUsd: 0.01 }, new Error("boom")] as Array<RunResult | Error>) {
+    const { store, messenger, asked, job } = await runOne([OUT, second]);
+    assert.equal(asked.length, 2);
+    assert.equal(job.status, "failed");
+    assert.equal(job.failure, "turns");
+    assert.ok(!(store.readOutput(job.id) ?? "").includes("Finished"));
+    assert.ok(!messenger.sent.some((m) => m.text.startsWith("Finished:")), "nothing says it finished");
+    assert.ok(messenger.sent.some((m) => /it used every turn it is allowed and had no report written, even when asked for one/.test(m.text)), messenger.sent.map((m) => m.text).join(" | "));
+  }
+  // With no conversation to carry on there is nothing to ask: failed at once, the same way.
+  const none = await runOne([{ ...OUT, sessionId: undefined }]);
+  assert.equal(none.asked.length, 1);
+  assert.deepEqual([none.job.status, none.job.failure], ["failed", "turns"]);
+});
+
+test("a provider failure during the write-up is that failure, and a run that finishes normally is not asked again", async () => {
+  const held = await runOne([OUT, { text: "", error: { kind: "credit", detail: "Credit balance is too low" } }]);
+  assert.deepEqual([held.job.status, held.job.failure], ["failed", "credit"]);
+  const fine = await runOne([{ text: "All good.\n\n<message_to_paul>All good.</message_to_paul>", sessionId: "s", costUsd: 0.05 }]);
+  assert.equal(fine.asked.length, 1);
+  assert.equal(fine.job.status, "done");
+  assert.ok(!fine.store.readOutput(fine.job.id)!.includes("limit of"));
+  assert.ok(!fine.messenger.sent.find((m) => m.text.startsWith("Finished:"))!.text.includes("limit of"));
+});

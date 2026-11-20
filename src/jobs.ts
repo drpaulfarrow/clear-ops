@@ -16,14 +16,14 @@ import { promisify } from "node:util";
 import { bookingLink, config } from "./config.js";
 import { londonYmd } from "./london.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentRunner, RunResult } from "./agents.js";
+import type { AgentRunner, RunOptions, RunResult } from "./agents.js";
 import { describeWorkerTool, JobProgress, type JobProgressOptions } from "./status.js";
 import { nextCheckAt, type Canary, type CanaryProvider } from "./auto-resume.js";
 import { BRIDGE_READ_DENY, CONTRACT_HEADING, DEEP_RESEARCH_NOTE, detectDepth, repoPaths, MAX_DESIGN_ROUNDS, MAX_FIX_ROUNDS, PR_KINDS, readableDirs, repoFocus, runLimits, SCHEDULE_VERDICT, workerSpec, type RunLimits } from "./agents.js";
 import { designRoot, parseDesignVerdict, reportImages, waitForProductDeploy, type DeployWait } from "./design.js";
 import type { Job, JobKind, JobPermit, JobStatus, JobTarget, PendingAction, SavedWork, Store } from "./store.js";
 import type { Messenger } from "./whatsapp.js";
-import { addToReport, parseOutcome, shortText, splitReport } from "./messages.js";
+import { addToReport, parseOutcome, shortText, splitReport, reportPointer } from "./messages.js";
 import { FailureNotifier, failureFromError, failureLabel, failureReason, HOLD_KINDS, RunFailedError, runFailure, type BudgetStop, type FailureKind, type FailureNotifierOptions, type RunFailure } from "./failures.js";
 import { RealCostMeter, usdAmount, type JobCostWatch, type RealCost } from "./realcost.js";
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
@@ -980,6 +980,24 @@ export class JobRunner {
     return this.live.get(id)?.step;
   }
 
+  /**
+   * A run that used all its turns without a final answer: one short turn more on the same conversation
+   * to write up what it has. Returns that write-up as the run's result, with both runs' cost. If there
+   * is no conversation to carry on, or the write-up comes back empty or runs out as well, the result is
+   * a failure of its own kind ("turns"), so the job is recorded as failed and never as done with
+   * nothing. A provider failure during the write-up (no credit, a rejected key) stays that failure.
+   */
+  private async writeUp(opts: RunOptions, spent: RunResult, turns: number): Promise<RunResult> {
+    const none: RunFailure = { kind: "turns", detail: `It used all ${turns} of its turns and wrote no report.` };
+    if (!spent.sessionId) return { ...spent, text: "", error: none, outOfTurns: undefined };
+    const more: RunResult = await this.run({ ...opts, prompt: writeUpNote(turns), resume: spent.sessionId, maxTurns: WRITE_UP_TURNS }).catch((err) => ({ text: "", error: failureFromError(err) }));
+    const costUsd = spent.costUsd === undefined && more.costUsd === undefined ? undefined : (spent.costUsd ?? 0) + (more.costUsd ?? 0);
+    const both = { sessionId: more.sessionId ?? spent.sessionId, ...(costUsd !== undefined ? { costUsd } : {}), ...(more.usage ?? spent.usage ? { usage: more.usage ?? spent.usage } : {}) };
+    if (more.error && HOLD_KINDS.includes(more.error.kind)) return { ...both, text: "", error: more.error };
+    if (more.outOfTurns || runFailure(more)) return { ...both, text: "", error: none };
+    return { ...both, text: more.text };
+  }
+
   private async execute(id: string): Promise<void> {
     const job = this.store.getJob(id);
     if (!job) return;
@@ -1197,6 +1215,15 @@ export class JobRunner {
           result = { text: "", error: failureFromError(err) };
         }
       }
+      // Out of turns before it wrote anything up (the SDK's error_max_turns). The reading is done and
+      // paid for; only the report is missing. So it gets one short turn more, on the same conversation,
+      // to write up what it has and say what it did not reach. Until 20 Nov 2026 such a run was recorded
+      // as done with the one line "The agent stopped early (error_max_turns)." as its whole report.
+      let ranOut = false;
+      if (result.outOfTurns && !live.stop) {
+        ranOut = true;
+        result = await this.writeUp(opts, result, limits.maxTurns);
+      }
       await progress.finish();
       // Stopped (stalled, too long, cancelled) while it ran: whatever came back is not the job's result.
       if (live.stop) throw new Error("stopped");
@@ -1220,6 +1247,8 @@ export class JobRunner {
       // (src/repo-tokens.ts). Paul's short message is untouched, and a repository on the App or
       // GH_TOKEN adds nothing (src/bootstrap.ts jobCredentialNote).
       if (BUILDS(job.kind)) result.text = addToReport(result.text, jobCredentialNote(job.target));
+      // A write-up after running out of turns says so in the saved report, whatever the worker wrote.
+      if (ranOut) result.text = addToReport(result.text, `This job reached its limit of ${limits.maxTurns} turns before it finished. This report is its write-up of what it had found by then.`);
       // The full report (verdict lines and all) is the saved output; Paul sees only the short message.
       // The report's per-acceptance lines ("ACCEPT A1: met", src/agents.ts) are review evidence the
       // maintainer reads: the runner never inspects the report for them, never marks a job failed
@@ -1308,6 +1337,8 @@ export class JobRunner {
         chained = next.chained;
         escalation = next.escalation;
       }
+      // After running out of turns, what follows the worker's words starts by saying the report is partial.
+      if (ranOut) chained = [`It reached its limit of ${limits.maxTurns} turns, so the report is what it had found by then.`, chained].filter(Boolean).join(" ");
       await this.messenger.send(
         job.replyTo ?? job.requestedBy,
         finishedText(job, message, chained),
@@ -1919,7 +1950,7 @@ export function isScheduleVerdict(text: string): boolean {
  * and where the full report is. Never the report itself, its headings, lists or verdict lines.
  */
 export function finishedText(job: Pick<Job, "id" | "title" | "brief" | "kind" | "target">, message: string, next = ""): string {
-  const body = [message, next, `Full report: show job ${job.id}.`].map((s) => s.trim()).filter(Boolean).join(" ");
+  const body = [message, next, reportPointer(job.id)].map((s) => s.trim()).filter(Boolean).join(" ");
   return `Finished: ${jobLabel(job)}.\n${body}`;
 }
 
@@ -1933,6 +1964,14 @@ export function duration(ms: number): string {
 }
 
 /** What an interrupted job is told when it carries on its own conversation after a restart. Exported for tests. */
+/** How many turns a job that ran out is given to write up what it has. It is told to use no tools; the spare turns are for a model that tries one anyway. */
+export const WRITE_UP_TURNS = 3;
+
+/** What a job that has used all its turns is told: write up what you have, now, and say what is missing. Exported for tests. */
+export function writeUpNote(turns: number): string {
+  return `You have used all ${turns} of the turns this job allows, so you cannot read, search or run anything more. Do not call any tool. Write your final report now, from what you have already found: lead with what you established, then say plainly what you did not get to. A partial report that is honest about its gaps is what is wanted here, so do not guess to fill them. End with your message to Paul as usual, and say in it that you ran out of turns and what is missing.`;
+}
+
 export function continueNote(attempt: number): string {
   return `The service restarted while you were working, which stopped you mid-task (this is attempt ${attempt}). Everything above is your own earlier work on this job. Your working folder is as you left it, but any command or tool call that was running when the restart happened did not finish. Check git status and the state of anything you were in the middle of, then carry on from where you were and finish the job, ending with your report as instructed. Do not start again from scratch.`;
 }
