@@ -77,6 +77,12 @@ export function repoLabel(alias: string | undefined): string {
 }
 
 /** "engineer on the workforce repo: writes the change on a branch and opens a pull request". */
+/** What a kind of worker does, in one short line, or undefined for a kind there is no such line for. */
+export function kindDoes(kind: JobKind | string): string | undefined {
+  // Only a kind's own line: a name such as "constructor" is no kind, whatever an object happens to carry.
+  return Object.hasOwn(KIND_LINES, kind) ? KIND_LINES[kind as JobKind] : undefined;
+}
+
 export function kindLine(kind: JobKind | string, repository: string | undefined): string {
   const name = KIND_NAMES[kind as JobKind] ?? kind;
   const what = KIND_LINES[kind as JobKind] ?? "does a piece of the workforce's work";

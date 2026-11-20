@@ -447,3 +447,13 @@ mark{background:var(--accent-soft);color:var(--accent-text);border-radius:3px;pa
 .av-you i{background:var(--muted)}
 .signout.in-rail{display:none}
 @media (max-width:640px){.signout.in-top:not(.always){display:none}.signout.in-rail{display:block;margin-top:auto;padding-top:8px;border-top:1px solid var(--line)}.signout.in-rail .rail-row{width:100%}}
+/* One agent's page. */
+.agent-now{color:var(--muted)}
+.agent-now.working{color:var(--run-text)}
+.agent-now.waiting{color:var(--accent-text)}
+.agent-now.stuck{color:var(--bad-text)}
+.agent-now a{color:inherit}
+.plain-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;color:var(--text-2)}
+.agent-count{color:var(--text-2)}
+.agent-count b{font-family:var(--display);font-size:20px;color:var(--text)}
+.tone-good{color:var(--ok-text)}.tone-wait{color:var(--accent-text)}.tone-bad{color:var(--bad-text)}
