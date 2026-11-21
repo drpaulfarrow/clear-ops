@@ -228,6 +228,20 @@ export const config = {
    * because every merge there redeploys the service. "maintainer": the maintainer merges, as before.
    */
   selfMerge: (process.env.SELF_MERGE ?? "paul").toLowerCase() === "maintainer" ? ("maintainer" as const) : ("paul" as const),
+  /**
+   * The daily model check (src/model-ops.ts): once a day, past the given London hour, the service
+   * reads OpenRouter's public model list, verifies every model the workforce runs on and writes a
+   * report of offers and better-value alternatives. It recommends; it never changes a model, and it
+   * messages Paul only when it recommends a change or a model has gone missing. MODEL_CHECK=off turns
+   * it off; MODEL_CHECK_HOUR is the London hour it runs at (0-23).
+   */
+  modelCheck: {
+    enabled: (process.env.MODEL_CHECK ?? "on").toLowerCase() !== "off",
+    hour: (() => {
+      const n = Number(process.env.MODEL_CHECK_HOUR);
+      return Number.isInteger(n) && n >= 0 && n <= 23 ? n : 8;
+    })(),
+  },
   models: {
     chief: process.env.CHIEF_MODEL ?? "haiku",
     worker: process.env.WORKER_MODEL ?? "haiku",
