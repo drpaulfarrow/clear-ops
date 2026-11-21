@@ -700,6 +700,10 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal((await get(`${APP_PATH}/api/jobs/..%2f..%2fstate`, cookie)).status, 404);
   assert.equal(appJob({ store, queue: quietQueue, now }, "../state"), undefined);
 
+  // The board route goes by the service's own clock, not this file's, and lists what finished in the last
+  // two days. So the job is finished by that clock before it is looked for: dated by this file's fixed
+  // clock, it dropped off the board, and this test began to fail, two days after that date.
+  store.updateJob(job.id, { finishedAt: new Date(Date.now() - 20 * 60_000).toISOString() });
   const board = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie)));
   assert.ok(board.jobs.some((j: { id: string }) => j.id === job.id));
   assert.equal(typeof board.health.headline, "string");
