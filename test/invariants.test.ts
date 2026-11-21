@@ -1179,7 +1179,11 @@ test("retrieval is a harness decision, budgeted in code and never run on a stron
   // chief runs no decision step, is told the brief's rules as its own (`chiefSearchRule`), and its
   // search tools are held to the same number of searches for one message in code, not by asking it.
   assert.doesNotMatch(orch, /\bretrieve\(|recordRetrievalTurn|EVIDENCE_RULE/, "the chief's turn runs no decision step and is handed no evidence block");
-  assert.match(orch, /systemPrompt: CHIEF_PROMPT \+ repoNotes\(\) \+ modelNote\(\) \+ this\.standingNotes\(\) \+ `\\n\\n\$\{chiefSearchRule\(canSearch, config\.retrieval\.maxSearches\)\}`/, "the chief carries its own search rule");
+  assert.match(orch, /systemPrompt: CHIEF_PROMPT \+ repoNotes\(\) \+ modelNote\(\) \+ this\.standingNotes\(\) \+ `\\n\\n\$\{chiefSearchRule\(searchWith, config\.retrieval\.maxSearches\)\}`/, "the chief carries its own search rule");
+  // One budget, with no way round it: the Anthropic API's own WebSearch has no counter, so it is never
+  // offered beside the capped tools, on any provider (the maintainer's review of this change, 21 Nov 2026).
+  assert.match(orch, /const builtIn = canSearch \? \[\] : \["WebSearch"\];/, "no uncapped search tool is offered when the capped ones are");
+  assert.match(orch, /allowedTools: \[\.\.\.builtIn, "WebFetch", "Read", "Glob", "Grep", OPS_TOOLS, \.\.\.\(canSearch \? \[`mcp__\$\{SEARCH_SERVER\}__\*`\] : \[\]\)\],\s*tools: \[\.\.\.builtIn, "WebFetch", "Read", "Glob", "Grep"\],/);
   assert.match(orch, /\[SEARCH_SERVER\]: searchServer\(undefined, \{ searches: config\.retrieval\.maxSearches \}\)/, "the chief's search budget for one message is code");
   const search = src("search.ts");
   assert.match(search, /if \(limit && asked >= limit\.searches\) return text\(searchLimitText\(limit\.searches\), true\);\s*asked \+= 1;/, "a search past the limit is refused before it is run");
