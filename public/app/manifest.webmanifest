@@ -1,0 +1,28 @@
+{
+  "id": "/app",
+  "name": "ClearOps",
+  "short_name": "ClearOps",
+  "description": "Paul's workforce: talk to Cleo, read Marlo's feeds, and decide what waits on you.",
+  "start_url": "/app",
+  "scope": "/app",
+  "display": "standalone",
+  "background_color": "#0B0E13",
+  "theme_color": "#0B0E13",
+  "icons": [
+    { "src": "/app/assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/app/assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/app/assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Talk to Cleo",
+      "short_name": "Cleo",
+      "description": "Open Cleo's conversation, ready to talk.",
+      "url": "/app#/cleo",
+      "icons": [
+        { "src": "/app/assets/cleo-96.png", "sizes": "96x96", "type": "image/png" },
+        { "src": "/app/assets/cleo-192.png", "sizes": "192x192", "type": "image/png" }
+      ]
+    }
+  ]
+}

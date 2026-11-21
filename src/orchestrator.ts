@@ -439,6 +439,14 @@ export class Orchestrator {
         // The chief itself hit the API error (no credit, a rejected key): say so plainly, not the raw text.
         return this.messenger.send(from, chiefFailureText(result.error));
       }
+      if (result.outOfTurns) {
+        // The turn ended on its step limit with no answer. Its text is only the runner's stop line, which
+        // is not a reply, so Paul is told what happened and what to ask for. And its session is not kept:
+        // it holds every step of the attempt (the file it was paging through, say), which every later
+        // turn in this conversation would carry, pay for and most likely fail on again.
+        this.store.clearSession(from);
+        return this.messenger.send(from, CHIEF_OUT_OF_TURNS);
+      }
       if (result.sessionId) this.store.setSession(from, result.sessionId);
       await this.messenger.send(from, tidyReply(result.text) || "(no reply)");
     } catch (err) {
@@ -1731,6 +1739,18 @@ export function deviceStatusReply(jobs: Job[], held: boolean): string {
 }
 
 /** What Paul sees when the chief itself could not run (no credit, a rejected key, the API down). */
+/**
+ * How many steps the chief has for one message, as its run is given above (`maxTurns: 25`, written there
+ * as a number because test/invariants.test.ts pins it so; test/html-text.test.ts holds the two together).
+ * A backstop, not a budget: an ordinary answer takes a handful.
+ */
+export const CHIEF_MAX_TURNS = 25;
+/**
+ * What Paul is told when the chief used every step on one message and never answered (21 Nov 2026: it
+ * had paged through a 1.9 MB upload, twice, and all he saw was a job's "ran out of turns" line).
+ */
+export const CHIEF_OUT_OF_TURNS = `I used all ${CHIEF_MAX_TURNS} of my steps on that and did not get to an answer, so treat it as not done. If I started a job along the way it shows as a card here. This usually means I tried to read something too big myself, so ask me to hand it to a worker, for example "start a job to turn that file into requirements". I have started this chat afresh so the failed attempt does not slow down what you ask next.`;
+
 export function chiefFailureText(f: RunFailure): string {
   const fix =
     f.kind === "credit"
