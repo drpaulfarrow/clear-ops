@@ -412,14 +412,19 @@ export class Orchestrator {
       // was a wait on every message whether or not it needed a search. The chief has the search tools,
       // is told when to use them, and is held to the same number of searches for one message in code.
       const canSearch = searchEngines().length > 0;
+      // One search budget, with no way round it: when the service's own capped tools are given, the
+      // Anthropic API's own WebSearch is not, on any provider. With no engine configured that built-in
+      // tool is the only search a chief run straight on Anthropic has, so it stays, as it always was.
+      const builtIn = canSearch ? [] : ["WebSearch"];
+      const searchWith = canSearch ? "service" : provider() === "openrouter" ? "none" : "builtin";
       const result = await this.run({
         prompt: base,
         ...(images?.length ? { images } : {}),
-        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes() + `\n\n${chiefSearchRule(canSearch, config.retrieval.maxSearches)}`,
+        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes() + `\n\n${chiefSearchRule(searchWith, config.retrieval.maxSearches)}`,
         model: config.models.chief,
         resume: this.store.getSession(from),
-        allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", OPS_TOOLS, ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
-        tools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep"],
+        allowedTools: [...builtIn, "WebFetch", "Read", "Glob", "Grep", OPS_TOOLS, ...(canSearch ? [`mcp__${SEARCH_SERVER}__*`] : [])],
+        tools: [...builtIn, "WebFetch", "Read", "Glob", "Grep"],
         // The chief gets the service's own search for quick answers; the browser is for workers only.
         // The ops server's namespace carries its schema version (src/ops-schema.ts): a resumed session
         // reuses the schemas recorded for a name it knows, so a schema change must come with a new name.
