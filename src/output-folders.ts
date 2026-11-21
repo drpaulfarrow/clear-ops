@@ -27,6 +27,9 @@ const DESIGN_TITLE = /\b(design|spec|specification|architecture|brand)\b/i;
 /** Text that shows an output was derived from a file Paul uploaded (a contacts export and the like). */
 const UPLOAD_MARKERS = [/\/data\/up(?:loads)\b/i, /\bConnections\.csv\b/i, /\bconnections export\b/i];
 
+/** Why an output made from a file Paul uploaded is never copied: the one withheld reason the signed-in app still shows him (src/reports.ts). */
+export const FROM_UPLOAD = "derived from a file Paul uploaded";
+
 export type Verdict = { folder: string } | { excluded: string };
 
 export function classify(job: Pick<Job, "kind" | "title" | "brief" | "docSnapshot">, text: string): Verdict {
@@ -37,7 +40,7 @@ export function classify(job: Pick<Job, "kind" | "title" | "brief" | "docSnapsho
   // Code work (engineer, create_agent, maintain) talks about the uploads feature without holding anyone's data.
   const code = job.kind === "engineer" || job.kind === "create_agent" || job.kind === "maintain";
   const hay = `${job.brief ?? ""}\n${text}`;
-  if (!code && UPLOAD_MARKERS.some((m) => m.test(hay))) return { excluded: "derived from a file Paul uploaded" };
+  if (!code && UPLOAD_MARKERS.some((m) => m.test(hay))) return { excluded: FROM_UPLOAD };
   if (job.kind === "research" && DESIGN_TITLE.test(job.title ?? "")) return { folder: "designs" };
   return { folder: FOLDERS[job.kind] ?? "other" };
 }

@@ -245,6 +245,12 @@ What she is shown of the board gives her nothing to do (21 Nov 2026): she still 
 
 Her conversation adds no way in (21 Nov 2026). It is not an address: nothing can be sent to it, the chief is never asked there, and no approval is read from it. The two routes that serve it (`GET /app/api/cleo`, `GET /app/api/voice/:id`) only read, and a second test in `test/invariants.test.ts` pins that, that no feed holds what was said aloud, and that her coming back is the same single reply of the same brain, so there is still one place the chief is asked from.
 
+## A report made from a file Paul uploaded (`appReportFor` in `src/reports.ts`)
+
+A job's output is withheld from the report links (`/reports/...`) and never copied to the outputs repository when it was derived from a file Paul uploaded, because either could carry an upload's contents somewhere else. The app used the same rule, which only hid his own document from him: on 21 Nov 2026 a requirements document written from an upload finished, and the chat showed the words "Full report: show job ..." with no link and the job's page showed no report, though typing that command in the same chat printed all of it.
+
+So the signed-in app shows such a report: the link in the chat, the report on the job's page with a line saying it is shown only in the app, the space's library and the app's search. Nothing else changes. The report links and the outputs repository withhold it exactly as before, and what is withheld for any other reason (an assistant's mail and calendar work, a CV, a job bound to a private Google Doc, an output with no job record) stays withheld from the app too, even when its brief also names an upload.
+
 ## On the phone's home screen (`public/app/manifest.webmanifest`)
 
 The app can be installed from the browser: in Chrome on Android, the three-dot menu, then "Add to Home screen" and "Install". It then opens as its own app, full screen with no address bar, under the ClearOps icon. It is the same web app, signed in the same way.
@@ -258,7 +264,7 @@ The app can be installed from the browser: in Chrome on Android, the three-dot m
 "Notes and library" in a space's chat bar and in the rail opens the space's own page (`#/space/<id>`, `docs/app/space-page.png`), for a repository's space or one of Paul's own.
 
 - **His notes.** One box of plain text, up to 4,000 characters, which only he writes. They are kept in the store by the space's id and given to the chief with every message in that space's chat, marked as his background for the space and not as a request to act on. The chief cannot change them, and no other conversation is given them. Saving with nothing in the box clears them, and removing one of his own spaces removes its notes.
-- **Reports.** The reports of the space's jobs, newest first: the same jobs its board shows, and only reports the app would show anyway (`reportFor`). The newest 50 are listed; older ones are found by searching.
+- **Reports.** The reports of the space's jobs, newest first: the same jobs its board shows, and only reports the app would show anyway (`appReportFor`). The newest 50 are listed; older ones are found by searching.
 - **Files he sent here.** The names of the files he sent in the space's chat, with when. Names only: a file he sends is kept for the workers to read and is not opened from the app, which is how the uploads rule stands.
 
 ### What this changes in the rules
@@ -286,7 +292,7 @@ The chief's page has no jobs of its own: it shows its model, what it may do, and
 The magnifying glass in the header opens a page with one box (`docs/app/search.png`). It finds, by plain words:
 
 - **Jobs**, by title, and by brief unless the job is a kind that works over Paul's mail, calendar, CV or zones, or over a document of his. Those are found by title alone, as their cards show them.
-- **Reports**, only where `src/reports.ts` would serve them (`reportText`), so an assistant, CV or upload-derived output is never read. The newest 400 finished jobs are looked through, and a report's Markdown marks are left out of what is shown.
+- **Reports**, only where the app itself would show them (`appReportText` in `src/reports.ts`), so an assistant's or a CV output is never read. The newest 400 finished jobs are looked through, and a report's Markdown marks are left out of what is shown.
 - **Chats**: what has been said in the app's own conversations (the main one, Paul's own chats, each space's chat, and the threads of jobs and pull requests), by a message's words, by what was heard in a voice note, or by the name of a file sent with it. A file's contents are not read. A message whose conversation is gone is not offered.
 
 Every word typed has to be there, in any order and any case; two letters is the least it takes. No pattern is built from what he types. Each list shows the newest few (8 jobs, 8 reports, 12 messages) and says when there are more. A job opens its page, a report opens in full, and a message opens its conversation, at the newest message rather than the one found. What is being looked for is kept in the address (`#/search/<words>`), so a reload or the back button keeps it.
@@ -349,7 +355,7 @@ The app shows more than the jobs board at `/jobs`, on Paul's instruction: spend,
 
 - **Money is the provider's own figure or nothing.** Today's spend goes through `spendDisplay`; when OpenRouter cannot be read the app says so and shows no number. A job's cost is `realCost` (`src/worker-stats.ts`), which never returns the Agent SDK's estimate. Until jobs record a provider figure, a job's cost reads "No real figure". The one figure that is not a job's own is what finished jobs of its kind usually cost on its model (`src/estimates.ts`): worked out from those provider figures alone, shown only as an estimate, and never where a cost goes.
 - **A trace is served as `src/trace.ts` stored it**: clipped, redacted, and names and outcomes only for the kinds that work over Paul's mail, calendar, CV and zones.
-- **A saved output is served only where the reports view would serve it** (`reportFor`), rendered by `src/reports.ts`, which escapes everything.
+- **A saved output is served where the reports view would serve it** (`reportFor`), rendered by `src/reports.ts`, which escapes everything, and, in the app only, one made from a file Paul uploaded (`appReportFor`, above).
 - **A model is shown only where it is known**: a pinned job's own, or a running or queued job's current role model. A finished, unpinned job says "Not recorded".
 - **The agents' names** (Fitz, Vera, Scout, Pip) are placeholders in `public/app/app.js` until Paul names them.
 

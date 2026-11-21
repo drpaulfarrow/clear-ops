@@ -29,7 +29,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "./config.js";
-import { classify } from "./output-folders.js";
+import { classify, FROM_UPLOAD } from "./output-folders.js";
 import { londonYmd } from "./london.js";
 import { jobTitle } from "./titles.js";
 import { SIGN_OUT_PATH } from "./sign-in.js";
@@ -155,6 +155,49 @@ export function reportFor(store: Store, id: string): ReportPage | undefined {
   if (text === undefined) return undefined;
   const htmlPath = savedHtmlPath(store, id);
   return { entry: entryFor(job, htmlPath !== undefined), ...(htmlPath ? { htmlPath } : { markdown: text }) };
+}
+
+/* ---------- The signed-in app: Paul's own, made from his own upload ---------- */
+
+/**
+ * The saved output of a finished job that is withheld for one reason only: it was derived from a file
+ * Paul uploaded. An assistant's or a CV output, one bound to a private Google Doc, and one with no job
+ * record are classified before that reason is reached (src/output-folders.ts), so none of them is this.
+ */
+function fromHisUpload(store: Store, job: Job): string | undefined {
+  if (job.status !== "done") return undefined;
+  const text = store.readOutput(job.id);
+  if (text === undefined) return undefined;
+  const verdict = classify(job, text);
+  return "excluded" in verdict && verdict.excluded === FROM_UPLOAD ? text : undefined;
+}
+
+/**
+ * One saved output for the signed-in app (docs/APP.md): what `reportFor` serves, and one thing more.
+ *
+ * A report made from a file Paul uploaded is withheld from the report links and never copied to the
+ * outputs repository, because either could carry an upload's contents somewhere else. The app is
+ * neither: it is behind his own sign-in, and `show job <id>` in its chat already prints the same
+ * output to the same person. Withholding it there only hid his own document from him (21 Nov 2026:
+ * requirements written from an upload, finished, and nowhere to read them). So the app shows it,
+ * marked `private`, as Markdown rendered here; the links and the repository are exactly as they were.
+ */
+export function appReportFor(store: Store, id: string): (ReportPage & { private?: "upload" }) | undefined {
+  const open = reportFor(store, id);
+  if (open) return open;
+  if (!ID.test(id)) return undefined;
+  const job = store.getJob(id);
+  const text = job ? fromHisUpload(store, job) : undefined;
+  return job && text !== undefined ? { entry: entryFor(job, false), markdown: text, private: "upload" } : undefined;
+}
+
+/** The text of an output the app would show, for the app's own search. */
+export function appReportText(store: Store, id: string): string | undefined {
+  const open = reportText(store, id);
+  if (open !== undefined) return open;
+  if (!ID.test(id)) return undefined;
+  const job = store.getJob(id);
+  return job ? fromHisUpload(store, job) : undefined;
 }
 
 /* ---------- Markdown, rendered here ---------- */

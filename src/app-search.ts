@@ -1,7 +1,7 @@
 import { CLEO, type AppSource } from "./app-data.js";
 import { kindName, repoLabel } from "./job-descriptions.js";
 import { lockKey } from "./jobs.js";
-import { reportText } from "./reports.js";
+import { appReportText } from "./reports.js";
 import { repoRegistry } from "./repos.js";
 import type { Job, Store } from "./store.js";
 import { jobTitle } from "./titles.js";
@@ -137,7 +137,7 @@ function reportOf(store: Store, job: Job): KnownReport {
   const kept = known.get(job.id);
   if (kept?.at === at) return kept;
   if (known.size > SEARCH_REPORTS_SCANNED * 2) known.clear();
-  const text = reportText(store, job.id)?.slice(0, SEARCH_REPORT_CHARS);
+  const text = appReportText(store, job.id)?.slice(0, SEARCH_REPORT_CHARS);
   const plain = text === undefined ? undefined : plainReport(text);
   const now: KnownReport = { at, ...(plain !== undefined ? { text: plain, low: plain.toLowerCase() } : {}) };
   known.set(job.id, now);

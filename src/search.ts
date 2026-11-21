@@ -111,16 +111,36 @@ export function searchEngines(): string[] {
   return [config.search.braveKey ? "brave" : "", config.search.exaKey ? "exa" : ""].filter(Boolean);
 }
 
-export function searchServer(fetcher?: Fetcher) {
+/** What a search tool answers once the limit for one message is reached (`searchServer`'s `limit`). */
+export const searchLimitText = (max: number): string =>
+  `No more searches for this message: at most ${max} ${max === 1 ? "is" : "are"} run for one, and that many have been. Answer from what you have found, and say plainly what you could not check.`;
+
+/**
+ * The two search tools. With `limit`, the server counts the searches it is asked for and refuses any
+ * past that many: the chief is given one server for each message with the same budget the harness
+ * keeps for a worker's retrieval (src/retrieval.ts), so the cap is code, not a request to the model.
+ */
+export function searchHandlers(fetcher?: Fetcher, limit?: { searches: number }) {
   const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
+  let asked = 0;
   const run = async (engine: string, query: string, go: () => Promise<SearchResult[]>) => {
     if (!query.trim()) return text("Give a search query.", true);
+    if (limit && asked >= limit.searches) return text(searchLimitText(limit.searches), true);
+    asked += 1;
     try {
       return text(formatResults(engine, query, await go()));
     } catch (err) {
       return text(`${engine} search failed: ${scrub(err instanceof Error ? err.message : String(err))}`, true);
     }
   };
+  return {
+    web_search: ({ query, count: n, freshness }: { query: string; count?: number; freshness?: "pd" | "pw" | "pm" | "py" }) => run("Brave", query, () => braveSearch(query, n, freshness, fetcher)),
+    exa_search: ({ query, count: n, category }: { query: string; count?: number; category?: string }) => run("Exa", query, () => exaSearch(query, n, category, fetcher)),
+  };
+}
+
+export function searchServer(fetcher?: Fetcher, limit?: { searches: number }) {
+  const handlers = searchHandlers(fetcher, limit);
   return createSdkMcpServer({
     name: SEARCH_SERVER,
     version: "1.0.0",
@@ -129,13 +149,13 @@ export function searchServer(fetcher?: Fetcher) {
         "web_search",
         "Search the web (Brave's independent index). The default for current facts, news, releases, prices and anything needing a fresh source. freshness: pd (past day), pw (week), pm (month), py (year).",
         { query: z.string(), count: z.number().int().min(1).max(MAX_RESULTS).optional(), freshness: z.enum(["pd", "pw", "pm", "py"]).optional() },
-        async ({ query, count: n, freshness }) => run("Brave", query, () => braveSearch(query, n, freshness, fetcher)),
+        handlers.web_search,
       ),
       tool(
         "exa_search",
         "Neural web search (Exa): describe what you want rather than keywords. Best for finding companies, people, research papers and pages similar in meaning; returns highlights from each page. Optional category: company, research paper, news, pdf, github, personal site, financial report, people.",
         { query: z.string(), count: z.number().int().min(1).max(MAX_RESULTS).optional(), category: z.string().optional() },
-        async ({ query, count: n, category }) => run("Exa", query, () => exaSearch(query, n, category, fetcher)),
+        handlers.exa_search,
       ),
     ],
   });

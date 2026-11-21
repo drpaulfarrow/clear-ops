@@ -43,7 +43,7 @@ import { creditUrl, keyName, modelNote, MODEL_ALIASES, PER_JOB_MODELS, provider,
 import { CATALOGUE_ROLES, type CatalogueRole } from "./catalogue.js";
 import { applyModelChange, catalogueView, ModelCheckError, revertModelChange } from "./model-ops.js";
 import { SEARCH_SERVER, searchEngines, searchServer } from "./search.js";
-import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
+import { chiefSearchRule } from "./retrieval.js";
 import { lockActAsMe, normaliseDomain, parseActAsMeCommand, SitePolicy, unlockActAsMe } from "./site-policy.js";
 import { safeVaultDomains, vault, cardVault } from "./vault.js";
 import { RealCostMeter, type JobCostWatch } from "./realcost.js";
@@ -402,17 +402,15 @@ export class Orchestrator {
     try {
       const context = await this.threadContext(from);
       const base = context ? `${context}\n\n${prompt}` : prompt;
-      // Retrieval as a harness decision (src/retrieval.ts): before the chief composes its reply, the
-      // service decides on the cheap tier whether a search is needed and runs it itself, so a search is
-      // never left to whether the model thinks of it. The decision is kept with the turn, and the
-      // status line says what it is doing as it does it.
-      const outcome = await retrieve(prompt, { note: (line) => status.update(line) });
-      this.store.recordRetrievalTurn(outcome.record);
-      const asked = outcome.evidence ? `${outcome.evidence}\n\n${base}` : base;
+      // Whether to search is the chief's own judgement (Paul's decision, 21 Nov 2026; `chiefSearchRule`,
+      // src/retrieval.ts). Until then the service decided before every reply, on a call of its own, which
+      // was a wait on every message whether or not it needed a search. The chief has the search tools,
+      // is told when to use them, and is held to the same number of searches for one message in code.
+      const canSearch = searchEngines().length > 0;
       const result = await this.run({
-        prompt: asked,
+        prompt: base,
         ...(images?.length ? { images } : {}),
-        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes() + `\n\n${EVIDENCE_RULE}`,
+        systemPrompt: CHIEF_PROMPT + repoNotes() + modelNote() + this.standingNotes() + `\n\n${chiefSearchRule(canSearch, config.retrieval.maxSearches)}`,
         model: config.models.chief,
         resume: this.store.getSession(from),
         allowedTools: ["WebSearch", "WebFetch", "Read", "Glob", "Grep", OPS_TOOLS, ...(searchEngines().length ? [`mcp__${SEARCH_SERVER}__*`] : [])],
@@ -420,7 +418,7 @@ export class Orchestrator {
         // The chief gets the service's own search for quick answers; the browser is for workers only.
         // The ops server's namespace carries its schema version (src/ops-schema.ts): a resumed session
         // reuses the schemas recorded for a name it knows, so a schema change must come with a new name.
-        mcpServers: { [OPS_SERVER_NAME]: this.opsServer(sender, from, messageId, trigger ? { ...trigger, sender, conversation: from, ...(messageId ? { messageId } : {}), receivedAt: new Date().toISOString() } : undefined), ...(searchEngines().length ? { [SEARCH_SERVER]: searchServer() } : {}) },
+        mcpServers: { [OPS_SERVER_NAME]: this.opsServer(sender, from, messageId, trigger ? { ...trigger, sender, conversation: from, ...(messageId ? { messageId } : {}), receivedAt: new Date().toISOString() } : undefined), ...(canSearch ? { [SEARCH_SERVER]: searchServer(undefined, { searches: config.retrieval.maxSearches }) } : {}) },
         maxTurns: 25,
         // The chief's own turn gets the same runaway guard as a job: not a cap, only a backstop. It has
         // no cap of its own. Its calls are noted by a meter with no cap, which reads nothing while the
