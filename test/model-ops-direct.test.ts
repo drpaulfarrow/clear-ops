@@ -11,12 +11,26 @@ delete process.env.OPENROUTER_API_KEY;
 // revert must put the deployed id back, which it does by removing the catalogue's role overlay.
 process.env.CHIEF_MODEL = "vendor/direct-model";
 for (const k of ["WORKER_MODEL", "ENGINEER_MODEL", "MAINTAINER_MODEL", "DESIGN_MODEL", "EA_MODEL", "OPENROUTER_HAIKU_MODEL", "OPENROUTER_SONNET_MODEL", "OPENROUTER_OPUS_MODEL", "OPENROUTER_FABLE_MODEL", "OPENROUTER_PRICES", "LLM_PROVIDER"]) delete process.env[k];
+// The deploy points the workers at a direct id too, so the runtime fallback can be exercised for a
+// role change whose recorded previous model is a full provider id, not a tier (src/jobs.ts).
+process.env.WORKER_MODEL = "vendor/direct-model";
 
 const { config } = await import("../src/config.js");
 const llm = await import("../src/llm.js");
 const cat = await import("../src/catalogue.js");
 const ops = await import("../src/model-ops.js");
 const { Store } = await import("../src/store.js");
+const { JobRunner } = await import("../src/jobs.js");
+const { ConsoleMessenger } = await import("../src/whatsapp.js");
+import type { AgentRunner, RunOptions } from "../src/agents.js";
+
+const waitFor = async (pred: () => boolean, ms = 5000) => {
+  const t0 = Date.now();
+  while (!pred()) {
+    if (Date.now() - t0 > ms) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
 
 const DIR = config.dataDir;
 const store = new Store(DIR);
@@ -71,4 +85,47 @@ test("the catalogue view shows a direct role model as itself, priced where a row
   const view = ops.catalogueView(store);
   assert.match(view, /chief: vendor\/direct-model → vendor\/direct-model — the deploy's own variable/);
   assert.equal(llm.openrouterModels().haiku, "deepseek/deepseek-v4.1-flash");
+});
+
+/** The error text OpenRouter shapes when a model has been withdrawn: a 404 that is not credit, auth or rate. */
+const WITHDRAWN = { kind: "api", detail: 'API Error: 404 {"type":"error","error":{"type":"api_error","message":"No allowed providers are available for the selected model"}}' } as const;
+
+test("a role change from a direct model id is retried on that id when the tier's model is withdrawn", async () => {
+  // Start from only a role change: the workers move off the deploy's direct id onto the haiku tier,
+  // whose model OpenRouter then refuses mid-run. The recorded previous model is the direct id
+  // itself, so the retry must run on it and the overlay must be removed, letting the deploy's own
+  // value show through again (the same restore a revert does).
+  cat.writeCatalogue(DIR, { version: 1 });
+  await ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { role: "worker", to: "haiku", why: "Paul wants the workers on the cheap tier" });
+  assert.equal(config.models.worker, "haiku");
+  const applied = cat.readCatalogue(DIR);
+  assert.equal(applied.roles!.worker, "haiku");
+  assert.equal(applied.roleFallbacks!.worker, "vendor/direct-model", "the direct id the role ran on before is recorded as its fallback");
+  const asked: RunOptions[] = [];
+  const results = [() => ({ text: "", error: { ...WITHDRAWN } }), () => ({ text: "The analysis, done." })];
+  const runner: AgentRunner = async (o) => {
+    asked.push(o);
+    const next = results.shift();
+    if (!next) throw new Error("the runner was called more often than the test expected");
+    return next();
+  };
+  const jobs = new JobRunner(store, new ConsoleMessenger(), runner);
+  const job = jobs.start("analyse", "A direct-model look at the outputs.", "tg:99887766");
+  await waitFor(() => store.getJob(job.id)!.status === "done");
+  assert.equal(asked.length, 2, "the run was retried exactly once");
+  assert.equal(asked[1]!.model, "vendor/direct-model", "the retry runs on the recorded direct model id");
+  const after = cat.readCatalogue(DIR);
+  assert.equal(after.roles, undefined, "the role overlay is removed, so the deploy's direct id shows through again");
+  assert.equal(after.roleFallbacks, undefined, "the role fallback is spent");
+  assert.equal(config.models.worker, "vendor/direct-model", "the role runs on the deployed id again, with no deploy");
+  const record = after.changes!.find((c) => c.kind === "fallback")!;
+  assert.equal(record.target, "worker");
+  assert.equal(record.from, "deepseek/deepseek-v4.1-flash");
+  assert.equal(record.to, "vendor/direct-model");
+  const superseded = after.changes!.find((c) => c.kind === "role")!;
+  assert.ok(superseded.reverted, "the role change the fallback superseded is marked undone");
+  const output = fs.readFileSync(store.outputPath(job.id), "utf8");
+  assert.match(output, /retried once on its recorded previous model \(vendor\/direct-model\)/);
+  cat.writeCatalogue(DIR, { version: 1 });
+  cat.applyCatalogueRoles(store, DIR);
 });

@@ -96,12 +96,14 @@ test("an unreadable or malformed catalogue is ignored, never fatal", () => {
     aliases: { haiku: 123 as unknown as string, sonnet: "fine/model" },
     prices: { "fine/model": { input: -1, output: 0.5, cacheRead: 0.02, cacheWrite: 0.15 }, "bad/model": { input: 1 } },
     roles: { worker: "sonnet", chief: "not-a-tier" as unknown as "sonnet", engineer: 5 as unknown as "sonnet" },
+    roleFallbacks: { worker: "sonnet", maintainer: "not-a-model" as unknown as string, engineer: 5 as unknown as string, designer: "vendor/direct-model" },
     changes: [{ at: "", kind: "alias", target: "haiku", from: "a", to: "b", why: "c" }],
   });
   const kept = cat.readCatalogue(DIR);
   assert.deepEqual(kept.aliases, { sonnet: "fine/model" }, "bad rows are dropped, good ones kept");
   assert.deepEqual(Object.keys(kept.prices ?? {}), [], "a negative price row is dropped");
   assert.deepEqual(kept.roles, { worker: "sonnet" }, "a role's tier must be a real tier");
+  assert.deepEqual(kept.roleFallbacks, { worker: "sonnet", designer: "vendor/direct-model" }, "a role's fallback is a real tier or a full provider id");
   assert.equal(kept.changes, undefined, "a change entry missing its timestamp is dropped");
   assert.equal(llm.openrouterModels().sonnet, "fine/model");
   cat.writeCatalogue(DIR, { version: 1 });

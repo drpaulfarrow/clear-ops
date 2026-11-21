@@ -181,9 +181,12 @@ test("a role change validates the destination tier's model and records both pric
   assert.equal(entry.fromPrice!.output, 1.2);
   assert.equal(entry.toPrice!.input, 1.4, "the destination model, priced");
   assert.equal(entry.toPrice!.output, 4.4);
+  assert.equal(cat.readCatalogue(DIR).roleFallbacks!.engineer, "haiku", "the tier the role leaves is recorded as its own fallback, so a withdrawn model cannot kill its runs");
   const back = await ops.revertModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { role: "engineer" });
   assert.match(back, /engineer is back on haiku \(sonnet before/);
   assert.equal(config.models.engineer, "haiku");
+  assert.equal(cat.readCatalogue(DIR).roleFallbacks!.engineer, "sonnet", "a revert records the tier it leaves the same way");
+  cat.writeCatalogue(DIR, { version: 1 });
 });
 
 test("a fable change under the deploy's opus pin is refused, and the pin is named", async () => {
@@ -283,6 +286,39 @@ test("a model still on the list that fails its check is reported with its real r
   assert.match(sent[0]!.text, /still on OpenRouter's model list, so its recorded previous model was not engaged automatically/, "the message says why the previous model stayed put");
   store.setSetting("modelWatch", undefined);
   cat.writeCatalogue(DIR, { version: 1 });
+});
+
+test("a vanished model with a role's recorded previous tier is reported as protected, not as doomed", async () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  store.setSetting("modelWatch", undefined);
+  // Only a role change: the engineers move to the sonnet tier, recording haiku as their own previous
+  // tier, and the sonnet tier itself keeps no fallback. Sonnet's model then leaves OpenRouter's list.
+  await ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { role: "engineer", to: "sonnet", why: "Paul wants engineers on the stronger tier" });
+  assert.equal(cat.readCatalogue(DIR).roleFallbacks!.engineer, "haiku");
+  assert.equal(cat.readCatalogue(DIR).fallbacks, undefined, "no tier fallback is recorded");
+  const sent: Array<{ to: string; text: string }> = [];
+  const watch = new ops.ModelWatch({
+    store,
+    dataDir: DIR,
+    now,
+    // glm is gone from the list; everything else verifies, and nothing on the list is 20% cheaper
+    // than the cheapest tier in use, so the message is the broken-model one, not a recommendation.
+    fetch: (async () => Promise.resolve(modelsBody([DEEPSEEK, KIMI]))) as typeof fetch,
+    messenger: { send: async (to, text) => void sent.push({ to, text }) },
+    to: "tg:123",
+    warn: () => undefined,
+  });
+  const result = await watch.run();
+  assert.equal(result.engaged.length, 0, "no tier fallback is recorded, so the check itself moves nothing");
+  assert.equal(llm.openrouterModels().sonnet, "z-ai/glm-5.3", "the tier is left exactly as it was");
+  assert.equal(cat.readCatalogue(DIR).roles!.engineer, "sonnet", "moving the role stays the chief's decision, not the check's");
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.text, /retried on the role's recorded previous tier at once/, "the message says the runtime fallback protects runs");
+  assert.ok(!sent[0]!.text.includes("no previous model to fall back on"), "it does not claim there is nothing to fall back on while a role has its previous tier recorded");
+  store.setSetting("modelWatch", undefined);
+  cat.writeCatalogue(DIR, { version: 1 });
+  cat.applyCatalogueRoles(store, DIR);
+  assert.equal(config.models.engineer, "haiku", "the config overlay is put back for later tests");
 });
 
 test("a cheaper tier no role runs on is never recommended", async () => {

@@ -77,6 +77,14 @@ export interface Catalogue {
    * no longer exists is retried on it at once (src/jobs.ts), so a withdrawn model does not stop jobs.
    */
   fallbacks?: Partial<Record<AliasName, string>>;
+  /**
+   * Per role, the tier (or full provider id) it ran on before the current one, written whenever a
+   * role's tier changes, applied or reverted. It is the role's own half of the availability
+   * fallback: a run of that role that OpenRouter refuses because its model no longer exists is
+   * retried on it at once (src/model-ops.ts engageRunFallback, src/jobs.ts), so a role-only
+   * decision protects its runs exactly as a tier change protects the tier's.
+   */
+  roleFallbacks?: Partial<Record<CatalogueRole, string>>;
   /** Every applied change, newest last, bounded. */
   changes?: CatalogueChange[];
 }
@@ -125,6 +133,13 @@ function kept(raw: unknown): Catalogue {
     const fallbacks: Partial<Record<AliasName, string>> = {};
     for (const [k, v] of Object.entries(file.fallbacks)) if (isAliasName(k) && typeof v === "string" && v.includes("/")) fallbacks[k] = v;
     if (Object.keys(fallbacks).length) out.fallbacks = fallbacks;
+  }
+  if (file.roleFallbacks && typeof file.roleFallbacks === "object") {
+    // A role's fallback is the tier it ran on before, or the full provider id the deploy set: both
+    // are restorable, anything else is dropped rather than trusted.
+    const roleFallbacks: Partial<Record<CatalogueRole, string>> = {};
+    for (const [k, v] of Object.entries(file.roleFallbacks)) if (isRoleName(k) && typeof v === "string" && (isAliasName(v) || v.includes("/"))) roleFallbacks[k] = v;
+    if (Object.keys(roleFallbacks).length) out.roleFallbacks = roleFallbacks;
   }
   if (Array.isArray(file.changes)) {
     const changes = file.changes.filter(

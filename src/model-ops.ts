@@ -16,7 +16,10 @@
  * has left OpenRouter's list back to the model the catalogue kept for it, and a run that OpenRouter
  * refuses because its model no longer exists is retried at once on that same recorded model
  * (engageRunFallback, called from the job runner in src/jobs.ts), so a withdrawn model does not kill
- * a job waiting for the next check. Both moves are recorded like any change and Paul is told.
+ * a job waiting for the next check. A role change records the role's own previous tier or model the
+ * same way (catalogue.roleFallbacks), and a refused run of that role is retried on it by moving the
+ * role back, never the whole tier, so a role-only decision protects its runs exactly as a tier
+ * change protects the tier's. Both moves are recorded like any change and Paul is told.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -254,6 +257,10 @@ export async function applyModelChange(deps: ModelOpsDeps, change: { alias?: str
     const catalogue = clone(readCatalogue(dir));
     catalogue.roles = { ...(catalogue.roles ?? {}), [role]: to };
     catalogue.prices = { ...(catalogue.prices ?? {}), [toModel]: toPrice };
+    // The tier (or direct model id) the role leaves becomes its own fallback: if the role's new model
+    // is later withdrawn, a refused run of this role is retried on it without a decision or a deploy
+    // (catalogue.roleFallbacks, engageRunFallback), so a role-only decision is as protected as a tier one.
+    if (from !== to) catalogue.roleFallbacks = { ...(catalogue.roleFallbacks ?? {}), [role]: from };
     writeCatalogue(dir, catalogue);
     recordChange(dir, { at, by, kind: "role", target: role, from, to, why, ...(fromPrice ? { fromPrice } : {}), toPrice });
     deps.store && applyCatalogueRoles(deps.store, dir);
@@ -299,12 +306,14 @@ export async function revertModelChange(deps: ModelOpsDeps, which: { alias?: str
     // The recorded `from` is what the role ran on before the change: a tier, or a full provider model
     // id the deploy itself set (CHIEF_MODEL and friends take ids as well as tiers). A tier goes back
     // as a catalogue overlay; a direct id is restored by removing the overlay, so the deployed value
-    // shows through again exactly as it did before the change.
+    // shows through again exactly as it did before the change. The tier the role is taken off becomes
+    // its fallback, exactly as the model a tier is taken off becomes the tier's.
     const roles = { ...(catalogue.roles ?? {}) };
     if (isAliasName(entry.from)) roles[role] = entry.from;
     else delete roles[role];
     if (Object.keys(roles).length) catalogue.roles = roles;
     else delete catalogue.roles;
+    if (entry.to !== entry.from) catalogue.roleFallbacks = { ...(catalogue.roleFallbacks ?? {}), [role]: entry.to };
   }
   entry.reverted = at;
   catalogue.changes = [...(catalogue.changes ?? []), { at, by: deps.by ?? "chief", kind: entry.kind, target: entry.target, from: entry.to, to: entry.from, why: `Reverted: ${entry.why}`, ...(entry.toPrice ? { fromPrice: entry.toPrice } : {}), ...(entry.fromPrice ? { toPrice: entry.fromPrice } : {}), isRevert: true }].slice(-MAX_CATALOGUE_CHANGES);
@@ -322,6 +331,14 @@ export interface EngagedFallback {
   alias: ModelAlias;
   from: string;
   to: string;
+  /** The role whose recorded previous tier/model the run is retried on, when the fallback undoes a role change. */
+  role?: CatalogueRole;
+  /**
+   * What the retried run must be started on: the role's restored tier or direct model id. Unset for a
+   * tier fallback, where the run keeps its alias and the catalogue now resolves it to the previous
+   * model; a role fallback moves the role, not the tier, so the run must be pointed at the new value.
+   */
+  retryOn?: string;
 }
 
 /** Run-failure text that means the provider no longer offers the model the run was on. */
@@ -339,17 +356,57 @@ export function isWithdrawnModelFailure(failure: { kind: string; detail: string 
 
 /**
  * The runtime half of the availability fallback: a run whose model OpenRouter refused because it no
- * longer offers it is retried on the tier's recorded previous model at once, rather than waiting for
- * the next daily check. Engaging it moves the catalogue alias, spends the fallback (so the retry can
- * never loop), records the move like any change (by "runtime-fallback") and marks the decision it
- * superseded undone, exactly as the daily check's own engage does. No live check happens here: the run
- * itself has just proved OpenRouter refuses the model, and the retry immediately proves or disproves
- * the fallback. Undefined when the deploy pins the tier, no fallback is recorded, or the fallback is
- * what the tier already runs on; the caller then lets the job fail as it did before.
+ * longer offers it is retried on the recorded previous model at once, rather than waiting for the
+ * next daily check. A role change keeps its own record (catalogue.roleFallbacks), and for a run of
+ * that role it wins: the role's overlay is moved back to the tier (or direct model id) it ran on
+ * before, never the whole tier, because the decision the fallback undoes is the role change. Without
+ * one the tier's own recorded fallback (catalogue.fallbacks) engages as before, moving the alias for
+ * every role on it. Either way engaging spends the fallback (so the retry can never loop), records
+ * the move like any change (by "runtime-fallback") and marks the decision it superseded undone,
+ * exactly as the daily check's own engage does. No live check happens here: the run itself has just
+ * proved OpenRouter refuses the model, and the retry immediately proves or disproves the fallback.
+ * Undefined when the role fallback does not cover this run, the deploy pins the tier, no fallback is
+ * recorded, or the fallback is what the run already started on; the caller then lets the job fail as
+ * it did before.
  */
-export function engageRunFallback(alias: ModelAlias, dir: string = config.dataDir, detail = ""): EngagedFallback | undefined {
-  if (deployPin(alias)) return undefined;
+export function engageRunFallback(alias: ModelAlias, dir: string = config.dataDir, detail = "", role?: CatalogueRole, store?: Pick<Store, "settings">): EngagedFallback | undefined {
   const catalogue = clone(readCatalogue(dir));
+  // The role's own recorded previous tier, engaged only when the role's catalogue overlay is what
+  // put this run on the failed tier (a run Paul's own app setting, the deploy or a pinned model id
+  // started is not the catalogue's to move) and Paul has not taken the role over himself.
+  if (role && catalogue.roles?.[role] === alias && !appPinned({ store }, role)) {
+    const fb = catalogue.roleFallbacks?.[role];
+    if (fb && fb !== alias) {
+      const from = openrouterModels()[alias];
+      const to = modelOf(fb);
+      const at = new Date().toISOString();
+      const roles = { ...(catalogue.roles ?? {}) };
+      if (isAliasName(fb)) roles[role] = fb;
+      else delete roles[role];
+      if (Object.keys(roles).length) catalogue.roles = roles;
+      else delete catalogue.roles;
+      const roleFbs = { ...(catalogue.roleFallbacks ?? {}) };
+      delete roleFbs[role];
+      if (Object.keys(roleFbs).length) catalogue.roleFallbacks = roleFbs;
+      else delete catalogue.roleFallbacks;
+      const fromPrice = priceOf(from);
+      const toPrice = priceOf(to);
+      const why = `${from} was refused by OpenRouter mid-run${detail ? ` (${detail.slice(0, 200).trim()})` : ""}; the role fell back to its recorded previous ${isAliasName(fb) ? `tier ${fb}` : "model"} automatically and the run was retried on it.`;
+      catalogue.changes = [
+        ...(catalogue.changes ?? []),
+        { at, by: "runtime-fallback", kind: "fallback", target: role, from, to, why, ...(fromPrice ? { fromPrice } : {}), ...(toPrice ? { toPrice } : {}) } as CatalogueChange,
+      ];
+      // The role change that put the vanished model in place is undone by this fallback, and is marked
+      // so neither model_revert nor a later fallback treats it as still in force.
+      const superseded = [...(catalogue.changes ?? [])].reverse().find((c) => c.kind === "role" && !c.isRevert && !c.reverted && c.target === role && c.to === alias);
+      if (superseded) superseded.reverted = at;
+      catalogue.changes = (catalogue.changes ?? []).slice(-MAX_CATALOGUE_CHANGES);
+      writeCatalogue(dir, catalogue);
+      store && applyCatalogueRoles(store, dir);
+      return { alias, from, to, role, retryOn: fb };
+    }
+  }
+  if (deployPin(alias)) return undefined;
   const from = openrouterModels()[alias];
   const to = catalogue.fallbacks?.[alias];
   if (!to || to === from) return undefined;
@@ -730,10 +787,17 @@ export class ModelWatch {
     // A recorded fallback is engaged only for a model that has left the list. One still on the list but
     // failing its check (tool-less, unpriced) is reported with its real reason and left for the chief:
     // the message says so rather than claiming there is nothing to fall back on.
-    const fb = readCatalogue(this.opts.dataDir ?? config.dataDir).fallbacks?.[b.alias];
+    const cat = readCatalogue(this.opts.dataDir ?? config.dataDir);
+    const fb = cat.fallbacks?.[b.alias];
+    // A role on the tier may keep its own recorded previous tier (a role change's fallback), which the
+    // job runner retries a refused run on at once: the message claims that protection where it exists
+    // and never claims there is nothing to fall back on while a role has something recorded.
+    const roleCovered = CATALOGUE_ROLES.some((r) => cat.roles?.[r] === b.alias && cat.roleFallbacks?.[r] !== undefined);
     const fbLine = fb
       ? `It is still on OpenRouter's model list, so its recorded previous model was not engaged automatically; moving off it stays the chief's recorded decision, and runs on it keep failing until then.`
-      : `There is no previous model to fall back on, so runs on it will fail until it is changed.`;
+      : roleCovered
+        ? `Runs on it are retried on the role's recorded previous tier at once, so a job does not die waiting for a decision; moving the role off this model is still the chief's recorded decision.`
+        : `There is no previous model to fall back on, so runs on it will fail until it is changed.`;
     return `Model check for ${today}: ${b.model} ${broken.length === 1 ? "has" : "and others have"} failed the check (${b.reason}). ${fbLine} The full report is at ${reportPath}. Tell Marlo which model to move to; nothing has changed yet.`;
   }
 

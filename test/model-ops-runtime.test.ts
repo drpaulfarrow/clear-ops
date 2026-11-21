@@ -17,6 +17,9 @@ for (const k of ["LLM_PROVIDER", "CHIEF_MODEL", "WORKER_MODEL", "ENGINEER_MODEL"
  * any change (by "runtime-fallback") and the fallback is spent, so the retry happens once, never in
  * a loop. With no fallback recorded the job fails exactly as it did before, and nothing else
  * (credit, a rejected key, rate limits, a run pinned to a model by its id) ever engages a fallback.
+ * A role change records the role's own previous tier the same way, so a role-only decision is as
+ * protected as a tier one: the retry runs on it, the overlay is restored, and the role change the
+ * fallback superseded is marked undone.
  */
 const { config } = await import("../src/config.js");
 const llm = await import("../src/llm.js");
@@ -121,4 +124,82 @@ test("a credit failure never engages the fallback, however cheap the previous mo
   assert.equal(asked.length, 1, "an account-wide failure is not a withdrawal, so nothing is retried");
   assert.equal(llm.openrouterModels().haiku, "qwen/qwen3.8-flash", "the catalogue is untouched");
   cat.writeCatalogue(DIR, { version: 1 });
+});
+
+/** OpenRouter's public model list, faked: enough of it for a role change to be applied live. */
+function modelsBody(data: unknown[]) {
+  return { ok: true, status: 200, json: async () => ({ data }) } as unknown as Response;
+}
+const row = (id: string, prompt: string, completion: string) => ({
+  id,
+  name: id,
+  context_length: 128000,
+  pricing: { prompt, completion },
+  supported_parameters: ["tools", "max_tokens"],
+});
+const liveList = () => [
+  row("deepseek/deepseek-v4.1-flash", "0.0000003", "0.0000012"),
+  row("z-ai/glm-5.3", "0.0000014", "0.0000044"),
+  row("qwen/qwen3.8-flash", "0.00000015", "0.0000005"),
+  row("moonshotai/kimi-k3.1-pro", "0.000002", "0.00001"),
+];
+
+test("a role change's recorded previous tier is engaged when the role's model is withdrawn mid-run", async () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  // Start from only a role change: the workers move to the sonnet tier (whose model OpenRouter then
+  // refuses mid-run) and no tier fallback is recorded, so only the role's own previous tier can save
+  // the run.
+  const store = new Store(DIR);
+  await ops.applyModelChange(
+    { store, fetch: (async () => Promise.resolve(modelsBody(liveList()))) as typeof fetch, now: () => new Date("2026-11-21T09:30:00Z") },
+    { role: "worker", to: "sonnet", why: "Paul wants the workers on the stronger tier" },
+  );
+  assert.equal(config.models.worker, "sonnet");
+  const applied = cat.readCatalogue(DIR);
+  assert.equal(applied.roles!.worker, "sonnet");
+  assert.equal(applied.roleFallbacks!.worker, "haiku", "the tier the role leaves is recorded as the role's own fallback");
+  assert.equal(applied.fallbacks, undefined, "no tier fallback is in play: this is the role-only case");
+  const { runner, asked } = scripted([() => ({ text: "", error: { ...WITHDRAWN } }), () => ({ text: "The analysis, done." })]);
+  const jobs = new JobRunner(store, new ConsoleMessenger(), runner);
+  const job = jobs.start("analyse", "A role-change look at the outputs.", FOUNDER);
+  await waitFor(() => store.getJob(job.id)!.status === "done");
+  assert.equal(asked.length, 2, "the run was retried exactly once");
+  assert.equal(asked[1]!.model, "haiku", "the retry runs on the role's recorded previous tier");
+  const after = cat.readCatalogue(DIR);
+  assert.equal(after.roles!.worker, "haiku", "the role overlay is restored, so later runs are on the previous tier too");
+  assert.equal(after.roleFallbacks, undefined, "the role fallback is spent, so the retry can never loop");
+  const record = after.changes!.find((c) => c.kind === "fallback")!;
+  assert.equal(record.by, "runtime-fallback");
+  assert.equal(record.target, "worker", "the move is recorded against the role, whose decision it undoes");
+  assert.equal(record.from, "z-ai/glm-5.3");
+  assert.equal(record.to, "deepseek/deepseek-v4.1-flash");
+  assert.match(record.why, /was refused by OpenRouter mid-run/, "the reason is recorded");
+  const superseded = after.changes!.find((c) => c.kind === "role")!;
+  assert.ok(superseded.reverted, "the role change that put the workers on the vanished model is marked undone");
+  const output = fs.readFileSync(store.outputPath(job.id), "utf8");
+  assert.match(output, /had been withdrawn from OpenRouter, so the run was retried once on its recorded previous model \(deepseek\/deepseek-v4\.1-flash\)/);
+  cat.writeCatalogue(DIR, { version: 1 });
+  cat.applyCatalogueRoles(store, DIR);
+  assert.equal(config.models.worker, "haiku", "the config overlay is put back for later tests");
+});
+
+test("a role fallback is spent, so a role's withdrawn model never retries twice", async () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  const store = new Store(DIR);
+  await ops.applyModelChange(
+    { store, fetch: (async () => Promise.resolve(modelsBody(liveList()))) as typeof fetch, now: () => new Date("2026-11-21T09:30:00Z") },
+    { role: "worker", to: "sonnet", why: "Paul wants the workers on the stronger tier" },
+  );
+  // The retry itself is refused the same way: the fallback was spent by the first engagement, so the
+  // job fails honestly after exactly one retry rather than looping.
+  const { runner, asked } = scripted([() => ({ text: "", error: { ...WITHDRAWN } }), () => ({ text: "", error: { ...WITHDRAWN } }), () => ({ text: "never reached" })]);
+  const jobs = new JobRunner(store, new ConsoleMessenger(), runner);
+  const job = jobs.start("analyse", "A role-change look that fails twice.", FOUNDER);
+  await waitFor(() => store.getJob(job.id)!.status === "failed");
+  assert.equal(asked.length, 2, "one retry only: the role fallback was spent by the first engagement");
+  const after = cat.readCatalogue(DIR);
+  assert.equal(after.changes!.filter((c) => c.kind === "fallback").length, 1, "exactly one fallback move was recorded");
+  assert.equal(after.roleFallbacks, undefined);
+  cat.writeCatalogue(DIR, { version: 1 });
+  cat.applyCatalogueRoles(store, DIR);
 });
