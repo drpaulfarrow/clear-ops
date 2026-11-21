@@ -1,3 +1,4 @@
+import type { PrState } from "./pr-state.js";
 import { SitePolicy } from "./site-policy.js";
 import { safeVaultDomains, vault } from "./vault.js";
 import { BROWSE_KINDS, SEARCH_KINDS, webToolsFor, type WebTools } from "./web-tools.js";
@@ -328,6 +329,15 @@ export class JobRunner {
     return [...this.live.values()].filter((l) => !l.waiting && !l.waitingForCopy && !l.stop).length;
   }
 
+  private readonly prState?: (url: string) => Promise<PrState | undefined>;
+
+  /** Whether a pull request is no longer open, as GitHub says now: "merged" or "closed", or undefined when it is open or could not be asked. */
+  private async gone(url: string | undefined): Promise<"merged" | "closed" | undefined> {
+    if (!url || !this.prState) return undefined;
+    const state = await this.prState(url).catch(() => undefined);
+    return state === "merged" || state === "closed" ? state : undefined;
+  }
+
   constructor(
     private readonly store: Store,
     private readonly messenger: Messenger,
@@ -351,9 +361,16 @@ export class JobRunner {
       setup?: PreparedCopies;
       /** Whether the provider answers again after a credit or key hold (src/auto-resume.ts); off in tests unless given. */
       canary?: Canary;
+      /**
+       * What GitHub says of a pull request right now (src/pr-state.ts `fresh`), asked before a fix round
+       * or its re-review is started, so neither runs on a pull request that has been merged or closed
+       * meanwhile. Absent, or unanswered, and the loop carries on as it would have.
+       */
+      prState?: (url: string) => Promise<PrState | undefined>;
     } = {},
   ) {
     this.canary = opts.canary;
+    this.prState = opts.prState;
     this.costWatch = opts.costWatch ?? ((capUsd, stop) => new RealCostMeter({ capUsd, onExceeded: stop }));
     this.progressOpts = opts.progress ?? {};
     this.waitForDeploy = opts.waitForDeploy ?? waitForProductDeploy;
@@ -1291,16 +1308,24 @@ export class JobRunner {
         // A fix round already knows its pull request; a fresh job's is read from its report.
         const pr = job.pr ?? findPrUrl(report);
         if (pr && !job.pr) this.store.updateJob(id, { pr });
-        const which = pr ? `the pull request ${pr}, which the engineer just ${job.fixRound ? "updated to address your last review" : "opened for this task"}` : "the pull request just opened by the engineer for this task";
-        const m = this.start(
-          "maintain",
-          `Review ${which}, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${report}`,
-          job.requestedBy,
-          job.target,
-          job.replyTo,
-          { title: reviewTitle(job), reviewOf: id, pr },
-        );
-        chained = `Started ${jobLabel(m)} to review and merge.`;
+        // A fix round pushes to a pull request that was open when it began. If that has been merged or
+        // closed since, what it pushed reaches nothing, and a review of it would be paid for and lead
+        // nowhere (21 Nov 2026: two rounds and their reviews ran on one Paul had merged). Say so instead.
+        const gone = job.fixRound ? await this.gone(pr) : undefined;
+        if (gone) {
+          chained = `${pr} was ${gone} while this fix round was running, so nothing reviews it: what the round pushed is on the pull request's branch and not in the default branch. Ask for a new pull request from that branch if you want those fixes.`;
+        } else {
+          const which = pr ? `the pull request ${pr}, which the engineer just ${job.fixRound ? "updated to address your last review" : "opened for this task"}` : "the pull request just opened by the engineer for this task";
+          const m = this.start(
+            "maintain",
+            `Review ${which}, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${report}`,
+            job.requestedBy,
+            job.target,
+            job.replyTo,
+            { title: reviewTitle(job), reviewOf: id, pr },
+          );
+          chained = `Started ${jobLabel(m)} to review and merge.`;
+        }
       }
       // So is the agent-creator's, on the workforce repo. Only an explicit schedule verdict (no code
       // written) skips the maintainer; a missing or garbled verdict still gets a review. A review-only
@@ -1328,7 +1353,7 @@ export class JobRunner {
       // Close the review loop: changes requested on the reviewed job's pull request go back to an
       // engineer, up to MAX_FIX_ROUNDS; anything only the founder can unblock is put to him once.
       if (job.kind === "maintain" && job.reviewOf) {
-        const next = this.afterReview(job, report);
+        const next = this.afterReview(job, report, await this.gone(job.pr ?? this.store.getJob(job.reviewOf)?.pr));
         chained = next.chained;
         escalation = next.escalation;
       }
@@ -1740,7 +1765,7 @@ export class JobRunner {
    * Decides what follows a maintainer review of an engineering job's pull request. Only the reviewed
    * job's own pull request counts; other pull requests the maintainer looked at are reported as usual.
    */
-  private afterReview(review: Job, text: string): { chained: string; escalation?: string } {
+  private afterReview(review: Job, text: string, gone?: "merged" | "closed"): { chained: string; escalation?: string } {
     const reviewed = review.reviewOf ? this.store.getJob(review.reviewOf) : undefined;
     if (!reviewed) return { chained: "" };
     const verdicts = parseReviewVerdicts(text);
@@ -1763,6 +1788,18 @@ export class JobRunner {
         escalation: `Action needed from you on ${url}: ${verdict.detail ? shortText(verdict.detail, 400) : `the maintainer says only you can unblock it (show job ${review.id} has why).`}\nOnce that is done, tell me and I will have it re-reviewed.`,
       };
     }
+    // Changes requested. Nothing is started on a pull request that is no longer open: a fix pushed to
+    // its branch would reach nothing. Paul is told what the review found and where it now is.
+    if (gone) {
+      this.pauseLoop(reviewed.designLoop);
+      return {
+        chained: "",
+        escalation:
+          gone === "merged"
+            ? `The maintainer asked for changes on ${url}, but it has been merged, so no fix round was started: a fix pushed to its branch would reach nothing. What the review found is in the default branch now (show job ${review.id}). Ask for a new change if you want it fixed.`
+            : `The maintainer asked for changes on ${url}, but it has been closed, so no fix round was started. The review is saved (show job ${review.id}).`,
+      };
+    }
     const round = (reviewed.kind === "engineer" ? reviewed.fixRound ?? 0 : 0) + 1;
     // Dead ends: the earlier reviews of this same pull request. If this review raises what the last one
     // raised, the fix round between them changed nothing the reviewer could see, and another round on
@@ -1774,6 +1811,15 @@ export class JobRunner {
       return {
         chained: "",
         escalation: `${url} is stuck: the last two reviews raised the same blocking issues, so fix round ${round - 1} did not move it and I have stopped rather than try the same thing again. Both reviews are saved (show job ${last.id} and show job ${review.id}). Give me a steer on the approach, reply "one more fix round on ${url}" to try again anyway, or close the pull request.`,
+      };
+    }
+    // How many rounds start on their own is Paul's setting, and none by default (config.autoFixRounds):
+    // past it the verdict goes to him, and one round is his to ask for. A design loop keeps its own count.
+    const auto = Math.min(config.autoFixRounds, MAX_FIX_ROUNDS);
+    if (!reviewed.designLoop && round > auto && auto < MAX_FIX_ROUNDS) {
+      return {
+        chained: "",
+        escalation: `The maintainer asked for changes on ${url}${verdict.detail ? `: ${shortText(verdict.detail, 300)}` : "."}${verdict.detail && !/[.!?]$/.test(shortText(verdict.detail, 300)) ? "." : ""} No fix round was started, because ${auto === 0 ? "automatic fix rounds are off" : `${auto === 1 ? "the one automatic fix round has" : `the ${auto} automatic fix rounds have`} been used`}. Reply "one more fix round on ${url}" to have an engineer fix it once, or merge or close it as it is. The whole review: show job ${review.id}.`,
       };
     }
     if (round > MAX_FIX_ROUNDS) {

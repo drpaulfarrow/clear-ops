@@ -13,6 +13,12 @@ function optionalUsd(raw: string | undefined): number | undefined {
   return raw !== undefined && raw !== "" && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/** A whole number of automatic fix rounds from 0 to 5; anything else is none. */
+function autoFixRounds(raw: string | undefined): number {
+  const n = Number((raw ?? "").trim());
+  return raw !== undefined && raw.trim() !== "" && Number.isInteger(n) && n >= 0 && n <= 5 ? n : 0;
+}
+
 function positive(raw: string | undefined, fallback: number): number {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -406,6 +412,15 @@ export const config = {
    * wrong, and every run is also bounded by its turn limit and by JOB_MAX_RUNTIME_MINUTES.
    */
   sdkRunawayBudgetUsd: positive(process.env.SDK_RUNAWAY_BUDGET_USD, 1000),
+  /**
+   * How many fix rounds follow a maintainer's "changes requested" on their own, before Paul is asked.
+   * None by default (Paul's decision, 21 Nov 2026): a fix round is a whole new engineer session and
+   * another review after it, and on that day two of them ran on a pull request he had already merged.
+   * The review still runs and its verdict goes to him; one round is his to ask for ("one more fix
+   * round on <address>"). AUTO_FIX_ROUNDS sets it, never past MAX_FIX_ROUNDS (src/agents.ts). A design
+   * loop's own rounds are not counted by this.
+   */
+  autoFixRounds: autoFixRounds(process.env.AUTO_FIX_ROUNDS),
   /** Minutes a running job may show no activity from its worker before it is stopped as stalled. */
   /** The most the workforce spends in one London day; past it, new jobs wait. Off (undefined) unless DAILY_BUDGET_USD is set: Paul's call, 13 Nov 2026. */
   dailyBudgetUsd: optionalUsd(process.env.DAILY_BUDGET_USD),

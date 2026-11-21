@@ -114,6 +114,33 @@ function store(key, value) {
   return undefined;
 }
 
+/**
+ * What the service's own records say of a pull request, beside what GitHub says: the maintainer asked
+ * for changes or left it for him, and whether a fix round is under way. Shown while it is open, and
+ * after a merge too, since what was asked for is then in the default branch.
+ */
+function pullWatch(v) {
+  const r = v.review;
+  const f = v.state === "open" ? v.fixing : undefined;
+  if (v.state === "closed" || (!r && !f)) return null;
+  const when = r ? ago(r.at, Date.now()) : undefined;
+  return h(
+    "div",
+    { class: "block pull-watch", role: "status" },
+    r
+      ? h(
+          "p",
+          { class: "prose" },
+          h("b", {}, r.verdict === "changes_requested" ? `${r.by} asked for changes${v.state === "merged" ? " before this was merged" : ""}${when ? `, ${when}` : ""}. ` : `${r.by} left this for you${when ? `, ${when}` : ""}. `),
+          r.detail ? `${r.detail} ` : "",
+          h("a", { href: `#/job/${r.job}` }, "Read the review"),
+        )
+      : null,
+    r && r.verdict === "changes_requested" && v.state === "merged" ? h("p", { class: "prose muted" }, `What the review found is in ${v.base} now.`) : null,
+    f ? h("p", { class: "prose" }, h("a", { href: `#/job/${f.job}` }, `${f.by} ${f.running ? "is on" : "is queued for"} fix round ${f.round} for this`), ". Merging now takes the version before those fixes.") : null,
+  );
+}
+
 /** Text the service has already rendered and escaped (src/reports.ts). The only place HTML is set. */
 function rendered(html, cls) {
   const el = h("div", { class: cls });
@@ -1170,6 +1197,8 @@ function pullPane({ repo, number, wrote }) {
         ? h("div", { class: "links" }, v.checks.map((c) => h("span", { class: `tag ${CHECK_TAG[c.state][0]}` }, CHECK_TAG[c.state][1] ? icon(CHECK_TAG[c.state][1], 12) : null, `${c.name}: ${c.state}`)))
         : h("p", { class: "muted" }, "No checks ran on this commit."),
     ),
+    // What the maintainer said of it, above the button that merges it: a merge is still his to make, knowingly.
+    pullWatch(v),
     merge,
     // A description is usually Markdown, so it is shown as the service rendered it; without that, as the plain text it is.
     v.body ? h("div", { class: "block" }, h("h3", {}, "Description"), v.bodyHtml ? rendered(v.bodyHtml, "report pull-body") : h("p", { class: "prose pull-body" }, v.body)) : null,

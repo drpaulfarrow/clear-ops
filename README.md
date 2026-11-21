@@ -296,7 +296,7 @@ The design worker can see. It takes desktop and mobile screenshots of the live s
 Ask for one piece of design work ("Design: critique the publisher page as a news publisher would") and you get one report. Ask for the loop ("make the site something I can show customers") and it runs itself:
 
 1. The designer screenshots the site, runs the persona critiques and writes a spec for the highest-impact issues.
-2. An engineer builds it on the product, queued behind any engineering job already running there, and the maintainer reviews and merges as usual (with automatic fix rounds if it requests changes).
+2. An engineer builds it on the product, queued behind any engineering job already running there, and the maintainer reviews and merges as usual (a design loop keeps its automatic fix rounds if it requests changes).
 3. Once CI has deployed the merge, the designer screenshots the live site again and writes the next spec.
 4. After three implemented rounds, or sooner if the critiques find no high-impact issues, it sends a closing report with before and after images.
 

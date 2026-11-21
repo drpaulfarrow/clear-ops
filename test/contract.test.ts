@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+process.env.AUTO_FIX_ROUNDS = "3"; // these tests are about the loop's own mechanics, which run when rounds are set to start on their own; the default is none (test/fix-rounds.test.ts)
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-contract-"));
 process.env.ALLOWED_TELEGRAM_IDS = "424242";
 

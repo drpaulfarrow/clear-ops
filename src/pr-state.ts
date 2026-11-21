@@ -86,6 +86,18 @@ export class PrStates {
     return seen?.state ? { state: seen.state, ...(seen.openedAt ? { openedAt: seen.openedAt } : {}) } : undefined;
   }
 
+  /**
+   * The state of a pull request as GitHub gives it now, asked for and waited on. For a decision that
+   * must not rest on what was known a few minutes ago: whether to start work on a pull request that may
+   * have been merged meanwhile (src/jobs.ts). Undefined when it could not be asked or GitHub did not
+   * answer, and then the caller carries on as if it had not asked.
+   */
+  async fresh(url: string): Promise<PrState | undefined> {
+    const info = await this.ask(url).catch(() => undefined);
+    if (info) this.known.set(url, { state: info.state, ...(info.openedAt ? { openedAt: info.openedAt } : {}), at: this.now() });
+    return info?.state;
+  }
+
   private stale(seen: { state?: PrState; at: number } | undefined): boolean {
     if (!seen) return true;
     if (seen.state === "merged") return false;
