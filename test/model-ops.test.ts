@@ -11,11 +11,14 @@ for (const k of ["CHIEF_MODEL", "WORKER_MODEL", "ENGINEER_MODEL", "MAINTAINER_MO
 
 /**
  * The model decisions themselves (src/model-ops.ts): reading OpenRouter's public model list, refusing
- * a model that is unknown, not tool-capable or unpriced, recording every applied change with its
- * reason and price delta, reverting one without a deploy, and the once-a-day check that reports
- * offers and better-value alternatives and messages Paul only when it recommends a change. The check
- * never changes a model, and it never invents a performance score: OpenRouter's public model list
- * carries prices, tool support and context length, and the report says so.
+ * a model that is unknown, not tool-capable or unpriced (null and empty price fields count as
+ * unreadable, never as free), recording every applied change with its reason and price delta — for a
+ * role change as for a tier change — reverting one without a deploy (including a role whose previous
+ * model was a full provider id), and the once-a-day check that reports offers and better-value
+ * alternatives per role and messages Paul only when it recommends a change. The check never applies a
+ * recommendation; the one change it makes itself is the previous-model fallback for a tier whose model
+ * has left OpenRouter's list, recorded and told. It never invents a performance score: OpenRouter's
+ * public list carries prices, tool support and context length, and the report says so.
  */
 const { config } = await import("../src/config.js");
 const llm = await import("../src/llm.js");
@@ -125,6 +128,174 @@ test("the most recent change reverts without a deploy, and a second revert says 
   assert.equal(config.models.engineer, "haiku");
 });
 
+test("null and empty price fields are unreadable, not free", async () => {
+  const body = () =>
+    Promise.resolve(
+      modelsBody([
+        ...fullList(),
+        { id: "null/price", name: "null/price", context_length: 128000, supported_parameters: ["tools"], pricing: { prompt: null, completion: "" } },
+        { id: "cache/nulls", name: "cache/nulls", context_length: 128000, supported_parameters: ["tools"], pricing: { prompt: "0.0000003", completion: "0.0000012", cache_read: null, cache_write: "" } },
+      ]),
+    );
+  const parsed = await ops.fetchLiveModels({ fetch: (async () => body()) as typeof fetch });
+  const unpriced = parsed.find((m) => m.id === "null/price")!;
+  assert.equal(unpriced.input, undefined, "Number(null) is not a price");
+  assert.equal(unpriced.output, undefined, 'Number("") is not a price');
+  await assert.rejects(
+    ops.applyModelChange(deps(async () => body()), { alias: "haiku", model: "null/price", why: "a tool-capable model with null prices must be refused, not free" }),
+    /no readable price/,
+  );
+  const cached = parsed.find((m) => m.id === "cache/nulls")!;
+  assert.equal(cached.input, 0.3);
+  assert.equal(cached.cacheRead, undefined, "a null cache price is unreadable too");
+  assert.equal(ops.priceRow(cached).cacheRead, 0.3, "an unreadable cache price falls back to the input price, never to zero");
+  assert.equal(ops.priceRow(cached).cacheWrite, 0.3);
+});
+
+test("a role change validates the destination tier's model and records both price rows", async () => {
+  // A role pointed at a tier whose model is broken is refused before anything is written.
+  cat.writeCatalogue(DIR, { version: 1, aliases: { sonnet: "broken/model" } });
+  await assert.rejects(
+    ops.applyModelChange(deps(async () => Promise.resolve(modelsBody([...fullList(), row("no/tools-model", "0.0000001", "0.0000001", false)]))), { role: "engineer", to: "sonnet", why: "broken destination" }),
+    /is not on OpenRouter's model list/,
+  );
+  assert.equal(cat.readCatalogue(DIR).changes, undefined, "no change was recorded for the unknown destination");
+  cat.writeCatalogue(DIR, { version: 1, aliases: { sonnet: "no/tools-model" } });
+  const before = fs.readFileSync(path.join(DIR, "model-catalogue.json"), "utf8");
+  await assert.rejects(
+    ops.applyModelChange(deps(async () => Promise.resolve(modelsBody([...fullList(), row("no/tools-model", "0.0000001", "0.0000001", false)]))), { role: "engineer", to: "sonnet", why: "tool-less destination" }),
+    /does not support tools/,
+  );
+  assert.equal(fs.readFileSync(path.join(DIR, "model-catalogue.json"), "utf8"), before, "no write happened on the refused paths");
+  // A valid role change records both price rows and the delta, like a tier change.
+  cat.writeCatalogue(DIR, { version: 1 });
+  const text = await ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { role: "engineer", to: "sonnet", why: "Paul wants engineers on the stronger tier" });
+  assert.match(text, /z-ai\/glm-5\.3/);
+  assert.match(text, /\$1\.40/);
+  assert.match(text, /more in and \d+% more out/, "a pricier destination says it is pricier, not 'less'");
+  const entry = cat.readCatalogue(DIR).changes!.at(-1)!;
+  assert.equal(entry.kind, "role");
+  assert.equal(entry.from, "haiku");
+  assert.equal(entry.to, "sonnet");
+  assert.equal(entry.fromPrice!.input, 0.3, "the model the role ran on before, priced");
+  assert.equal(entry.fromPrice!.output, 1.2);
+  assert.equal(entry.toPrice!.input, 1.4, "the destination model, priced");
+  assert.equal(entry.toPrice!.output, 4.4);
+  const back = await ops.revertModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { role: "engineer" });
+  assert.match(back, /engineer is back on haiku \(sonnet before/);
+  assert.equal(config.models.engineer, "haiku");
+});
+
+test("a fable change under the deploy's opus pin is refused, and the pin is named", async () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  config.openrouter.models.opus = "env/opus";
+  assert.equal(llm.openrouterModels().fable, "env/opus", "the opus variable pins fable when fable itself is unset");
+  await assert.rejects(
+    ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "fable", model: "qwen/qwen3.8-flash", why: "under the opus pin" }),
+    /OPENROUTER_OPUS_MODEL is set in the deploy/,
+  );
+  assert.equal(llm.openrouterModels().fable, "env/opus", "nothing changed");
+  assert.match(ops.catalogueView(store), /fable → env\/opus .*the deploy's own OPENROUTER_OPUS_MODEL/, "the chief's view names the pin actually in force");
+  // A revert under the same pin is refused too: restoring the catalogue row would change nothing.
+  config.openrouter.models.opus = "";
+  await ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "fable", model: "qwen/qwen3.8-flash", why: "fable change with no pin" });
+  config.openrouter.models.opus = "env/opus";
+  await assert.rejects(ops.revertModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "fable" }), /OPENROUTER_OPUS_MODEL is set in the deploy/);
+  config.openrouter.models.opus = "";
+  const back = await ops.revertModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "fable" });
+  assert.match(back, /fable tier is back on moonshotai\/kimi-k3\.1-pro/);
+  cat.writeCatalogue(DIR, { version: 1 });
+});
+
+test("a withdrawn model falls back to its previous model, recorded and told", async () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  store.setSetting("modelWatch", undefined);
+  // A decision moves the haiku tier to qwen; the model it left is kept as the tier's fallback.
+  await ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "haiku", model: "qwen/qwen3.8-flash", why: "Paul asked for the cheaper model" });
+  assert.equal(cat.readCatalogue(DIR).fallbacks!.haiku, "deepseek/deepseek-v4.1-flash");
+  // The next check finds qwen gone from OpenRouter's list: the tier goes back to deepseek on its own.
+  const sent: Array<{ to: string; text: string }> = [];
+  const watch = new ops.ModelWatch({
+    store,
+    dataDir: DIR,
+    now,
+    fetch: (async () => Promise.resolve(modelsBody([DEEPSEEK, GLM, KIMI]))) as typeof fetch,
+    messenger: { send: async (to, text) => void sent.push({ to, text }) },
+    to: "tg:123",
+    warn: () => undefined,
+  });
+  const result = await watch.run();
+  assert.equal(result.ran, true);
+  assert.equal(result.flagged, true, "the vanished model is flagged even though the fallback engaged");
+  assert.equal(result.engaged.length, 1);
+  assert.equal(result.engaged[0]!.alias, "haiku");
+  assert.equal(llm.openrouterModels().haiku, "deepseek/deepseek-v4.1-flash", "the tier runs on its previous model again, with no deploy");
+  const after = cat.readCatalogue(DIR);
+  const record = after.changes!.find((c) => c.kind === "fallback")!;
+  assert.equal(record.by, "model-check");
+  assert.equal(record.from, "qwen/qwen3.8-flash");
+  assert.equal(record.to, "deepseek/deepseek-v4.1-flash");
+  assert.match(record.why, /left OpenRouter's model list/);
+  assert.equal(record.toPrice!.input, 0.3, "the fallback's price is recorded");
+  assert.equal(after.fallbacks, undefined, "the fallback is spent, so the check cannot re-engage it");
+  const superseded = after.changes!.find((c) => c.kind === "alias" && c.to === "qwen/qwen3.8-flash")!;
+  assert.ok(superseded.reverted, "the decision the fallback superseded is marked undone");
+  await assert.rejects(ops.revertModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "haiku" }), /no model change to revert for haiku/, "a revert cannot bring the vanished model back");
+  assert.equal(llm.openrouterModels().haiku, "deepseek/deepseek-v4.1-flash");
+  assert.equal(sent.length, 1, "Paul is told the fallback engaged");
+  assert.match(sent[0]!.text, /qwen\/qwen3\.8-flash has left OpenRouter's model list/);
+  assert.match(sent[0]!.text, /deepseek\/deepseek-v4\.1-flash/);
+  assert.match(fs.readFileSync(path.join(DIR, "model-watch", `${londonYmd(now())}.md`), "utf8"), /## Fallbacks engaged today/);
+  store.setSetting("modelWatch", undefined);
+  cat.writeCatalogue(DIR, { version: 1 });
+});
+
+test("a cheaper tier no role runs on is never recommended", async () => {
+  // Every role is on haiku; the sonnet tier is mapped to a model that is cheaper than haiku's but
+  // that no role uses, and the only model cheaper than it is not 20% cheaper than haiku's own.
+  cat.writeCatalogue(DIR, { version: 1, aliases: { sonnet: "cheap/unused-tier" } });
+  store.setSetting("modelWatch", undefined);
+  const sent: Array<{ to: string; text: string }> = [];
+  const watch = new ops.ModelWatch({
+    store,
+    dataDir: DIR,
+    now,
+    fetch: (async () => Promise.resolve(modelsBody([DEEPSEEK, GLM, KIMI, row("cheap/unused-tier", "0.0000005", "0.000001"), row("cheap/option", "0.00000035", "0.0000007")]))) as typeof fetch,
+    messenger: { send: async (to, text) => void sent.push({ to, text }) },
+    to: "tg:123",
+    warn: () => undefined,
+  });
+  const result = await watch.run();
+  assert.equal(result.recommend, false, "the unused sonnet tier's cheap model is not recommended");
+  assert.equal(result.engaged.length, 0);
+  assert.equal(sent.length, 0, "nothing for Paul to decide means no message");
+  const report = fs.readFileSync(path.join(DIR, "model-watch", `${londonYmd(now())}.md`), "utf8");
+  assert.ok(!report.includes("RECOMMENDED"), "no recommendation appears in the report");
+  assert.ok(!report.includes("for the sonnet tier"), "nothing is recommended for a tier no role runs on");
+  store.setSetting("modelWatch", undefined);
+  cat.writeCatalogue(DIR, { version: 1 });
+});
+
+test("a role on a direct provider model id is verified and gets the same better-value analysis", async () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  store.setSetting("modelWatch", undefined);
+  config.models.chief = "vendor/direct-model";
+  const watch = new ops.ModelWatch({
+    store,
+    dataDir: DIR,
+    now,
+    fetch: (async () => Promise.resolve(modelsBody([...fullList(), row("vendor/direct-model", "0.0000005", "0.000002")]))) as typeof fetch,
+    warn: () => undefined,
+  });
+  await watch.run();
+  const report = fs.readFileSync(path.join(DIR, "model-watch", `${londonYmd(now())}.md`), "utf8");
+  assert.match(report, /chief: vendor\/direct-model → vendor\/direct-model — verified: tools, \$0\.50\/M in and \$2\.00\/M out/);
+  assert.match(report, /Cheaper on price alone: qwen\/qwen3\.8-flash at \$0\.15\/M in and \$0\.50\/M out, context 256000 ≥ 128000, tool-capable\. Listed, not recommended: this role's model is a direct provider id/);
+  config.models.chief = "haiku";
+  store.setSetting("modelWatch", undefined);
+  cat.writeCatalogue(DIR, { version: 1 });
+});
+
 test("the daily check writes a per-role report and messages Paul only when it recommends a change", async () => {
   cat.writeCatalogue(DIR, { version: 1 });
   const sent: Array<{ to: string; text: string }> = [];
@@ -168,6 +339,7 @@ test("the daily check writes a per-role report and messages Paul only when it re
   assert.equal(goneResult.ran, true);
   assert.match(fs.readFileSync(path.join(DIR, "model-watch", `${today}.md`), "utf8"), /is not on OpenRouter's model list/);
   assert.equal(sent.length, 1, "a broken model is flagged to Paul");
+  assert.match(sent[0]!.text, /no previous model to fall back on, so runs on it will fail until it is changed/, "with no fallback the message claims no availability it does not provide");
   // A failed read tries again later and says nothing.
   store.setSetting("modelWatch", undefined);
   sent.length = 0;

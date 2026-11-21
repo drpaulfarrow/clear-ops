@@ -322,8 +322,10 @@ export function buildApp(given: AppDeps) {
   const probes = deps.probes ?? new HealthProbes(defaultProbes({ githubToken: () => githubAuth.token(), google: { connected: () => google.connected(), profile: () => googleApi.request("gmail", "GET", "profile") } }));
   // The daily model check (src/model-ops.ts): once a day past its London hour the service reads
   // OpenRouter's public model list, verifies every model in force and writes a report of offers and
-  // better-value alternatives. It recommends and never changes anything, and it messages Paul only
-  // when it recommends a change or a model failed its check. Started by the entry point, not tests.
+  // better-value alternatives. It recommends and never applies a recommendation; the one change it
+  // makes itself is the recorded previous-model fallback for a tier whose model has vanished. It
+  // messages Paul only when it recommends a change or a model failed its check. Started by the entry
+  // point, not tests.
   const modelWatch = new ModelWatch({ store: deps.store, messenger: deps.messenger, to: config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? config.allowedNumbers[0] });
   const startModelWatch = () => modelWatch.start();
   // The start is recorded here rather than above, so a process that only builds the app (a test)

@@ -44,9 +44,10 @@ export interface PriceRow {
 export interface CatalogueChange {
   /** When it was applied, ISO. */
   at: string;
-  /** Who applied it: "chief" (a model_apply tool call). */
+  /** Who applied it: "chief" (a model_apply tool call), or "model-check" (an automatic fallback). */
   by: string;
-  kind: "alias" | "role";
+  /** "alias" and "role" are decisions; "fallback" is the check moving a tier back when its model vanished. */
+  kind: "alias" | "role" | "fallback";
   /** The tier (an alias change) or the role (a role change). */
   target: string;
   from: string;
@@ -69,6 +70,12 @@ export interface Catalogue {
   prices?: Record<string, PriceRow>;
   /** A role's tier, under Paul's own app setting (src/live-settings.ts). */
   roles?: Partial<Record<CatalogueRole, AliasName>>;
+  /**
+   * Per tier, the model it ran on before the current one (written whenever a tier's model changes).
+   * The daily check engages it automatically when the tier's model has left OpenRouter's list, so a
+   * withdrawn model does not stop the jobs on it (src/model-ops.ts).
+   */
+  fallbacks?: Partial<Record<AliasName, string>>;
   /** Every applied change, newest last, bounded. */
   changes?: CatalogueChange[];
 }
@@ -113,11 +120,16 @@ function kept(raw: unknown): Catalogue {
     for (const [k, v] of Object.entries(file.roles)) if (isRoleName(k) && isAliasName(v)) roles[k] = v;
     if (Object.keys(roles).length) out.roles = roles;
   }
+  if (file.fallbacks && typeof file.fallbacks === "object") {
+    const fallbacks: Partial<Record<AliasName, string>> = {};
+    for (const [k, v] of Object.entries(file.fallbacks)) if (isAliasName(k) && typeof v === "string" && v.includes("/")) fallbacks[k] = v;
+    if (Object.keys(fallbacks).length) out.fallbacks = fallbacks;
+  }
   if (Array.isArray(file.changes)) {
     const changes = file.changes.filter(
       (c): c is CatalogueChange =>
         !!c && typeof c === "object" && typeof (c as CatalogueChange).at === "string" && (c as CatalogueChange).at !== "" &&
-        ((c as CatalogueChange).kind === "alias" || (c as CatalogueChange).kind === "role") &&
+        ((c as CatalogueChange).kind === "alias" || (c as CatalogueChange).kind === "role" || (c as CatalogueChange).kind === "fallback") &&
         typeof (c as CatalogueChange).target === "string" && typeof (c as CatalogueChange).from === "string" && typeof (c as CatalogueChange).to === "string" && typeof (c as CatalogueChange).why === "string" && (c as CatalogueChange).why !== "",
     );
     if (changes.length) out.changes = changes.slice(-MAX_CATALOGUE_CHANGES);
