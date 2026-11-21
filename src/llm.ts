@@ -6,6 +6,7 @@
  * Nothing else changes: tools, permissions, prompts and caps are the same whichever provider answers.
  */
 import { config } from "./config.js";
+import { readCatalogue } from "./catalogue.js";
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
 
@@ -48,20 +49,25 @@ export const DEFAULT_OPENROUTER_PRICES: Record<string, Price> = {
   "moonshotai/kimi-k3.1-pro": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2 },
 };
 
-/** The OpenRouter id for each alias: OPENROUTER_<ALIAS>_MODEL, else the default. */
+/**
+ * The OpenRouter id for each alias: OPENROUTER_<ALIAS>_MODEL, else the persisted catalogue
+ * (src/catalogue.ts, changeable at run time without a redeploy), else the default. With no catalogue
+ * entry this is exactly the deploy's own mapping.
+ */
 export function openrouterModels(): Record<ModelAlias, string> {
   const o = config.openrouter.models;
+  const cat = readCatalogue().aliases ?? {};
   return {
-    haiku: o.haiku || DEFAULT_OPENROUTER_MODELS.haiku,
-    sonnet: o.sonnet || DEFAULT_OPENROUTER_MODELS.sonnet,
-    opus: o.opus || DEFAULT_OPENROUTER_MODELS.opus,
-    fable: o.fable || o.opus || DEFAULT_OPENROUTER_MODELS.fable,
+    haiku: o.haiku || cat.haiku || DEFAULT_OPENROUTER_MODELS.haiku,
+    sonnet: o.sonnet || cat.sonnet || DEFAULT_OPENROUTER_MODELS.sonnet,
+    opus: o.opus || cat.opus || DEFAULT_OPENROUTER_MODELS.opus,
+    fable: o.fable || o.opus || cat.fable || cat.opus || DEFAULT_OPENROUTER_MODELS.fable,
   };
 }
 
-/** Every price row: the defaults, with OPENROUTER_PRICES on top. */
+/** Every price row: the defaults, with the catalogue's rows and OPENROUTER_PRICES on top, in that order. */
 function allPrices(): Record<string, Price> {
-  return { ...DEFAULT_OPENROUTER_PRICES, ...parsePrices(config.openrouter.prices) };
+  return { ...DEFAULT_OPENROUTER_PRICES, ...(readCatalogue().prices ?? {}), ...parsePrices(config.openrouter.prices) };
 }
 
 export function provider(): Provider {
@@ -242,5 +248,5 @@ export function modelNote(): string {
   }
   const m = openrouterModels();
   const alias = (a: string) => (isAlias(a) ? `${a} (${m[a.toLowerCase() as ModelAlias]})` : a);
-  return `\n\nModels: OpenRouter (src/llm.ts, OPENROUTER_API_KEY set). The aliases in the config are mapped to OpenRouter models by the code: chief ${alias(config.models.chief)}, workers ${alias(config.models.worker)}, engineers ${alias(config.models.engineer)}, maintainer ${alias(config.models.maintainer)}, designer ${alias(config.design.model)}. The executive assistant runs on ${config.models.ea} on Anthropic's API directly, except "Draft nudge" follow-up jobs, which use the worker model. Claude Code's own background calls are mapped too. Nothing here needs changing to "use OpenRouter"; it already does.`;
+  return `\n\nModels: OpenRouter (src/llm.ts, OPENROUTER_API_KEY set). The aliases in the config are mapped to OpenRouter models by the code: chief ${alias(config.models.chief)}, workers ${alias(config.models.worker)}, engineers ${alias(config.models.engineer)}, maintainer ${alias(config.models.maintainer)}, designer ${alias(config.design.model)}. The executive assistant runs on ${config.models.ea} on Anthropic's API directly, except "Draft nudge" follow-up jobs, which use the worker model. Claude Code's own background calls are mapped too. Nothing here needs changing to "use OpenRouter"; it already does. Which model a tier maps to can be changed at run time from the persisted catalogue (src/catalogue.ts, src/model-ops.ts): your models, model_apply and model_revert tools read and write it, and the service checks OpenRouter's live model list once a day.`;
 }
