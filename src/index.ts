@@ -57,7 +57,7 @@ import type { Attachment } from "./uploads.js";
 import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
 import { createSpace, ownSpaceAddress, removeSpace, SpaceError, spaceNotes, updateSpace } from "./spaces.js";
-import { appSearch } from "./app-search.js";
+import { appCleo, appSearch, feedPlace } from "./app-search.js";
 import { WebVoice, WebVoiceError, webVoiceAudio, WEB_VOICE_BODY_LIMIT } from "./web-voice.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
@@ -99,7 +99,7 @@ export interface AppDeps {
   /** Copies each finished job's output to the private outputs repository. Absent in tests. */
   outputs?: OutputsPublisher;
   /** Cleo in the web app (src/web-voice.ts), and whether she is switched on. Tests inject both; the defaults are the real ones. */
-  webVoice?: Pick<WebVoice, "turn">;
+  webVoice?: Pick<WebVoice, "turn" | "followUp">;
   webVoiceEnabled?: () => boolean;
   /** Paul's login vault. The singleton by default; the vault pages' test injects one with a pinned clock. */
   vault?: Vault;
@@ -302,6 +302,8 @@ export function buildApp(given: AppDeps) {
   // Cleo in the web app: the same brain over one request at a time. What she hands the chief arrives as
   // the app's own sender, to be answered in the conversation Paul has open.
   const webVoice = deps.webVoice ?? new WebVoice({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address, web: true }), tap, chat });
+  // She is told what the feed that is open is called, so she can say where Marlo's written answer is.
+  if (webVoice instanceof WebVoice) webVoice.feeds((address) => feedPlace(deps.store, chat, address)?.title ?? "Main");
   const webVoiceOn = deps.webVoiceEnabled ?? voiceEnabled;
   const holdWatcher = new HoldWatcher(deps.store, googleApi, deps.messenger);
   // The board's health block (src/health.ts): one heartbeat a minute and a light probe of everything
@@ -1152,6 +1154,19 @@ export function buildApp(given: AppDeps) {
     const detail = appJob(appSource(), String(req.params.id ?? ""));
     if (!detail) return void res.status(404).json({ error: "no such job" });
     res.json(detail);
+  });
+  // Cleo's own conversation: what was said aloud, his words and hers, apart from the chief's feeds. Read-only.
+  app.get(`${APP_PATH}/api/cleo`, (_req, res) => {
+    appHeaders(res);
+    res.json(appCleo(appSource(), chat));
+  });
+  // What she says on coming back from Marlo, for the turn that was told she had gone to ask. Read-only:
+  // her words are already in her conversation, and this is the same with her voice, held for a few minutes.
+  app.get(`${APP_PATH}/api/voice/:id`, (req, res) => {
+    appHeaders(res);
+    const back = webVoice.followUp(String(req.params.id ?? ""));
+    if (!back) return void res.status(404).json({ error: "Nothing is waiting under that name." });
+    res.json(back);
   });
   /**
    * One spoken turn with Cleo (src/web-voice.ts): his recording in, her words and her voice out. Taken

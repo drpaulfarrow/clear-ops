@@ -480,4 +480,14 @@ a.rail-row{text-decoration:none}
 .cleo-note[hidden],.cleo-cancel[hidden]{display:none}
 .cleo-cancel{flex:none;min-height:36px}
 .said-aloud{color:var(--text);line-height:1.55}
+/* Cleo's own conversation in the chat's place: nothing is typed here, so only her button is left. */
+.chat.with-cleo .chips,.chat.with-cleo .composer>:not(.cleo),.chat.with-cleo .composer-wrap>.files,.chat.with-cleo .cmd-menu{display:none}
+.chat.with-cleo .composer{justify-content:center;padding:6px;border:0;background:none}
+.chat.with-cleo .cleo{height:52px;padding:0 26px;border-radius:26px;font-size:15px}
+.chat.with-cleo .cleo.idle span{display:inline}
+.chat.with-cleo .cleo-line{justify-content:center;text-align:center}
+.cleo.waiting{opacity:.7;cursor:default}
+.to-feed{margin-top:8px;min-height:36px;display:inline-flex;align-items:center;gap:8px;max-width:100%}
+.to-feed span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:640px){.cleo-back span{max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 @media (max-width:640px){.cleo{padding:0 12px}.cleo.idle span{display:none}}

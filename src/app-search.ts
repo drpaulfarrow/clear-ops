@@ -1,4 +1,4 @@
-import type { AppSource } from "./app-data.js";
+import { CLEO, type AppSource } from "./app-data.js";
 import { kindName, repoLabel } from "./job-descriptions.js";
 import { lockKey } from "./jobs.js";
 import { reportText } from "./reports.js";
@@ -6,7 +6,7 @@ import { repoRegistry } from "./repos.js";
 import type { Job, Store } from "./store.js";
 import { jobTitle } from "./titles.js";
 import { PRIVATE_KINDS } from "./trace.js";
-import { WEB_CONVERSATION, webTopic, type WebChat } from "./web-chat.js";
+import { WEB_CONVERSATION, webTopic, type WebChat, type WebMessage } from "./web-chat.js";
 
 /**
  * The web app's search (docs/APP.md): jobs, their saved reports, and what has been said in the app's
@@ -59,7 +59,26 @@ export interface SearchReport {
 }
 
 /** Which of the app's conversations a message is in, in the terms the app opens one by. */
-export type SearchWhere = { in: "main" } | { in: "chat"; id: string } | { in: "space"; id: string } | { in: "job"; id: string } | { in: "pull"; repo: string; number: number };
+export type SearchWhere = { in: "main" } | { in: "chat"; id: string } | { in: "space"; id: string } | { in: "job"; id: string } | { in: "pull"; repo: string; number: number } | { in: "cleo" };
+/** One of the chief's feeds: everywhere but Cleo's own conversation. */
+export type FeedWhere = Exclude<SearchWhere, { in: "cleo" }>;
+
+/** Where a thread of the web chat is, and what the app calls it. Undefined: that conversation is gone. */
+export function feedPlace(store: Pick<Store, "spaces" | "getJob">, chat: Pick<WebChat, "chat">, thread: string | undefined): { where: FeedWhere; title: string } | undefined {
+  if (!thread || thread === WEB_CONVERSATION) return { where: { in: "main" }, title: "Main" };
+  const own = /^web:chat:([a-f0-9]{8})$/.exec(thread);
+  if (own) return chat.chat(own[1]!) ? { where: { in: "chat", id: own[1]! }, title: chat.chat(own[1]!)!.title } : undefined;
+  const topic = webTopic(thread);
+  if (!topic) return undefined;
+  if ("space" in topic) {
+    const mine = store.spaces().find((sp) => sp.id === topic.space);
+    if (mine) return { where: { in: "space", id: mine.id }, title: mine.name };
+    return repoRegistry.list().some((r) => r.alias === topic.space) ? { where: { in: "space", id: topic.space }, title: repoLabel(topic.space) } : undefined;
+  }
+  if ("pull" in topic) return { where: { in: "pull", repo: topic.pull.repo, number: topic.pull.number }, title: `Pull request #${topic.pull.number}, ${repoLabel(topic.pull.repo)}` };
+  const job = store.getJob(topic.job);
+  return job ? { where: { in: "job", id: job.id }, title: `Thread: ${jobTitle(job)}` } : undefined;
+}
 
 export interface SearchMessage {
   where: SearchWhere;
@@ -157,26 +176,12 @@ export function appSearch(source: Pick<AppSource, "store">, chat: Pick<WebChat, 
     out.reports.push({ id: job.id, title: jobTitle(job), kind: job.kind, at: when(job), snippet: snippet(text, words) });
   }
 
-  const spaces = store.spaces();
-  const place = (thread: string | undefined): { where: SearchWhere; title: string } | undefined => {
-    if (!thread || thread === WEB_CONVERSATION) return { where: { in: "main" }, title: "Main" };
-    const own = /^web:chat:([a-f0-9]{8})$/.exec(thread);
-    if (own) return chat.chat(own[1]!) ? { where: { in: "chat", id: own[1]! }, title: chat.chat(own[1]!)!.title } : undefined;
-    const topic = webTopic(thread);
-    if (!topic) return undefined;
-    if ("space" in topic) {
-      const mine = spaces.find((sp) => sp.id === topic.space);
-      if (mine) return { where: { in: "space", id: mine.id }, title: mine.name };
-      return repoRegistry.list().some((r) => r.alias === topic.space) ? { where: { in: "space", id: topic.space }, title: repoLabel(topic.space) } : undefined;
-    }
-    if ("pull" in topic) return { where: { in: "pull", repo: topic.pull.repo, number: topic.pull.number }, title: `Pull request #${topic.pull.number}, ${repoLabel(topic.pull.repo)}` };
-    const job = store.getJob(topic.job);
-    return job ? { where: { in: "job", id: job.id }, title: `Thread: ${jobTitle(job)}` } : undefined;
-  };
+  // What was said aloud is found in Cleo's conversation, whichever feed was open; the rest where it was written.
+  const place = (m: WebMessage): { where: SearchWhere; title: string } | undefined => (m.spoken ? { where: { in: "cleo" }, title: CLEO } : feedPlace(store, chat, m.thread));
   for (const m of [...chat.kept()].reverse()) {
     const body = [m.text, m.heard ?? "", ...(m.files ?? [])].join("\n");
     if (!has(body.toLowerCase(), words)) continue;
-    const at = place(m.thread);
+    const at = place(m);
     // A message whose conversation is gone has nowhere to be opened, so it is not offered.
     if (!at) continue;
     if (out.messages.length >= SEARCH_CHATS) {
@@ -186,4 +191,28 @@ export function appSearch(source: Pick<AppSource, "store">, chat: Pick<WebChat, 
     out.messages.push({ ...at, from: m.from, at: m.at, snippet: snippet(body, words) });
   }
   return out;
+}
+
+/* ---------- Cleo's conversation: what was said aloud, apart from the chief's feeds ---------- */
+
+export interface AppCleo {
+  generatedAt: string;
+  /** She can be talked to: the voice is switched on. */
+  on: boolean;
+  /**
+   * What was said, oldest first: his words as transcribed, and hers. Plain text. `feed` is on what she
+   * said on coming back from the chief: where his written answer is, when that feed is still there.
+   */
+  messages: Array<{ id: string; at: string; from: "paul" | "clearops"; text: string; feed?: { where: FeedWhere; title: string } }>;
+}
+
+export function appCleo(source: AppSource, chat: Pick<WebChat, "cleo" | "chat">): AppCleo {
+  return {
+    generatedAt: new Date(source.now ?? Date.now()).toISOString(),
+    on: !!source.voice?.(),
+    messages: chat.cleo().map((m) => {
+      const feed = m.back ? feedPlace(source.store, chat, m.thread) : undefined;
+      return { id: m.id, at: m.at, from: m.from, text: m.text, ...(feed ? { feed } : {}) };
+    }),
+  };
 }

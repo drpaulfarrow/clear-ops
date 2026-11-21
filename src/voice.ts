@@ -169,6 +169,12 @@ export interface VoiceBrainDeps {
   system?: string;
   /** Whether she says "One moment" while the chief works. Yes in a live call, where silence is felt; no where her whole answer is spoken at once. */
   holding?: boolean;
+  /** A line or two about this turn, added to what she is told (the web app says which feed the chief's answer goes to). */
+  context?: () => string;
+  /** Called once, when she has decided to ask the chief and before he is asked, with what she has said so far. */
+  onAsk?: (saidSoFar: string) => void;
+  /** How the chief's answer, or its absence, is put to her. The Discord call's own words unless given. */
+  words?: { answered: (answer: string) => string; working: string };
 }
 
 /** Strips what a voice must not say aloud: links, markdown, ids in code marks. */
@@ -215,7 +221,8 @@ export class VoiceBrain {
     const quiet = !last || last.role !== "user" || last.content?.replace(/\.+/g, "").trim() === "";
     // A pause ("...") with no news: say nothing, and make no model call.
     if (quiet && !news.length) return;
-    const base = this.deps.system ?? VOICE_SYSTEM;
+    const about = this.deps.context?.().trim();
+    const base = `${this.deps.system ?? VOICE_SYSTEM}${about ? `\n\n${about}` : ""}`;
     const system = news.length ? `${base}\n\nNews from ClearOps since you last spoke (pass it on briefly):\n${news.map((n) => `- ${speakable(n)}`).join("\n")}` : base;
     const messages: ChatMessage[] = [{ role: "system", content: system }, ...history];
 
@@ -224,6 +231,7 @@ export class VoiceBrain {
     // Say something now, ending the sentence with a space so it is spoken straight away, and never leave
     // Paul in silence while ClearOps works.
     write(first.text.trim() ? " " : this.deps.holding === false ? "" : "One moment. ");
+    this.deps.onAsk?.(first.text);
     let request = "";
     try {
       request = String(JSON.parse(first.toolCall.function.arguments || "{}").request ?? "").trim();
@@ -243,8 +251,8 @@ export class VoiceBrain {
     const started = Date.now();
     const text = await answer;
     console.log(`voice: asked ClearOps (${request.length} chars); ${text === undefined ? "no answer yet" : "answered"} after ${Math.round((Date.now() - started) / 1000)}s`);
-    if (text === undefined) return "ClearOps is still working on it. Tell Paul in one short sentence that it is on it and you will tell him as soon as it answers.";
-    return `ClearOps answered (also posted in the chat): ${speakable(text)}`;
+    if (text === undefined) return this.deps.words?.working ?? "ClearOps is still working on it. Tell Paul in one short sentence that it is on it and you will tell him as soon as it answers.";
+    return this.deps.words ? this.deps.words.answered(speakable(text)) : `ClearOps answered (also posted in the chat): ${speakable(text)}`;
   }
 
   /** One streamed OpenRouter call. Text goes straight to `write`; a tool call is returned instead of run. */

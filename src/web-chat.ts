@@ -260,6 +260,10 @@ export interface WebMessage {
   heard?: string;
   /** It was speech: what Paul said to Cleo as transcribed, or what Cleo said back (src/web-voice.ts). */
   spoken?: true;
+  /** Of something Cleo said: she was reporting back what the chief answered, which is written in `thread`. */
+  back?: true;
+  /** Of a message of Paul's in a feed: he said it to Cleo, and she asked the chief for him. */
+  via?: "cleo";
 }
 
 export interface WebChatOptions {
@@ -398,23 +402,36 @@ export class WebChat {
 
   /**
    * A message that was spoken: what Paul said to Cleo as it was transcribed, or what Cleo said back
-   * (src/web-voice.ts). It is kept like any other message, marked so the app can show it was speech.
-   * It does not go through the messenger, so nothing is waiting on it as the chief's answer.
+   * (src/web-voice.ts). It belongs to Cleo's own conversation and to no feed: `to` only records which
+   * feed was open, so she can point him to where the chief's written answer is. It does not go through
+   * the messenger, so nothing is waiting on it as the chief's answer.
    */
-  async spoken(to: string, from: "paul" | "clearops", text: string): Promise<void> {
-    const message = this.add(from, text, false, to);
-    message.spoken = true;
+  async spoken(to: string, from: "paul" | "clearops", text: string, back = false): Promise<void> {
+    this.seq += 1;
+    const thread = this.threadOf(to);
+    // `back`: she is reporting what the chief said, so the app offers the way to his feed beside it.
+    this.messages.push({ id: String(this.seq), at: new Date(this.now()).toISOString(), from, text: redact(text), spoken: true, ...(back ? { back: true as const } : {}), ...(thread ? { thread } : {}) });
+    // Her conversation keeps as much as the main one, counted on its own.
+    const said = this.messages.filter((m) => m.spoken);
+    if (said.length > WEB_KEEP) {
+      const drop = new Set(said.slice(0, said.length - WEB_KEEP));
+      this.messages = this.messages.filter((m) => !drop.has(m));
+    }
     this.save();
   }
 
-  /** The last thing the service wrote (not spoke) in a conversation: that message's id, or undefined. */
-  lastSaid(to: string): string | undefined {
-    const thread = this.threadOf(to);
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const m = this.messages[i]!;
-      if (m.from === "clearops" && !m.live && !m.spoken && m.thread === thread) return m.id;
-    }
-    return undefined;
+  /**
+   * What Cleo asked the chief for Paul, in his own words as transcribed, written in the feed the chief
+   * answers in: so his answer there has its question above it, and he can read it back like any other.
+   */
+  asked(to: string, text: string): void {
+    this.add("paul", text, false, to).via = "cleo";
+    this.save();
+  }
+
+  /** Cleo's conversation: the newest of what was said aloud, his words and hers, oldest first. */
+  cleo(): WebMessage[] {
+    return this.messages.filter((m) => m.spoken && !m.live).slice(-WEB_SHOWN).map((m) => ({ ...m }));
   }
 
   /** Every message the transcript keeps, oldest first, in every conversation: for the app's search. The chief's status line is not one. */
@@ -432,8 +449,12 @@ export class WebChat {
     return true;
   }
 
+  /**
+   * One feed's messages. What was said aloud with Cleo is not among them: that is her own conversation
+   * (`cleo`), kept apart from the chief's feeds, whichever feed was open when it was said.
+   */
   private in(thread: string | undefined): WebMessage[] {
-    return this.messages.filter((m) => m.thread === thread);
+    return this.messages.filter((m) => m.thread === thread && !m.spoken);
   }
 
   private add(from: WebMessage["from"], text: string, live = false, to: string = WEB_CONVERSATION, files: string[] = [], picture?: string): WebMessage {
@@ -460,10 +481,10 @@ export class WebChat {
     const last = new Map<string, number>();
     // Only job and pull request threads are counted here: his own chats have their own limit (`open`),
     // and there is one chat for each space and no more.
-    this.messages.forEach((m, i) => m.thread && !whole(m.thread) && last.set(m.thread, i));
+    this.messages.forEach((m, i) => m.thread && !m.spoken && !whole(m.thread) && last.set(m.thread, i));
     if (last.size > WEB_THREADS_MAX) {
       const gone = new Set([...last].sort((a, b) => a[1] - b[1]).slice(0, last.size - WEB_THREADS_MAX).map(([t]) => t));
-      this.messages = this.messages.filter((m) => !m.thread || !gone.has(m.thread));
+      this.messages = this.messages.filter((m) => m.spoken || !m.thread || !gone.has(m.thread));
     }
     // A picture goes when the message it came with does.
     if (this.messages !== before) {
@@ -523,7 +544,8 @@ export class WebChat {
     const out = new Map<string, { count: number; lastAt: string; saidAt?: string }>();
     this.mainSaid = undefined;
     for (const m of this.messages) {
-      if (m.live) continue;
+      // Neither the status line nor what was said aloud with Cleo is part of a feed.
+      if (m.live || m.spoken) continue;
       // The main conversation is not a thread: only when the service last spoke in it is kept, beside the map.
       if (!m.thread) {
         if (m.from === "clearops") this.mainSaid = m.at;
