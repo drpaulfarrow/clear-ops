@@ -6,6 +6,8 @@ import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { BEAT_NOTE, BEAT_SERVER, BEAT_TOOLS, beatServer } from "./beats.js";
 import { perJobModelError, provider, runRoute } from "./llm.js";
+import { engageRunFallback, isWithdrawnModelFailure } from "./model-ops.js";
+import { isAliasName } from "./catalogue.js";
 import type { OtpRelay } from "./otp.js";
 import { DocReaderError, type DocReader } from "./doc-reader.js";
 import { execFile } from "node:child_process";
@@ -1213,6 +1215,28 @@ export class JobRunner {
           // nothing back; that is a budget stop, not a crash, and it is classified below.
           if (live.stop) throw err;
           result = { text: "", error: failureFromError(err) };
+        }
+      }
+      // The one failure the service cures by itself: a run whose model OpenRouter no longer offers
+      // (withdrawn mid-flight). The tier's recorded previous model (catalogue.fallbacks, written by
+      // every applied change) is engaged at once, the move is recorded like any change, and the run
+      // happens again on it, so the job does not die waiting for the next daily check (src/model-ops.ts
+      // engageRunFallback, the same record the daily check engages). Once only: engaging spends the
+      // fallback, so a second refusal fails the job honestly. A run pinned to a model by its id
+      // (never an alias) and every run on Anthropic have no fallback and fail as before.
+      if (!live.stop && !onAnthropic && isAliasName(route.model) && result?.error && isWithdrawnModelFailure(result.error)) {
+        const withdrew = engageRunFallback(route.model, undefined, result.error.detail);
+        if (withdrew) {
+          trace.note(`model ${withdrew.from} was refused by OpenRouter mid-run; retried on its recorded previous model ${withdrew.to}`);
+          shown.note(`The model this job started on is gone from OpenRouter; retrying on ${withdrew.to}`);
+          result = undefined;
+          try {
+            result = await this.run(opts);
+          } catch (err) {
+            if (live.stop) throw err;
+            result = { text: "", error: failureFromError(err) };
+          }
+          if (!runFailure(result)) result.text = addToReport(result.text, `The model this job started on (${withdrew.from}) had been withdrawn from OpenRouter, so the run was retried once on its recorded previous model (${withdrew.to}).`);
         }
       }
       // Out of turns before it wrote anything up (the SDK's error_max_turns). The reading is done and

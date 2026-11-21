@@ -44,7 +44,7 @@ export interface PriceRow {
 export interface CatalogueChange {
   /** When it was applied, ISO. */
   at: string;
-  /** Who applied it: "chief" (a model_apply tool call), or "model-check" (an automatic fallback). */
+  /** Who applied it: "chief" (a model_apply tool call), "model-check" (the daily check's fallback) or "runtime-fallback" (a run retried on its tier's previous model). */
   by: string;
   /** "alias" and "role" are decisions; "fallback" is the check moving a tier back when its model vanished. */
   kind: "alias" | "role" | "fallback";
@@ -72,8 +72,9 @@ export interface Catalogue {
   roles?: Partial<Record<CatalogueRole, AliasName>>;
   /**
    * Per tier, the model it ran on before the current one (written whenever a tier's model changes).
-   * The daily check engages it automatically when the tier's model has left OpenRouter's list, so a
-   * withdrawn model does not stop the jobs on it (src/model-ops.ts).
+   * It protects availability in both directions (src/model-ops.ts): the daily check engages it when
+   * the tier's model has left OpenRouter's list, and a run that OpenRouter refuses because its model
+   * no longer exists is retried on it at once (src/jobs.ts), so a withdrawn model does not stop jobs.
    */
   fallbacks?: Partial<Record<AliasName, string>>;
   /** Every applied change, newest last, bounded. */

@@ -250,6 +250,41 @@ test("a withdrawn model falls back to its previous model, recorded and told", as
   cat.writeCatalogue(DIR, { version: 1 });
 });
 
+test("a model still on the list that fails its check is reported with its real reason, not auto-withdrawn", async () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  store.setSetting("modelWatch", undefined);
+  // A decision moved the haiku tier to qwen; the model it left is the recorded fallback.
+  await ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "haiku", model: "qwen/qwen3.8-flash", why: "Paul asked for the cheaper model" });
+  assert.equal(cat.readCatalogue(DIR).fallbacks!.haiku, "deepseek/deepseek-v4.1-flash");
+  const sent: Array<{ to: string; text: string }> = [];
+  const watch = new ops.ModelWatch({
+    store,
+    dataDir: DIR,
+    now,
+    // qwen is still on the list but no longer tool-capable: that is a decision for the chief, not a
+    // withdrawal, so the fallback is never engaged for it.
+    fetch: (async () => Promise.resolve(modelsBody([DEEPSEEK, row("qwen/qwen3.8-flash", "0.00000015", "0.0000005", false, 256000), GLM, KIMI]))) as typeof fetch,
+    messenger: { send: async (to, text) => void sent.push({ to, text }) },
+    to: "tg:123",
+    warn: () => undefined,
+  });
+  const result = await watch.run();
+  assert.equal(result.engaged.length, 0, "a model still on OpenRouter's list is never withdrawn from automatically");
+  assert.equal(result.flagged, true, "the broken model is still flagged");
+  assert.equal(llm.openrouterModels().haiku, "qwen/qwen3.8-flash", "the tier is left exactly as it was");
+  const after = cat.readCatalogue(DIR);
+  assert.equal(after.fallbacks!.haiku, "deepseek/deepseek-v4.1-flash", "the fallback is not spent");
+  assert.ok(!after.changes!.some((c) => c.kind === "fallback"), "no fallback move was recorded");
+  const report = fs.readFileSync(path.join(DIR, "model-watch", `${londonYmd(now())}.md`), "utf8");
+  assert.match(report, /NOT VERIFIED: "qwen\/qwen3\.8-flash" does not support tools/, "the report gives the real reason");
+  assert.ok(!report.includes("## Fallbacks engaged today"));
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.text, /does not support tools on OpenRouter/, "Paul is told the real reason");
+  assert.match(sent[0]!.text, /still on OpenRouter's model list, so its recorded previous model was not engaged automatically/, "the message says why the previous model stayed put");
+  store.setSetting("modelWatch", undefined);
+  cat.writeCatalogue(DIR, { version: 1 });
+});
+
 test("a cheaper tier no role runs on is never recommended", async () => {
   // Every role is on haiku; the sonnet tier is mapped to a model that is cheaper than haiku's but
   // that no role uses, and the only model cheaper than it is not 20% cheaper than haiku's own.

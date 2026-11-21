@@ -11,15 +11,17 @@
  *
  * The daily check never applies a recommendation: that stays the chief's decision (model_apply,
  * src/orchestrator.ts), recorded in the catalogue with its reason (src/catalogue.ts), and every change
- * can be undone without a deploy. The one thing the check does change by itself is the availability
- * fallback: when a model in force has left OpenRouter's list, the tier goes back to the previous model
- * the catalogue kept for it, that move is recorded like any change, and Paul is told. Between a model
- * vanishing and the next check, runs on it still fail; the check says so rather than claiming otherwise.
+ * can be undone without a deploy. The one availability move that happens without a decision is the
+ * previous-model fallback, in two halves for the same record: the daily check moves a tier whose model
+ * has left OpenRouter's list back to the model the catalogue kept for it, and a run that OpenRouter
+ * refuses because its model no longer exists is retried at once on that same recorded model
+ * (engageRunFallback, called from the job runner in src/jobs.ts), so a withdrawn model does not kill
+ * a job waiting for the next check. Both moves are recorded like any change and Paul is told.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
-import { MODEL_ALIASES, OPENROUTER_BASE_URL, modelPrices, openrouterModels, provider, type ModelAlias } from "./llm.js";
+import { MODEL_ALIASES, OPENROUTER_BASE_URL, modelPrices, openrouterModels, priceOf, provider, type ModelAlias } from "./llm.js";
 import { applyCatalogueRoles, CATALOGUE_ROLES, isAliasName, isRoleName, MAX_CATALOGUE_CHANGES, readCatalogue, recordChange, writeCatalogue, type Catalogue, type CatalogueChange, type CatalogueRole, type PriceRow } from "./catalogue.js";
 import { londonYmd } from "./london.js";
 import type { Store } from "./store.js";
@@ -135,6 +137,19 @@ export function currentPrice(id: string): PriceRow | undefined {
   return modelPrices()[id];
 }
 
+/**
+ * The old price for a change: the row in force when there is one, else the model's own row on the live
+ * list just fetched. A role or tier on a model no configured row covers (a direct provider id the deploy
+ * set, a hand-edited catalogue) still records what it cost rather than pretending the price is unknown,
+ * because the live list is what priced it while it ran.
+ */
+function leavingPrice(list: LiveModel[], id: string): PriceRow | undefined {
+  const configured = priceOf(id);
+  if (configured) return configured;
+  const live = list.find((m) => m.id === id && m.input !== undefined && m.output !== undefined);
+  return live ? priceRow(live) : undefined;
+}
+
 export interface ModelOpsDeps {
   store?: Pick<Store, "settings">;
   dataDir?: string;
@@ -206,7 +221,7 @@ export async function applyModelChange(deps: ModelOpsDeps, change: { alias?: str
     const checked = liveCheck(list, model);
     if (!checked.ok) throw new ModelCheckError(checked.reason);
     const from = openrouterModels()[alias];
-    const fromPrice = currentPrice(from);
+    const fromPrice = leavingPrice(list, from);
     const toPrice = priceRow(checked.model);
     const catalogue = clone(readCatalogue(dir));
     catalogue.aliases = { ...(catalogue.aliases ?? {}), [alias]: model };
@@ -234,7 +249,7 @@ export async function applyModelChange(deps: ModelOpsDeps, change: { alias?: str
     const list = await fetchLiveModels({ fetch: deps.fetch });
     const checked = liveCheck(list, toModel);
     if (!checked.ok) throw new ModelCheckError(checked.reason);
-    const fromPrice = currentPrice(modelOf(from));
+    const fromPrice = leavingPrice(list, modelOf(from));
     const toPrice = priceRow(checked.model);
     const catalogue = clone(readCatalogue(dir));
     catalogue.roles = { ...(catalogue.roles ?? {}), [role]: to };
@@ -301,6 +316,64 @@ export async function revertModelChange(deps: ModelOpsDeps, which: { alias?: str
 }
 
 const ROLE_LABELS: Record<CatalogueRole, string> = { chief: "chief", worker: "workers", engineer: "engineers", maintainer: "maintainer", designer: "designer" };
+
+/** What a runtime fallback moved: the tier, the model OpenRouter refused and the previous model now in force. */
+export interface EngagedFallback {
+  alias: ModelAlias;
+  from: string;
+  to: string;
+}
+
+/** Run-failure text that means the provider no longer offers the model the run was on. */
+const WITHDRAWN_MODEL =
+  /not a valid model|model (?:does not exist|not found|has been (?:disabled|deprecated|retired|removed|discontinued)|is (?:no longer|not) available)|no (?:allowed providers|endpoints|compatible providers) (?:are )?(?:available|found)/i;
+
+/**
+ * True when a run failure is the provider saying the model the run was on no longer exists: the 404
+ * "not a valid model" shape and OpenRouter's "no allowed providers are available". A run that ends any
+ * other way (no credit, a rejected key, rate limits, overload, a crash) is never a withdrawal.
+ */
+export function isWithdrawnModelFailure(failure: { kind: string; detail: string }): boolean {
+  return failure.kind === "api" && WITHDRAWN_MODEL.test(failure.detail);
+}
+
+/**
+ * The runtime half of the availability fallback: a run whose model OpenRouter refused because it no
+ * longer offers it is retried on the tier's recorded previous model at once, rather than waiting for
+ * the next daily check. Engaging it moves the catalogue alias, spends the fallback (so the retry can
+ * never loop), records the move like any change (by "runtime-fallback") and marks the decision it
+ * superseded undone, exactly as the daily check's own engage does. No live check happens here: the run
+ * itself has just proved OpenRouter refuses the model, and the retry immediately proves or disproves
+ * the fallback. Undefined when the deploy pins the tier, no fallback is recorded, or the fallback is
+ * what the tier already runs on; the caller then lets the job fail as it did before.
+ */
+export function engageRunFallback(alias: ModelAlias, dir: string = config.dataDir, detail = ""): EngagedFallback | undefined {
+  if (deployPin(alias)) return undefined;
+  const catalogue = clone(readCatalogue(dir));
+  const from = openrouterModels()[alias];
+  const to = catalogue.fallbacks?.[alias];
+  if (!to || to === from) return undefined;
+  const at = new Date().toISOString();
+  catalogue.aliases = { ...(catalogue.aliases ?? {}), [alias]: to };
+  const fallbacks = { ...(catalogue.fallbacks ?? {}) };
+  delete fallbacks[alias];
+  if (Object.keys(fallbacks).length) catalogue.fallbacks = fallbacks;
+  else delete catalogue.fallbacks;
+  const fromPrice = priceOf(from);
+  const toPrice = priceOf(to);
+  const why = `${from} was refused by OpenRouter mid-run${detail ? ` (${detail.slice(0, 200).trim()})` : ""}; the tier fell back to its recorded previous model automatically and the run was retried on it.`;
+  catalogue.changes = [
+    ...(catalogue.changes ?? []),
+    { at, by: "runtime-fallback", kind: "fallback", target: alias, from, to, why, ...(fromPrice ? { fromPrice } : {}), ...(toPrice ? { toPrice } : {}) } as CatalogueChange,
+  ];
+  // The change that put the vanished model in place is undone by this fallback, and is marked so
+  // neither model_revert nor a later fallback treats it as still in force.
+  const superseded = [...(catalogue.changes ?? [])].reverse().find((c) => c.kind === "alias" && !c.isRevert && !c.reverted && c.target === alias && c.to === from);
+  if (superseded) superseded.reverted = at;
+  catalogue.changes = (catalogue.changes ?? []).slice(-MAX_CATALOGUE_CHANGES);
+  writeCatalogue(dir, catalogue);
+  return { alias, from, to };
+}
 
 /** The catalogue as the chief reads it: what every role runs on, what it costs, and the recent changes. */
 export function catalogueView(store?: Pick<Store, "settings">): string {
@@ -535,14 +608,19 @@ export class ModelWatch {
    * list: the tier is moved back to the model it ran on before (which must itself still verify), the
    * move is recorded like any change, the decision it superseded is marked undone, and the fallback
    * is spent, so the check never re-engages what it already engaged. A tier the deploy pins is left
-   * alone: the catalogue cannot speak for the deploy's own variable.
+   * alone: the catalogue cannot speak for the deploy's own variable. A model still on the list that
+   * fails its check another way (no longer tool-capable, no readable price) is NOT withdrawn from:
+   * its real reason is reported with the check's findings, and moving the tier off it is the chief's
+   * recorded decision, not the check's.
    */
   private engageFallbacks(dir: string, list: LiveModel[], tiers: TierVerdict[], at: Date): Array<{ alias: string; from: string; to: string }> {
     const catalogue = clone(readCatalogue(dir));
     const fallbacks = { ...(catalogue.fallbacks ?? {}) };
     const engaged: Array<{ alias: string; from: string; to: string }> = [];
     for (const t of tiers) {
-      if (t.check.ok || deployPin(t.alias)) continue;
+      // Only absence from the list is a withdrawal; anything else the model still on the list is wrong
+      // about has its real reason reported below, and stays a decision.
+      if (t.check.ok || list.some((m) => m.id === t.model) || deployPin(t.alias)) continue;
       const fb = fallbacks[t.alias];
       if (!fb || fb === t.model) continue;
       const fbCheck = liveCheck(list, fb);
@@ -589,7 +667,7 @@ export class ModelWatch {
     if (engaged.length) {
       lines.push(`## Fallbacks engaged today`);
       for (const e of engaged) {
-        lines.push(`- ${e.from} has left OpenRouter's model list, so the ${e.alias} tier was moved back to its previous model ${e.to} automatically (recorded below). Jobs on that tier run on ${e.to} from their next run; a run that was already going when the model vanished was not saved, and until this check ran, runs on ${e.from} failed. Tell the chief if you want a different model.`);
+        lines.push(`- ${e.from} has left OpenRouter's model list, so the ${e.alias} tier was moved back to its previous model ${e.to} automatically (recorded below). A run that OpenRouter refuses because its model has vanished is retried on the tier's recorded previous model at once (src/jobs.ts), so jobs on the tier do not wait for this check; runs that failed some other way before it ran are not retried here. Tell the chief if you want a different model.`);
       }
       lines.push("");
     }
@@ -635,11 +713,11 @@ export class ModelWatch {
   /** What Paul is told, only when there is something to decide. Three or four sentences, no more. */
   private message(today: string, tiers: TierVerdict[], cheapest: TierVerdict | undefined, reportPath: string, engaged: Array<{ alias: string; from: string; to: string }>): string {
     const roles = CATALOGUE_ROLES.map((r) => ({ role: r, tier: roleTier(r) })).filter((r) => isAliasName(r.tier));
-    const broken = tiers.flatMap((t) => (t.check.ok ? [] : [{ model: t.model, reason: t.check.reason }]));
+    const broken = tiers.flatMap((t) => (t.check.ok ? [] : [{ alias: t.alias, model: t.model, reason: t.check.reason }]));
     if (engaged.length) {
       const e = engaged[0]!;
       const onIt = roles.filter((r) => r.tier === e.alias).map((r) => ROLE_LABELS[r.role]);
-      return `Model check for ${today}: ${e.from} has left OpenRouter's model list, so the ${e.alias} tier (which ${onIt.join(" and ")} run${onIt.length === 1 ? "s" : ""} on) was moved back to its previous model ${e.to}, recorded like any change; jobs on it run on ${e.to} from their next run. The full report is at ${reportPath}. Tell Marlo if you want a different model; nothing else has changed.`;
+      return `Model check for ${today}: ${e.from} has left OpenRouter's model list, so the ${e.alias} tier (which ${onIt.join(" and ")} run${onIt.length === 1 ? "s" : ""} on) was moved back to its previous model ${e.to}, recorded like any change; a run that hits ${e.from} is retried on ${e.to} at once, so jobs on the tier did not wait for this check. The full report is at ${reportPath}. Tell Marlo if you want a different model; nothing else has changed.`;
     }
     if (cheapest?.alternatives.length) {
       const best = cheapest.alternatives[0]!;
@@ -649,7 +727,14 @@ export class ModelWatch {
       return `Model check for ${today}: the ${cheapest.alias} tier, which ${onIt.join(" and ")} run${onIt.length === 1 ? "s" : ""} on, could move to ${best.id} at $${bp.input.toFixed(2)}/M in and $${bp.output.toFixed(2)}/M out${oldPrice ? `, instead of ${cheapest.model} at $${oldPrice.input.toFixed(2)}/M in and $${oldPrice.output.toFixed(2)}/M out` : ""}, at least 20% cheaper on both and tool-capable. The list says prices and tools only, not how well a model works. The full report is at ${reportPath}. Tell Marlo to apply it if you want it; nothing has changed yet.`;
     }
     const b = broken[0]!;
-    return `Model check for ${today}: ${b.model} ${broken.length === 1 ? "has" : "and others have"} failed the check (${b.reason}). There is no previous model to fall back on, so runs on it will fail until it is changed. The full report is at ${reportPath}. Tell Marlo which model to move to; nothing has changed yet.`;
+    // A recorded fallback is engaged only for a model that has left the list. One still on the list but
+    // failing its check (tool-less, unpriced) is reported with its real reason and left for the chief:
+    // the message says so rather than claiming there is nothing to fall back on.
+    const fb = readCatalogue(this.opts.dataDir ?? config.dataDir).fallbacks?.[b.alias];
+    const fbLine = fb
+      ? `It is still on OpenRouter's model list, so its recorded previous model was not engaged automatically; moving off it stays the chief's recorded decision, and runs on it keep failing until then.`
+      : `There is no previous model to fall back on, so runs on it will fail until it is changed.`;
+    return `Model check for ${today}: ${b.model} ${broken.length === 1 ? "has" : "and others have"} failed the check (${b.reason}). ${fbLine} The full report is at ${reportPath}. Tell Marlo which model to move to; nothing has changed yet.`;
   }
 
   /** Starts the timer. Ticks are unref'd, so the check never holds the process open. */

@@ -46,11 +46,15 @@ test("a role change from a full provider model id applies and reverts without a 
   assert.equal(config.models.chief, "vendor/direct-model", "the deploy sets the chief to a direct model id");
   const text = await ops.applyModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { role: "chief", to: "haiku", why: "Paul wants the chief on the cheap tier" });
   assert.match(text, /chief now runs on the haiku tier \(deepseek\/deepseek-v4\.1-flash\)/);
+  // The live row the apply already fetched supplies the old price when no configured row exists, so a
+  // direct-model role change records both price rows and the delta like any other.
+  assert.match(text, /was vendor\/direct-model at \$0\.50\/M in and \$2\.00\/M out, 40% less in and 40% less out/, "the reply shows the old live price and the delta");
   assert.equal(config.models.chief, "haiku");
   const entry = cat.readCatalogue(DIR).changes!.at(-1)!;
   assert.equal(entry.kind, "role");
   assert.equal(entry.from, "vendor/direct-model", "the direct id is recorded, not a tier name");
-  assert.equal(entry.fromPrice, undefined, "a direct model with no price row records no from-price rather than guessing one");
+  assert.equal(entry.fromPrice!.input, 0.5, "the direct model's own live row supplies the old price");
+  assert.equal(entry.fromPrice!.output, 2);
   assert.equal(entry.toPrice!.input, 0.3, "the destination tier's model is priced");
   assert.equal(cat.readCatalogue(DIR).roles!.chief, "haiku");
   // The revert restores the deployed direct value by removing the overlay, so no recorded tier has
