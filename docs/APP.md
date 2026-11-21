@@ -245,6 +245,14 @@ What she is shown of the board gives her nothing to do (21 Nov 2026): she still 
 
 Her conversation adds no way in (21 Nov 2026). It is not an address: nothing can be sent to it, the chief is never asked there, and no approval is read from it. The two routes that serve it (`GET /app/api/cleo`, `GET /app/api/voice/:id`) only read, and a second test in `test/invariants.test.ts` pins that, that no feed holds what was said aloud, and that her coming back is the same single reply of the same brain, so there is still one place the chief is asked from.
 
+## On the phone's home screen (`public/app/manifest.webmanifest`)
+
+The app can be installed from the browser: in Chrome on Android, the three-dot menu, then "Add to Home screen" and "Install". It then opens as its own app, full screen with no address bar, under the ClearOps icon. It is the same web app, signed in the same way.
+
+- **What makes it installable.** A web manifest that both pages link to, with the icon at 192 and 512 pixels. The manifest and icons are fixed files in the same table as the rest (`ASSETS` in `src/app-pages.ts`), hold no data, and are served without a sign-in like the other files; the page's policy already allowed a manifest from this service only.
+- **Talk to Cleo.** Pressing and holding the icon offers "Talk to Cleo", which opens the app at `#/cleo`: her conversation in the chat's place, with her button ready. Nothing is listened to until Paul taps it, as everywhere else. The address is put back to the home page's, so going back or reloading does not open her again.
+- **What it is not.** There is no service worker, so nothing is kept offline, nothing runs when the app is closed, and there are no push notifications. A home-screen widget, talking from the lock screen or with the screen off, and a wake word are things only a native app can do.
+
 ## A space's notes and library (`appSpace` in `src/app-data.ts`, `spaceNotes` in `src/spaces.ts`)
 
 "Notes and library" in a space's chat bar and in the rail opens the space's own page (`#/space/<id>`, `docs/app/space-page.png`), for a repository's space or one of Paul's own.

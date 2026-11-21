@@ -2711,7 +2711,22 @@ function openPullRoute() {
   if (r.name === "pull" && state.pull?.key !== pullKey(r.repo, r.number)) void loadPull(r.repo, r.number);
 }
 
+/**
+ * The home-screen shortcut "Talk to Cleo" opens the app at #/cleo: her conversation in the chat's place,
+ * with her button ready. Nothing is listened to until he taps it. The address is put back to the home
+ * page's, so going back or reloading does not open her again.
+ */
+function fromShortcut() {
+  if (location.hash !== "#/cleo") return false;
+  history.replaceState(null, "", "#/");
+  if (layout() === "board") state.layout = "chat";
+  state.cleoOpen = true;
+  void refreshCleo();
+  return true;
+}
+
 window.addEventListener("hashchange", () => {
+  fromShortcut();
   if (!state.busy) state.notice = undefined;
   state.job = undefined;
   state.jobRaw = "";
@@ -2736,6 +2751,7 @@ document.addEventListener("visibilitychange", () => {
   void threadTick();
 });
 
+fromShortcut();
 draw();
 void tick();
 void chatTick();
