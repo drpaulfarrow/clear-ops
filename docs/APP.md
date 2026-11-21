@@ -68,7 +68,7 @@ The first version (18 Nov 2026) reached a pull request only through a job, by th
 - **Nothing blocked is merged.** Closed, a draft, in conflict, a check failed or still running, or GitHub not yet sure it can merge: the button is off and the panel says why. Look again asks GitHub afresh. Branch protection stays the backstop, and GitHub's own refusal is shown as said.
 - **One write only.** A merge commit, as Paul's own merges are. It never squashes, rebases, pushes, approves, comments, closes or deletes a branch.
 - **From this site's own script, signed in.** The same check as every other action in the app. What was merged is said in the app's chat.
-- **Another party's text.** Titles, descriptions and diffs are cut to size (100 files, 20,000 characters a file, 300,000 in all), have secrets redacted, and are shown as plain text, never as HTML.
+- **Another party's text.** Titles, descriptions and diffs are cut to size (100 files, 20,000 characters a file, 300,000 in all), have secrets redacted, and are shown as plain text, never as HTML. The one exception is the description, which is usually written in Markdown: it is shown as the service's own renderer shows Markdown (`renderMarkdown` in `src/reports.ts`, the same one a report goes through), which escapes everything first, so headings, lists, code and links to http(s) addresses appear as that and any markup in it appears as the text it is. A link opens in a new tab.
 
 On this repository a merge redeploys the service once no job is running, and the panel says so. Not here yet: asking for changes, commenting, or merging with a check still red. Those are done on GitHub.
 

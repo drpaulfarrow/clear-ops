@@ -1171,7 +1171,8 @@ function pullPane({ repo, number, wrote }) {
         : h("p", { class: "muted" }, "No checks ran on this commit."),
     ),
     merge,
-    v.body ? h("div", { class: "block" }, h("h3", {}, "Description"), h("p", { class: "prose pull-body" }, v.body)) : null,
+    // A description is usually Markdown, so it is shown as the service rendered it; without that, as the plain text it is.
+    v.body ? h("div", { class: "block" }, h("h3", {}, "Description"), v.bodyHtml ? rendered(v.bodyHtml, "report pull-body") : h("p", { class: "prose pull-body" }, v.body)) : null,
     h(
       "div",
       { class: "block" },
