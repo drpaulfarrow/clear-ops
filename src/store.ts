@@ -478,6 +478,11 @@ export interface Settings {
    * (src/live-settings.ts): money caps and which model each role runs on. Only that page's route writes it.
    */
   live?: { dailyBudgetUsd?: number; engineerBudgetUsd?: number; jobBudgetUsd?: number; models?: { chief?: string; worker?: string; engineer?: string; maintainer?: string } };
+  /**
+   * The day the model check last ran (src/model-ops.ts): the London date it reported and when, so a
+   * restart does not run it twice and a missed day runs it on the next boot. Written only by the check.
+   */
+  modelWatch?: { ymd: string; at: string };
 }
 
 interface State {

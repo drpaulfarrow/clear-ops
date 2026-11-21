@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "tools": [
     {
       "name": "cancel_job",
@@ -161,6 +161,88 @@
     },
     {
       "name": "list_uploads",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {},
+        "type": "object"
+      }
+    },
+    {
+      "name": "model_apply",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "alias": {
+            "enum": [
+              "haiku",
+              "sonnet",
+              "opus",
+              "fable"
+            ],
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "chief",
+              "worker",
+              "engineer",
+              "maintainer",
+              "designer"
+            ],
+            "type": "string"
+          },
+          "to": {
+            "enum": [
+              "haiku",
+              "sonnet",
+              "opus",
+              "fable"
+            ],
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "why"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "model_revert",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "alias": {
+            "enum": [
+              "haiku",
+              "sonnet",
+              "opus",
+              "fable"
+            ],
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "chief",
+              "worker",
+              "engineer",
+              "maintainer",
+              "designer"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "models",
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {},
