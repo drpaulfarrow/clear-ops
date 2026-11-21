@@ -32,6 +32,7 @@
  *    background, at most once a minute for each repository.
  */
 import { shortText } from "./messages.js";
+import { renderMarkdown } from "./reports.js";
 import { redact } from "./repos.js";
 import type { Job } from "./store.js";
 
@@ -105,6 +106,12 @@ export interface PullView {
   title: string;
   author: string;
   body?: string;
+  /**
+   * The description as the service's own renderer shows Markdown (src/reports.ts): escaped first, so
+   * nothing in it runs, with headings, lists, code and links to http(s) addresses only. A description
+   * is written by whoever opened the pull request, so it is untrusted like any other text from GitHub.
+   */
+  bodyHtml?: string;
   state: "open" | "merged" | "closed";
   draft: boolean;
   /** The head commit this view shows. A merge must name it. */
@@ -347,7 +354,8 @@ export class AppPulls {
       return { name: text(f.filename, 300), status: text(f.status, 20) || "modified", additions: count(f.additions), deletions: count(f.deletions), ...(patch ? { patch } : {}), ...(cut ? { cut } : {}) };
     });
     const state: PullView["state"] = pr.merged === true ? "merged" : pr.state === "open" ? "open" : "closed";
-    // The description keeps its line breaks; it is shown as plain text.
+    // The description keeps its line breaks. It is usually written in Markdown, so the app is given it
+    // rendered as well as plain; the plain text is what is cut and redacted, and the rendering is of that.
     const whole = typeof pr.body === "string" ? redact(pr.body).replace(/\r\n?/g, "\n").trim() : "";
     const body = whole.length > BODY_MAX ? `${whole.slice(0, BODY_MAX).trimEnd()}…` : whole;
     const view: PullView = {
@@ -357,7 +365,7 @@ export class AppPulls {
       number: t.number,
       title: text(pr.title, 200) || `Pull request #${t.number}`,
       author: text(pr.user?.login, 60) || "unknown",
-      ...(body ? { body } : {}),
+      ...(body ? { body, bodyHtml: renderMarkdown(body) } : {}),
       state,
       draft: pr.draft === true,
       head,
