@@ -162,6 +162,7 @@ const SELF_PR = "https://github.com/drpaulfarrow/clear-ops/pull/12";
 let voiceOn = false;
 const voiceTurns: Array<{ where: string; type: string; bytes: number }> = [];
 let voiceFails: Error | undefined;
+let voiceBack = 0;
 
 function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, c: InstanceType<typeof WebChat> = new WebChat()) {
   // Like the service's own router (src/channels.ts), it can read a conversation back; the app's are read from its transcript.
@@ -171,8 +172,10 @@ function listen(a: InstanceType<typeof AppAuth>, s: InstanceType<typeof Store>, 
     turn: async (where: string, audio: { data: Buffer; type: string; name: string }) => {
       voiceTurns.push({ where, type: audio.type, bytes: audio.data.length });
       if (voiceFails) throw voiceFails;
-      return { heard: "What is running?", said: "Two jobs.", kept: true, audio: Buffer.from("mp3").toString("base64") };
+      return { heard: "What is running?", said: "Okay, I'll ask Marlo.", audio: Buffer.from("mp3").toString("base64"), pending: "0123456789abcdef" };
     },
+    // What she says on coming back: not ready the first time it is asked for, then ready.
+    followUp: (id: string) => (id !== "0123456789abcdef" ? undefined : voiceBack++ ? { ready: true, said: "I checked with Marlo. Two jobs.", audio: Buffer.from("mp3-2").toString("base64") } : { ready: false }),
   };
   const built = buildApp({ messenger, runner, store: s, appAuth: a, webChat: c, prStates: new PrStates({ token: () => undefined }), pulls: newPulls(), webVoice, webVoiceEnabled: () => voiceOn });
   return new Promise<{ server: import("node:http").Server; base: string; scheduler: Scheduler; orchestrator: typeof built.orchestrator }>((resolve) => {
@@ -700,6 +703,10 @@ test("one job comes with its trace as stored, and an output only where the repor
   assert.equal((await get(`${APP_PATH}/api/jobs/..%2f..%2fstate`, cookie)).status, 404);
   assert.equal(appJob({ store, queue: quietQueue, now }, "../state"), undefined);
 
+  // The board route goes by the service's own clock, not this file's, and lists what finished in the last
+  // two days. So the job is finished by that clock before it is looked for: dated by this file's fixed
+  // clock, it dropped off the board, and this test began to fail, two days after that date.
+  store.updateJob(job.id, { finishedAt: new Date(Date.now() - 20 * 60_000).toISOString() });
   const board = JSON.parse(await text(await get(`${APP_PATH}/api/board`, cookie)));
   assert.ok(board.jobs.some((j: { id: string }) => j.id === job.id));
   assert.equal(typeof board.health.headline, "string");
@@ -2012,7 +2019,13 @@ test("a spoken turn with Cleo is taken only from the signed-in app, for a conver
     const res = await voice({ audio }, cookie);
     assert.equal(res.status, 200);
     assert.match(res.headers.get("cache-control") ?? "", /no-store/);
-    assert.deepEqual(await res.json(), { heard: "What is running?", said: "Two jobs.", kept: true, audio: Buffer.from("mp3").toString("base64") });
+    assert.deepEqual(await res.json(), { heard: "What is running?", said: "Okay, I'll ask Marlo.", audio: Buffer.from("mp3").toString("base64"), pending: "0123456789abcdef" });
+    // What she says when she comes back from the chief is collected by the name the turn gave. Read-only, signed in.
+    assert.equal((await fetch(`${base}${APP_PATH}/api/voice/0123456789abcdef`, { redirect: "manual" })).status, 401);
+    assert.deepEqual(JSON.parse(await text(await get(`${APP_PATH}/api/voice/0123456789abcdef`, cookie))), { ready: false });
+    assert.deepEqual(JSON.parse(await text(await get(`${APP_PATH}/api/voice/0123456789abcdef`, cookie))), { ready: true, said: "I checked with Marlo. Two jobs.", audio: Buffer.from("mp3-2").toString("base64") });
+    assert.equal((await get(`${APP_PATH}/api/voice/ffffffffffffffff`, cookie)).status, 404);
+    assert.equal((await get(`${APP_PATH}/api/voice/..%2f..%2fstate`, cookie)).status, 404);
     assert.equal((await voice({ thread: "space:self", audio }, cookie)).status, 200);
     assert.deepEqual(voiceTurns, [{ where: "web:main", type: "audio/webm", bytes: 17 }, { where: "web:space:self", type: "audio/webm", bytes: 17 }]);
     // Her own refusals are passed on in her words; anything else is said plainly and tells nothing.
@@ -2020,6 +2033,27 @@ test("a spoken turn with Cleo is taken only from the signed-in app, for a conver
     assert.deepEqual(await said(await voice({ audio }, cookie)), [409, "Cleo is still answering. Give her a moment."]);
     voiceFails = new Error("ECONNRESET at 10.0.0.4 with key sk-secret");
     assert.deepEqual(await said(await voice({ audio }, cookie)), [500, "Cleo could not answer just now."]);
+    // Her own conversation: what was said aloud, apart from the chief's feeds, with the way to his feed
+    // on what she reported back. Read-only, and only for the signed-in app.
+    assert.equal((await fetch(`${base}${APP_PATH}/api/cleo`, { redirect: "manual" })).status, 401);
+    await chat.spoken("web:main", "paul", "What is <b>running</b>?");
+    await chat.spoken("web:main", "clearops", "Okay, I'll ask Marlo.");
+    await chat.spoken("web:space:self", "clearops", "I checked with Marlo, and he says two jobs.", true);
+    const talk = await get(`${APP_PATH}/api/cleo`, cookie);
+    assert.match(talk.headers.get("cache-control") ?? "", /no-store/);
+    const hers = JSON.parse(await text(talk)) as { on: boolean; messages: Array<{ from: string; text: string; feed?: unknown }> };
+    assert.equal(hers.on, true);
+    assert.deepEqual(hers.messages.slice(-3).map((m) => [m.from, m.text, m.feed]), [
+      ["paul", "What is <b>running</b>?", undefined],
+      ["clearops", "Okay, I'll ask Marlo.", undefined],
+      ["clearops", "I checked with Marlo, and he says two jobs.", { where: { in: "space", id: "self" }, title: JSON.parse(await text(await get(`${APP_PATH}/api/spaces/self`, cookie))).name }],
+    ]);
+    // None of it is in the chief's feeds.
+    for (const feed of ["", "?thread=space:self"]) assert.ok(!(await text(await get(`${APP_PATH}/api/chat${feed}`, cookie))).includes("ask Marlo"), `feed ${feed || "main"}`);
+    assert.ok(!(await text(await get(`${APP_PATH}/api/chat?thread=space:self`, cookie))).includes("I checked with Marlo"));
+    // Search finds it, in her conversation.
+    const found = JSON.parse(await text(await get(`${APP_PATH}/api/search?q=${encodeURIComponent("checked with Marlo")}`, cookie))) as { messages: Array<{ where: unknown; title: string }> };
+    assert.deepEqual(found.messages.map((m) => [m.where, m.title]), [[{ in: "cleo" }, "Cleo"]]);
     // Her page, like any agent's.
     const page = JSON.parse(await text(await get(`${APP_PATH}/api/agents/voice`, cookie))) as { name: string; role: string; now: { line: string }; tools: string[] };
     assert.deepEqual([page.name, page.role, page.now.line], ["Cleo", "voice", "Ready to talk"]);
@@ -2027,6 +2061,7 @@ test("a spoken turn with Cleo is taken only from the signed-in app, for a conver
   } finally {
     voiceOn = false;
     voiceFails = undefined;
+    voiceBack = 0;
   }
 });
 

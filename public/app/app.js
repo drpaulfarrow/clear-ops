@@ -133,6 +133,10 @@ const state = {
   chat: undefined,
   chatRaw: "",
   chatProblem: undefined,
+  /** Cleo's own conversation is shown in the chat's place, and what it holds. */
+  cleoOpen: false,
+  cleoTalk: undefined,
+  cleoProblem: undefined,
   /** Which conversation the home page shows: "" for the main one, a chat's id, or "new" for one not yet begun. */
   own: /^[a-f0-9]{8}$/.test(store("clearops.chat") ?? "") ? store("clearops.chat") : "",
   /** Paul's own chats as last heard, for the list. */
@@ -456,6 +460,7 @@ function setRail(open) {
  */
 function setSpace(id) {
   const was = threadOnScreen();
+  state.cleoOpen = false;
   state.space = id;
   store("clearops.space", id);
   state.history = [];
@@ -791,6 +796,12 @@ function markedText(text, words) {
 
 /** Opens the conversation a found message is in. It opens at the newest message, not at the one found. */
 function openWhere(w) {
+  if (w.in === "cleo") {
+    if (layout() === "board") state.layout = "chat";
+    location.hash = "#/";
+    return void showCleo(true);
+  }
+  state.cleoOpen = false;
   if (w.in === "job") return void (location.hash = `#/job/${w.id}`);
   if (w.in === "pull") return void (location.hash = `#/pull/${w.repo}/${w.number}`);
   state.space = w.in === "space" ? w.id : "";
@@ -822,7 +833,7 @@ function searchResults() {
   const out = [
     group("Jobs", data.jobs.length, data.jobs.map((j) => h("a", { class: "row", href: `#/job/${j.id}` }, avatar(j.kind, "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, markedText(j.title, words)), h("div", { class: "card-sub" }, `${NAMES[j.kind] ? `${NAMES[j.kind]} · ` : ""}${j.who} · ${j.repositoryName} · ${j.status === "done" ? "finished" : j.status} ${ago(j.at, now) ?? ""}`), j.snippet ? h("div", { class: "found" }, markedText(j.snippet, words)) : null))), data.more.jobs),
     group("Reports", data.reports.length, data.reports.map((r) => h("a", { class: "row", href: `#/job/${r.id}/report` }, h("span", { class: "found-icon" }, icon("doc", 18)), h("div", { class: "row-main" }, h("div", { class: "card-title" }, r.title), h("div", { class: "card-sub" }, `Report · ${ago(r.at, now) ?? ""}`), h("div", { class: "found" }, markedText(r.snippet, words))))), data.more.reports),
-    group("Chats", data.messages.length, data.messages.map((m) => h("button", { class: "row row-button", type: "button", onclick: () => openWhere(m.where) }, m.from === "paul" ? h("span", { class: "av sm av-you", "aria-hidden": "true" }, h("i"), h("i")) : avatar("chief", "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, m.title), h("div", { class: "card-sub" }, `${m.from === "paul" ? "You" : CHIEF} · ${ago(m.at, now) ?? ""}`), h("div", { class: "found" }, markedText(m.snippet, words))))), data.more.messages),
+    group("Chats", data.messages.length, data.messages.map((m) => h("button", { class: "row row-button", type: "button", onclick: () => openWhere(m.where) }, m.from === "paul" ? h("span", { class: "av sm av-you", "aria-hidden": "true" }, h("i"), h("i")) : avatar(m.where.in === "cleo" ? "voice" : "chief", "sm"), h("div", { class: "row-main" }, h("div", { class: "card-title" }, m.title), h("div", { class: "card-sub" }, `${m.from === "paul" ? "You" : m.where.in === "cleo" ? CLEO : CHIEF} · ${ago(m.at, now) ?? ""}`), h("div", { class: "found" }, markedText(m.snippet, words))))), data.more.messages),
   ].filter(Boolean);
   return out.length ? out : [h("div", { class: "empty" }, `Nothing found for "${data.q}".`)];
 }
@@ -1534,8 +1545,8 @@ const sentFiles = (names) => (names.length ? h("div", { class: "sent-files" }, n
  * it is being, and the plain file if it could not be. The recording itself is kept with his uploads.
  */
 function mineBubble(m) {
-  // What he said to Cleo, as it was heard.
-  if (m.spoken) return h("div", { class: "mine" }, h("div", { class: "bubble" }, h("div", { class: "voice" }, h("span", { class: "voice-tag" }, icon("wave", 14), `Said to ${CLEO}`), h("span", { class: "voice-said" }, m.text))));
+  // What he said to Cleo, which she asked the chief for him: his words as they were heard.
+  if (m.via === "cleo") return h("div", { class: "mine" }, h("div", { class: "bubble" }, h("div", { class: "voice" }, h("span", { class: "voice-tag" }, icon("wave", 14), `${CLEO} asked for you`), h("span", { class: "voice-said" }, m.text))));
   const files = m.files ?? [];
   const spoken = files.filter((n) => VOICE_FILE.test(n));
   const unheard = m.heard === "";
@@ -1890,10 +1901,6 @@ function chatItems() {
     } else if (item.message.from === "paul") {
       out.push(mineBubble(item.message));
       lastFrom = "paul";
-    } else if (item.message.spoken) {
-      // What Cleo said aloud: her own face and name, and her words as plain text.
-      out.push(h("div", { class: "theirs" }, avatar("voice"), h("div", { class: "theirs-body" }, h("div", { class: "theirs-who" }, h("b", {}, CLEO), h("span", { class: "voice-tag" }, icon("wave", 14), "said aloud"), h("span", { class: "muted num" }, clock(item.message.at))), h("div", { class: "said-aloud" }, item.message.text))));
-      lastFrom = "cleo";
     } else {
       const first = lastFrom !== "clearops";
       out.push(
@@ -2015,10 +2022,13 @@ function chatManage() {
   }
   return h("div", { class: "chat-manage" }, h("span", { class: "muted chat-manage-label" }, "This chat"), h("button", { class: "btn quiet", type: "button", onclick: set("rename") }, "Rename"), h("button", { class: "btn quiet", type: "button", onclick: set("delete") }, "Delete"));
 }
+/** What the feed underneath is called: the space's chat, one of his own, or the main one. */
+const feedTitle = () => (spaceChat() ? spaceOf()?.name ?? "This space" : ownTitle());
 const ownTitle = () => (state.own === "new" ? "New chat" : state.own ? state.chats.find((c) => c.id === state.own)?.title ?? "Chat" : "Main");
 
 /** Shows another conversation. Each is its own with the chief: what is said in one is not carried into another. */
 function showChat(own) {
+  state.cleoOpen = false;
   state.chatsOpen = false;
   state.chatEdit = undefined;
   state.chatSaid = undefined;
@@ -2046,6 +2056,8 @@ function drawChatBar(now = Date.now(), fromRefresh = false) {
       h("span", { class: "chat-row-title" }, hasNew(own) ? h("span", { class: "new-dot", role: "img", "aria-label": "Something new" }) : null, title),
       note ? h("span", { class: "muted num" }, note) : null,
     );
+  // Her conversation is hers: its name, and the way back to the feed it was opened from.
+  if (state.cleoOpen) return void chatBarEl.replaceChildren(...[h("div", { class: "chat-bar-top" }, h("div", { class: "chat-space" }, h("b", {}, CLEO), h("span", { class: "muted" }, `· spoken with you, apart from ${CHIEF}'s feeds`)), h("button", { class: "btn quiet chat-new cleo-back", type: "button", onclick: () => showCleo(false) }, icon("back", 16), h("span", {}, `${CHIEF}'s feed: ${feedTitle()}`)))]);
   // A space has one chat: its name, and no list to choose from.
   if (spaceChat()) return void chatBarEl.replaceChildren(...[h("div", { class: "chat-bar-top" }, h("div", { class: "chat-space" }, h("b", {}, spaceOf()?.name ?? "This space"), h("span", { class: "muted" }, `· this space's chat with ${CHIEF}`)), h("a", { class: "btn quiet chat-new space-more", href: `#/space/${spaceChat()}`, "aria-label": "Notes and library" }, icon("doc", 16), h("span", { "aria-hidden": "true" }, "Notes and library")))]);
   // replaceChildren writes anything that is not an element as text, the word "null" included, so the
@@ -2097,8 +2109,14 @@ const chips = ["What's waiting on me?", "/jobs", "/spend"].map((text) => h("butt
 /** The longest one spoken turn runs before it is sent on its own. */
 const CLEO_MAX_MS = 60_000;
 const canTalk = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder && (window.AudioContext || window.webkitAudioContext));
-/** One turn at a time: idle, listening (recording him), thinking (waiting for her), speaking (playing her answer). */
-const cleo = { state: "idle", note: undefined, recorder: undefined, ctx: undefined, playing: undefined, timer: undefined };
+/** How long the page waits for her to come back from the chief, and how often it asks. */
+const CLEO_BACK_MS = 75_000;
+const CLEO_BACK_EVERY_MS = 1500;
+/**
+ * One turn at a time: idle, listening (recording him), thinking (waiting for her), speaking (playing her
+ * answer), waiting (she has gone to ask the chief and will speak again when he answers).
+ */
+const cleo = { state: "idle", note: undefined, recorder: undefined, ctx: undefined, playing: undefined, done: undefined, timer: undefined };
 const cleoButton = h("button", { class: "cleo", type: "button" });
 const cleoCancel = h("button", { class: "btn quiet cleo-cancel", type: "button", onclick: () => stopTalking(false) }, "Cancel");
 const cleoNote = h("div", { class: "cleo-note", role: "status" });
@@ -2107,12 +2125,12 @@ function drawCleo() {
   const on = !!state.board?.voice && canTalk && state.own !== "new";
   cleoButton.hidden = !on && cleo.state === "idle";
   cleoButton.className = `cleo ${cleo.state}`;
-  cleoButton.disabled = cleo.state === "thinking";
-  const words = { idle: CLEO, listening: "Tap to send", thinking: "Thinking", speaking: "Tap to stop" }[cleo.state];
-  cleoButton.setAttribute("aria-label", { idle: `Talk to ${CLEO}`, listening: `Send what you said to ${CLEO}`, thinking: `${CLEO} is thinking`, speaking: `Stop ${CLEO} speaking` }[cleo.state]);
+  cleoButton.disabled = cleo.state === "thinking" || cleo.state === "waiting";
+  const words = { idle: state.cleoOpen ? "Tap to talk" : CLEO, listening: "Tap to send", thinking: "Thinking", speaking: "Tap to stop", waiting: `Asking ${CHIEF}` }[cleo.state];
+  cleoButton.setAttribute("aria-label", { idle: `Talk to ${CLEO}`, listening: `Send what you said to ${CLEO}`, thinking: `${CLEO} is thinking`, speaking: `Stop ${CLEO} speaking`, waiting: `${CLEO} is asking ${CHIEF}` }[cleo.state]);
   cleoButton.replaceChildren(...[icon(cleo.state === "speaking" ? "stop" : "wave", 18), h("span", {}, words)]);
   cleoCancel.hidden = cleo.state !== "listening";
-  cleoNote.textContent = cleo.state === "listening" ? `${CLEO} is listening.` : cleo.note ?? "";
+  cleoNote.textContent = cleo.state === "listening" ? `${CLEO} is listening.` : cleo.state === "waiting" ? `${CLEO} is asking ${CHIEF}. She will tell you what he says.` : cleo.note ?? "";
   cleoNote.hidden = !cleoNote.textContent;
 }
 function cleoSays(note) {
@@ -2162,7 +2180,98 @@ function stopSpeaking() {
     // Already finished.
   }
   cleo.playing = undefined;
-  cleoSays(undefined);
+  cleo.done?.();
+}
+/** Plays one thing she says, and is done when it has ended or he has stopped it. Never fails: unheard is still said in writing. */
+function speak(audio) {
+  return new Promise((resolve) => {
+    cleo.done = () => { cleo.done = undefined; resolve(); };
+    void (async () => {
+      try {
+        const bytes = Uint8Array.from(atob(audio), (c) => c.charCodeAt(0));
+        const sound = await cleo.ctx.decodeAudioData(bytes.buffer);
+        const source = cleo.ctx.createBufferSource();
+        source.buffer = sound;
+        source.connect(cleo.ctx.destination);
+        source.addEventListener("ended", () => { if (cleo.playing === source) { cleo.playing = undefined; cleo.done?.(); } });
+        cleo.playing = source;
+        cleo.state = "speaking";
+        drawCleo();
+        source.start();
+      } catch {
+        cleo.done?.();
+      }
+    })();
+  });
+}
+/** What she says on coming back from the chief, or nothing if she has not come back in the time the page waits. */
+async function comesBack(id) {
+  const until = Date.now() + CLEO_BACK_MS;
+  while (Date.now() < until) {
+    await new Promise((later) => setTimeout(later, CLEO_BACK_EVERY_MS));
+    const text = await getJson(`/voice/${id}`);
+    // No longer held: her words are in her conversation all the same.
+    if (!text) return undefined;
+    const back = JSON.parse(text);
+    if (back.ready) return back;
+  }
+  return undefined;
+}
+/** Her own conversation: what was said aloud, his words and hers. */
+async function refreshCleo() {
+  try {
+    const text = await getJson("/cleo");
+    if (text) state.cleoTalk = JSON.parse(text);
+    state.cleoProblem = undefined;
+  } catch (err) {
+    if (err.message === "signed out") return;
+    state.cleoProblem = `${CLEO}'s conversation could not be read just now.`;
+  }
+  if (state.cleoOpen && route().name === "board" && layout() !== "board") {
+    stickNext = true;
+    drawChat();
+  }
+}
+/** Shows her conversation in the chat's place, or goes back to the feed underneath. */
+function showCleo(open) {
+  state.cleoOpen = open;
+  state.chatsOpen = false;
+  state.chatEdit = undefined;
+  stickNext = true;
+  drawChat();
+  if (open) void refreshCleo();
+}
+function cleoItems() {
+  const talk = state.cleoTalk;
+  if (!talk) return [h("p", { class: "muted" }, state.cleoProblem ?? `Loading ${CLEO}'s conversation.`)];
+  const today = dayKey(talk.generatedAt);
+  const out = [];
+  let lastDay;
+  for (const m of talk.messages) {
+    const day = dayKey(m.at);
+    if (day !== lastDay) out.push(h("div", { class: "chat-day" }, day === today ? "Today" : dayFmt.format(new Date(m.at))));
+    lastDay = day;
+    if (m.from === "paul") out.push(h("div", { class: "mine" }, h("div", { class: "bubble" }, m.text)));
+    else
+      out.push(
+        h(
+          "div",
+          { class: "theirs" },
+          avatar("voice"),
+          h(
+            "div",
+            { class: "theirs-body" },
+            h("div", { class: "theirs-who" }, h("b", {}, CLEO), h("span", { class: "muted num" }, clock(m.at))),
+            h("div", { class: "said-aloud" }, m.text),
+            // She was reporting what the chief said: the way to where he wrote it.
+            m.feed ? h("button", { class: "btn quiet to-feed", type: "button", onclick: () => openWhere(m.feed.where) }, avatar("chief", "sm"), h("span", {}, `${CHIEF}'s feed: ${m.feed.title}`), icon("send", 14)) : null,
+          ),
+        ),
+      );
+  }
+  if (!talk.messages.length) out.push(h("div", { class: "chat-empty" }, avatar("voice", "lg"), h("p", {}, talk.on ? `Tap and speak. ${CLEO} answers what she can herself and asks ${CHIEF} for the rest, then tells you what he said. His written answers stay in his feeds.` : `${CLEO} is not switched on.`)));
+  if (state.cleoProblem) out.push(h("div", { class: "banner" }, state.cleoProblem));
+  return out;
 }
 async function sendTalk(blob) {
   cleo.state = "thinking";
@@ -2170,25 +2279,34 @@ async function sendTalk(blob) {
   const where = threadOnScreen();
   try {
     const res = await postJson("/voice", { ...(where ? { thread: where } : {}), audio: { type: blob.type, data: await asBase64(blob) } });
-    void chatTick();
+    void refreshCleo();
     if (!res.ok) return cleoSays(res.data.error || `${CLEO} could not answer just now.`);
     if (!res.data.heard) return cleoSays(`${CLEO} did not catch anything. Tap and try again.`);
-    if (!res.data.audio) return cleoSays(res.data.said ? `${CLEO} answered, but it could not be spoken. Her words are in the chat.` : undefined);
-    const bytes = Uint8Array.from(atob(res.data.audio), (c) => c.charCodeAt(0));
-    const sound = await cleo.ctx.decodeAudioData(bytes.buffer);
-    const source = cleo.ctx.createBufferSource();
-    source.buffer = sound;
-    source.connect(cleo.ctx.destination);
-    source.addEventListener("ended", () => { if (cleo.playing === source) { cleo.playing = undefined; cleoSays(undefined); } });
-    cleo.playing = source;
-    cleo.state = "speaking";
+    const unspoken = `${CLEO} answered, but it could not be spoken. Her words are in her conversation.`;
+    // She has gone to ask the chief: the page starts waiting for her while she says so.
+    const back = res.data.pending ? comesBack(res.data.pending).catch(() => undefined) : undefined;
+    if (res.data.audio) await speak(res.data.audio);
+    if (!back) return cleoSays(res.data.said && !res.data.audio ? unspoken : undefined);
+    cleo.state = "waiting";
     drawCleo();
-    source.start();
+    const answer = await back;
+    void refreshCleo();
+    void chatTick();
+    if (!answer) return cleoSays(`${CLEO} is still waiting on ${CHIEF}. His answer will be written in his feed.`);
+    if (answer.audio) await speak(answer.audio);
+    cleoSays(answer.said && !answer.audio ? unspoken : undefined);
   } catch (err) {
     cleoSays(err.message === "signed out" ? undefined : `${CLEO} could not be reached or heard just now.`);
   }
 }
-cleoButton.addEventListener("click", () => (cleo.state === "idle" ? void startTalking() : cleo.state === "listening" ? stopTalking(true) : cleo.state === "speaking" ? stopSpeaking() : undefined));
+// Talking to her opens her conversation: what is said aloud is shown there, apart from the chief's feed.
+cleoButton.addEventListener("click", () => {
+  if (cleo.state === "idle") {
+    if (!state.cleoOpen) showCleo(true);
+    void startTalking();
+  } else if (cleo.state === "listening") stopTalking(true);
+  else if (cleo.state === "speaking") stopSpeaking();
+});
 
 const chatEl = h(
   "section",
@@ -2332,10 +2450,12 @@ async function send(raw) {
 let stickNext = true;
 function drawChat() {
   drawCleo();
-  lookedAt();
+  chatEl.classList.toggle("with-cleo", state.cleoOpen);
+  logEl.setAttribute("aria-label", `Conversation with ${state.cleoOpen ? CLEO : CHIEF}`);
+  if (!state.cleoOpen) lookedAt();
   drawChatBar(Date.now(), true);
   const stick = stickNext || logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120;
-  logEl.replaceChildren(...chatItems());
+  logEl.replaceChildren(...(state.cleoOpen ? cleoItems() : chatItems()));
   if (stick) logEl.scrollTop = logEl.scrollHeight;
   stickNext = false;
 }

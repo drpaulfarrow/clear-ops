@@ -934,6 +934,40 @@ test("Cleo in the web app hears only the signed-in browser, keeps no audio, and 
   assert.doesNotMatch(cleo, /new Audio\(|createObjectURL|innerHTML|localStorage|store\(/, "nothing of a turn is kept in the browser");
 });
 
+test("Cleo's conversation is apart from the chief's feeds: it is read, never sent to, and she still hands on only what the voice brain wraps", async () => {
+  // 21 Nov 2026: Cleo is who Paul talks to and the chief is who writes in the feeds. What is said aloud
+  // is her own conversation. It is not an address: nothing can be sent to it, the chief is never asked
+  // there, and no approval is read from it. She speaks twice when she asks the chief, and the second
+  // time is collected by a read.
+  const chat = src("web-chat.ts");
+  assert.match(chat, /private in\(thread: string \| undefined\): WebMessage\[\] \{\s*return this\.messages\.filter\(\(m\) => m\.thread === thread && !m\.spoken\);/, "no feed holds what was said aloud");
+  assert.match(chat, /if \(m\.live \|\| m\.spoken\) continue;/, "and what was said aloud marks no feed as having something new");
+  const { isWebConversation, WebChat } = await import("../src/web-chat.js");
+  for (const address of ["web:cleo", "cleo", "web:voice", "web:space:cleo!"]) assert.equal(isWebConversation(address), false, address);
+  // Whatever feed was open, what is said aloud stays out of it, and what the chief writes stays out of hers.
+  const c = new WebChat();
+  await c.spoken("web:main", "paul", "send abc123");
+  await c.spoken("web:main", "clearops", "Okay, I'll ask Marlo.");
+  await c.send("web:main", "Written by the chief.");
+  assert.deepEqual(c.view("web:main").messages.map((m) => m.text), ["Written by the chief."]);
+  assert.deepEqual(c.cleo().map((m) => m.text), ["send abc123", "Okay, I'll ask Marlo."]);
+  // The two routes that serve her conversation and her coming back only read.
+  const index = src("index.ts");
+  const hers = index.slice(index.indexOf("app.get(`${APP_PATH}/api/cleo`"), index.indexOf("* One spoken turn with Cleo (src/web-voice.ts)"));
+  assert.match(hers, /app\.get\(`\$\{APP_PATH\}\/api\/cleo`, \(_req, res\) => \{\s*appHeaders\(res\);\s*res\.json\(appCleo\(appSource\(\), chat\)\);/);
+  assert.match(hers, /app\.get\(`\$\{APP_PATH\}\/api\/voice\/:id`, \(req, res\) => \{\s*appHeaders\(res\);\s*const back = webVoice\.followUp\(String\(req\.params\.id \?\? ""\)\);/);
+  assert.doesNotMatch(hers, /orchestrator|\.handle\(|\.turn\(|parse[A-Z]\w*Command|approver|outbound|purchase|dns\b|signup|chat\.(send|inbound|spoken)\(|app\.(post|put|patch|delete)\(/, "reading her conversation asks nobody anything and decides nothing");
+  // Coming back is the same brain finishing the same turn: there is still one place the chief is asked from.
+  const web = src("web-voice.ts");
+  assert.doesNotMatch(web, /deps\.ask\(|\.handle\(|orchestrator/);
+  assert.equal((web.match(/this\.brain\.reply\(/g) ?? []).length, 1, "one reply for one turn, whether she speaks once or twice");
+  const follow = web.slice(web.indexOf("followUp(id: string)"), web.lastIndexOf("}"));
+  assert.doesNotMatch(follow, /\.set\(|\.delete\(|spoken\(|brain\./, "collecting what she says changes nothing");
+  // She is told who writes the answers, and still that she cannot approve.
+  assert.match(web, /Marlo is the chief of staff\./);
+  assert.match(web, /You cannot approve anything: sending an email or invitation, a DNS change, a purchase or a merge is approved only by Paul's own tap on that item in the app/);
+});
+
 test("a purchase is placed ONLY through the purchase gate, after Paul's own decision", () => {
   const files = fs.readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
   for (const f of files) {

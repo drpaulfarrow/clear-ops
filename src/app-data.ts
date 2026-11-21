@@ -804,8 +804,8 @@ export interface AppChatMessage {
   files?: string[];
   /** What was heard in the voice note(s) he sent with it. Empty: they could not be transcribed. Absent: none, or not transcribed yet. */
   heard?: string;
-  /** It was speech with Cleo: his words as transcribed, or hers. Shown as text. */
-  spoken?: true;
+  /** He said it to Cleo, and she asked the chief for him. */
+  via?: "cleo";
   /** A picture the service sent with it: the name the app asks its picture route for, and the caption as plain words for its description. */
   picture?: string;
   caption?: string;
@@ -880,8 +880,9 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
   return {
     generatedAt: new Date(now).toISOString(),
     messages: view.messages.map((m) =>
-      // His own words, the chief's status line and what Cleo said aloud are plain text; what the service wrote is rendered.
-      m.from === "paul" || m.live || m.spoken ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.spoken ? { spoken: true as const } : {}), ...(m.files?.length ? { files: m.files } : {}), ...(m.heard !== undefined ? { heard: m.heard } : {}) } : said(source, m),
+      // His own words and the chief's status line are plain text; what the service wrote is rendered.
+      // What was said aloud with Cleo is not here: that is her own conversation (`appCleo`).
+      m.from === "paul" || m.live ? { id: m.id, at: m.at, from: m.from, text: m.text, ...(m.live ? { live: true as const } : {}), ...(m.via ? { via: m.via } : {}), ...(m.files?.length ? { files: m.files } : {}), ...(m.heard !== undefined ? { heard: m.heard } : {}) } : said(source, m),
     ),
     typing: view.typing,
     jobs: jobs.map((j) => toAppJob(source, j, ev)),
@@ -1058,7 +1059,7 @@ export function appAgent(source: AppSource, kind: string): AppAgent | undefined 
       ...base,
       name: CLEO,
       role: "voice",
-      does: "listens when you tap her button, hands what you ask to the chief, and says the answer aloud",
+      does: "is who you talk to: she answers what she can, asks the chief for the rest, and tells you what he said and where he wrote it",
       now: on ? { state: "here", line: "Ready to talk" } : { state: "idle", line: "Switched off" },
       model: resolveModel(config.voice.model),
       modelNote: "Her own quick model, set where the service runs. She speaks with a text-to-speech voice and hears through the same transcription a voice note uses.",
