@@ -6,6 +6,7 @@ import { inflateRawSync } from "node:zlib";
 import { config } from "./config.js";
 import { isPdfData, pdfTextNote } from "./pdf.js";
 import { extractPdfText, type PdfExtraction } from "./pdf-extract.js";
+import { htmlToText, isHtml, isHtmlName, type HtmlText } from "./html-text.js";
 
 /**
  * Files the founder sends in chat (a LinkedIn Connections.csv, PDFs, screenshots, zip archives).
@@ -47,7 +48,7 @@ export interface SavedUpload {
   caption?: string;
   /** Set for zip archives. */
   extracted?: { dir: string; files: number; skipped: number; error?: string };
-  /** Set for a PDF whose text was read out: the companion .txt saved beside it, which a worker reads. */
+  /** Set for a PDF or an HTML page whose text was read out: the companion .txt saved beside it, which a worker reads. */
   text?: { name: string; path: string; chars: number; words: number; sha256: string };
   /** What could not be read out of the file, in plain words for the chief and for Paul. */
   note?: string;
@@ -93,6 +94,15 @@ const TEXT_SUFFIX = ".txt";
  * reader says plainly when this stopped it (PDF_TEXT_MAX_CHARS is about 150,000 words).
  */
 const PDF_TEXT_MAX_CHARS = 1_000_000;
+/** The same for the words read out of an HTML page (src/html-text.ts). */
+const HTML_TEXT_MAX_CHARS = 1_000_000;
+/**
+ * Above these the chief is told not to read a file whole in its own turn: it has a fixed number of steps
+ * for one message, and on 21 Nov 2026 it spent all of them, twice, paging through a 1.9 MB HTML file.
+ * A worker has the steps for it. A quick look-up with Grep is still the chief's to do.
+ */
+export const CHIEF_READ_BYTES = 256 * 1024;
+export const CHIEF_READ_CHARS = 60_000;
 
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -126,6 +136,7 @@ export function guessType(name: string): string {
   const ext = path.extname(name).toLowerCase();
   const types: Record<string, string> = {
     ".csv": "text/csv", ".txt": "text/plain", ".md": "text/markdown", ".json": "application/json", ".pdf": "application/pdf",
+    ".html": "text/html", ".htm": "text/html",
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
     ".zip": "application/zip", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".xls": "application/vnd.ms-excel", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -221,7 +232,35 @@ export class Uploads {
     const saved: SavedUpload = { name, path: this.inside(name), originalName, mimeType: type, size: data.length, caption: caption || undefined };
     if (isZip(clean, type, data)) saved.extracted = this.extract(name, data);
     else if (isPdfData(data)) await this.attachPdfText(name, data, saved);
+    else if (isHtml(clean, type, data)) this.attachHtmlText(name, data, saved);
     return saved;
+  }
+
+  /**
+   * Read an HTML page's words out and write them beside the file as `<name>.txt`, as for a PDF
+   * (src/html-text.ts). The page itself is always saved. A page with no words to find (one drawn by
+   * its script) gets no companion and a plain reason instead, so nobody pages through the markup for them.
+   */
+  private attachHtmlText(name: string, data: Buffer, saved: SavedUpload): void {
+    let result: HtmlText;
+    try {
+      result = htmlToText(data, HTML_TEXT_MAX_CHARS);
+    } catch {
+      saved.note = "the text could not be read out of the HTML";
+      return;
+    }
+    if (!result.text) {
+      saved.note = "no readable text was found in the HTML, so it may be a page drawn by its script; nothing in it is readable as it is, so ask Paul for the same thing as a PDF or as Markdown";
+      return;
+    }
+    if (result.truncated) saved.note = `the text was cut at ${result.chars.toLocaleString("en-GB")} characters`;
+    try {
+      const bytes = Buffer.from(result.text, "utf8");
+      const companion = this.writeNew(`${name}${TEXT_SUFFIX}`, bytes);
+      saved.text = { name: companion, path: this.inside(companion), chars: result.chars, words: result.words, sha256: createHash("sha256").update(bytes).digest("hex") };
+    } catch {
+      saved.note = [saved.note, "the text was read but could not be saved beside the HTML"].filter(Boolean).join("; ");
+    }
   }
 
   /** Write to a direct child of the uploads directory, never overwriting: a clash gets -2, -3, ... */
@@ -413,8 +452,12 @@ export function describeUploads(saved: SavedUpload[], failed: Array<{ name: stri
       const x = u.extracted;
       lines.push(`  Unpacked to ${x.dir}/ (${x.files} file(s)${x.skipped ? `, ${x.skipped} unsafe or unsupported entries skipped` : ""}${x.error ? `; ${x.error}` : ""})`);
     }
-    if (u.text) lines.push(`  Text read out of it is saved beside it at ${u.text.path} (${u.text.words} words): read that file, not the PDF.`);
+    if (u.text) lines.push(`  Text read out of it is saved beside it at ${u.text.path} (${u.text.words} words): read that file, not the ${isHtmlName(u.name, u.mimeType) ? "HTML" : "PDF"}.`);
     if (u.note) lines.push(`  ${u.note}${u.note.endsWith(".") ? "" : "."}`);
+    // What is too big for the chief's own turn is said here, where the size is known.
+    if (u.text && u.text.chars > CHIEF_READ_CHARS) lines.push("  That text is long: for more than a quick look, put its full path in a worker's brief rather than reading it all yourself.");
+    else if (!u.text && !u.extracted && u.size > CHIEF_READ_BYTES && !u.mimeType.startsWith("image/") && !u.mimeType.startsWith("audio/"))
+      lines.push(`  It is large (${formatSize(u.size)}): do not Read it whole yourself in this turn. Use Grep for a quick look-up, and for anything more put its full path in a worker's brief.`);
   }
   for (const f of failed) lines.push(`- ${f.name} was not saved: ${f.reason}`);
   const heard = voice.filter((v) => v.text);
