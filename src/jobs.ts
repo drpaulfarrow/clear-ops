@@ -1829,15 +1829,49 @@ export class JobRunner {
         escalation: `${url} is still not mergeable after ${MAX_FIX_ROUNDS} automatic fix rounds, so I have stopped. The blocking issues are in the last review (show job ${review.id}). Reply "one more fix round on ${url}" to try again, give me a steer on where it is stuck, or close the pull request.`,
       };
     }
-    const fix = this.start(
+    const fix = this.startFix(reviewed, review, text, url, round, earlier);
+    return { chained: `Changes requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
+  }
+
+  /** Starts one fix round on a reviewed pull request: an engineer job on the same branch, carrying the pull request and its round. */
+  private startFix(reviewed: Job, review: Job, text: string, url: string, round: number, earlier: Array<{ id: string; text: string }>, asked?: { by: string; replyTo: string }): Job {
+    const target = lockKey(reviewed) ?? reviewed.target ?? "product";
+    const which = asked ? `fix round ${round}, asked for by the founder` : `automatic fix round ${round} of ${MAX_FIX_ROUNDS}`;
+    return this.start(
       "engineer",
-      `Address the maintainer's review on the existing pull request ${url} (automatic fix round ${round} of ${MAX_FIX_ROUNDS}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${originalTask(reviewed.brief)}\n\nMaintainer's review (job ${review.id}):\n${text}${deadEnds(earlier)}`,
-      reviewed.requestedBy,
+      `Address the maintainer's review on the existing pull request ${url} (${which}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${originalTask(reviewed.brief)}\n\nMaintainer's review (job ${review.id}):\n${text}${deadEnds(earlier)}`,
+      asked?.by ?? reviewed.requestedBy,
       target,
-      reviewed.replyTo,
+      asked?.replyTo ?? reviewed.replyTo,
       { title: fixTitle(jobTitle(reviewed), round), pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
     );
-    return { chained: `Changes requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
+  }
+
+  /**
+   * The one fix round Paul asks for with his own message "one more fix round on <address>" (the
+   * orchestrator hands it here before any model). It is the same job an automatic round would be, so it
+   * carries the pull request and its round, and both guards hold for it: GitHub is asked first, and
+   * nothing is started on a pull request that is merged or closed; and when it finishes it is reviewed
+   * only if the pull request is still open. Returns what to tell him.
+   */
+  async requestFixRound(url: string, by: string, replyTo: string): Promise<string> {
+    const reviews = this.store
+      .allJobs()
+      .filter((j) => j.kind === "maintain" && j.status === "done" && !!j.reviewOf && (j.pr === url || this.store.getJob(j.reviewOf)?.pr === url))
+      .sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
+    const review = reviews[reviews.length - 1];
+    const reviewed = review?.reviewOf ? this.store.getJob(review.reviewOf) : undefined;
+    if (!review || !reviewed) return `I have no review by the maintainer of ${url}, so there is nothing for a fix round to fix. Ask me for the change in your own words if you want an engineer on it.`;
+    const text = this.store.readOutput(review.id) ?? "";
+    const verdict = parseReviewVerdicts(text).filter((v) => samePr(v.pr, url)).at(-1);
+    if (verdict?.outcome !== "changes_requested") return `The last review of ${url} did not ask for changes, so there is nothing for a fix round to fix (show job ${review.id}).`;
+    const running = this.store.allJobs().find((j) => j.kind === "engineer" && (j.status === "running" || j.status === "queued") && !!j.fixRound && j.pr === url);
+    if (running) return `A fix round on ${url} is already ${running.status === "running" ? "running" : "queued"}: ${jobLabel(running)}. Nothing more was started.`;
+    const gone = await this.gone(url);
+    if (gone) return `${url} has been ${gone}, so no fix round was started: a fix pushed to its branch would reach nothing. ${gone === "merged" ? `What the review found is in the default branch now (show job ${review.id}). Ask for a new change if you want it fixed.` : `The review is saved (show job ${review.id}).`}`;
+    const round = (reviewed.kind === "engineer" ? reviewed.fixRound ?? 0 : 0) + 1;
+    const fix = this.startFix(reviewed, review, text, url, round, this.earlierReviews(review, url), { by, replyTo });
+    return `Started ${jobLabel(fix)} to fix what the maintainer asked for on ${url}${this.queuedText(fix)}. It is reviewed once when it finishes, and nothing more follows unless you ask.`;
   }
 
   /** The finished maintainer reviews of this pull request before this one, oldest first, with their saved reports. */

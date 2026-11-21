@@ -228,3 +228,99 @@ test("the pull request's page is told what the maintainer said of it and whether
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   assert.match(index, /res\.json\(\{ \.\.\.view, \.\.\.appPullWatch\(appSource\(\), view\) \}\);/);
 });
+
+test("the round he asks for is refused on a merged or closed pull request before any session starts", async () => {
+  for (const state of ["merged", "closed"] as const) {
+    let now: PrState = "open";
+    const w = world([changes("the 402 path has no test")], async () => now);
+    w.jobs.start("engineer", "Add the 402 flow", FOUNDER, "product", THREAD);
+    await waitFor(() => w.said().some((t) => t.startsWith("The maintainer asked for changes")));
+    const sessions = w.runs.length;
+    // He merges or closes it, and then asks for the round.
+    now = state;
+    const answer = await w.jobs.requestFixRound(PR, FOUNDER, THREAD);
+    await new Promise((r) => setTimeout(r, 80));
+    assert.match(answer, new RegExp(`^${PR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} has been ${state}, so no fix round was started: a fix pushed to its branch would reach nothing\\.`));
+    assert.equal(w.runs.length, sessions, `${state}: no engineer and no review session ran`);
+    assert.ok(!w.store.allJobs().some((j) => j.fixRound), `${state}: no fix round exists`);
+  }
+});
+
+test("the round he asks for carries its pull request and number, is reviewed once, and is not reviewed if merged meanwhile", async () => {
+  let now: PrState = "open";
+  const w = world([changes("the 402 path has no test"), changes("the retry path is still wrong in a new way entirely")], async () => now);
+  w.jobs.start("engineer", "Add the 402 flow", FOUNDER, "product", THREAD);
+  await waitFor(() => w.said().some((t) => t.startsWith("The maintainer asked for changes")));
+  const review = w.store.allJobs().find((j) => j.kind === "maintain")!;
+  const answer = await w.jobs.requestFixRound(PR, FOUNDER, "web:pull:product:12");
+  const fix = w.store.allJobs().find((j) => j.fixRound === 1)!;
+  assert.ok(fix, "an engineer job on that pull request");
+  assert.deepEqual([fix.kind, fix.pr, fix.fixRound, fix.target, fix.replyTo, fix.requestedBy], ["engineer", PR, 1, "product", "web:pull:product:12", FOUNDER]);
+  assert.match(fix.brief, new RegExp(`existing pull request ${PR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(fix round 1, asked for by the founder\\)`));
+  assert.match(fix.brief, new RegExp(`Maintainer's review \\(job ${review.id}\\):`), "it carries the review it is to fix");
+  assert.match(fix.brief, /Do not open a new pull request/);
+  assert.match(answer, new RegExp(`^Started Fix round 1: Add the 402 flow · engineer · ${fix.id} to fix what the maintainer asked for on `));
+  assert.match(answer, /It is reviewed once when it finishes, and nothing more follows unless you ask\.$/);
+  // While it runs, a second ask starts nothing.
+  if (w.store.getJob(fix.id)!.status !== "done") assert.match(await w.jobs.requestFixRound(PR, FOUNDER, THREAD), /^A fix round on .* is already (running|queued)/);
+  // It finishes, is reviewed once, and that review's change request goes to him without another round.
+  await waitFor(() => w.reviews() === 2 && w.settled() && w.said().filter((t) => t.startsWith("The maintainer asked for changes")).length === 2, 8000);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(w.store.allJobs().filter((j) => j.fixRound).length, 1);
+  assert.ok(w.store.allJobs().some((j) => j.kind === "maintain" && j.reviewOf === fix.id));
+  // The next round he asks for is round 2, and if the pull request is merged while it runs, nothing reviews it.
+  const before = w.reviews();
+  const second = await w.jobs.requestFixRound(PR, FOUNDER, THREAD);
+  assert.match(second, /^Started Fix round 2:/);
+  now = "merged";
+  await waitFor(() => w.settled() && w.said().some((t) => t.includes("was merged while this fix round was running")), 8000);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(w.reviews(), before, "no review of a round whose pull request merged meanwhile");
+});
+
+test("a round is only ever started for a pull request the maintainer asked for changes on", async () => {
+  const none = world([]);
+  assert.equal(await none.jobs.requestFixRound(PR, FOUNDER, THREAD), `I have no review by the maintainer of ${PR}, so there is nothing for a fix round to fix. Ask me for the change in your own words if you want an engineer on it.`);
+  const merged = world([`REVIEW ${PR}: merged`]);
+  merged.jobs.start("engineer", "Add the 402 flow", FOUNDER, "product", THREAD);
+  await waitFor(() => merged.reviews() === 1 && merged.settled());
+  assert.match(await merged.jobs.requestFixRound(PR, FOUNDER, THREAD), /^The last review of .* did not ask for changes, so there is nothing for a fix round to fix \(show job [a-f0-9]{6}\)\.$/);
+  assert.equal(merged.store.allJobs().filter((j) => j.kind === "engineer").length, 1);
+  // Another pull request of the same number somewhere else is not this one.
+  const other = world([changes()]);
+  other.jobs.start("engineer", "Add the 402 flow", FOUNDER, "product", THREAD);
+  await waitFor(() => other.said().some((t) => t.startsWith("The maintainer asked for changes")));
+  assert.match(await other.jobs.requestFixRound("https://github.com/someone/else/pull/12", FOUNDER, THREAD), /^I have no review by the maintainer of https:\/\/github\.com\/someone\/else\/pull\/12/);
+});
+
+test("his message is taken by the service itself, before the chief, and only as the whole message with a full address", async () => {
+  const { Orchestrator, FIX_ROUND_COMMAND, fixLoopNote } = await import("../src/orchestrator.js");
+  const { Scheduler } = await import("../src/scheduler.js");
+  for (const yes of [`one more fix round on ${PR}`, `One more fix round on ${PR}.`, `one more fix round on <${PR}>`, `ONE MORE FIX ROUND ON   ${PR}!`]) assert.equal(FIX_ROUND_COMMAND.exec(yes)?.[1], PR, yes);
+  for (const no of [`please do one more fix round on ${PR}`, `one more fix round on ${PR} and merge it`, "one more fix round on #12", "one more fix round on https://github.com/acme/clear-exchange/pull/0", "one more fix round on https://evil.example/acme/x/pull/12", `one more fix round on ${PR}/files`, "one more fix round"]) assert.equal(FIX_ROUND_COMMAND.test(no), false, no);
+  const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-fix-rounds-orch-")));
+  const m = new ConsoleMessenger();
+  const seen: RunOptions[] = [];
+  const runner: AgentRunner = async (o) => (seen.push(o), { text: "ok" });
+  const jobs = new JobRunner(store, m, runner);
+  const orch = new Orchestrator(store, m, jobs, new Scheduler(store, jobs), runner);
+  await orch.handle(FOUNDER, `one more fix round on ${PR}`);
+  assert.equal(seen.length, 0, "no model is asked: the service answers itself");
+  assert.equal(m.sent.at(-1)!.text, `I have no review by the maintainer of ${PR}, so there is nothing for a fix round to fix. Ask me for the change in your own words if you want an engineer on it.`);
+  // Anything else goes to the chief, who is told how the loop works now and not to start a round himself.
+  await orch.handle(FOUNDER, "can you get those review comments fixed?");
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0]!.systemPrompt!.includes(fixLoopNote(0)));
+  assert.match(fixLoopNote(0), /^The maintainer reviews an engineer's or agent-creator's pull request once\. When it requests changes, nothing starts by itself/);
+  assert.match(fixLoopNote(0), /a fix round starts only on his own message "one more fix round on <the pull request's address>", which the service handles itself/);
+  assert.match(fixLoopNote(0), /do not start an engineer job for it yourself/);
+  assert.doesNotMatch(seen[0]!.systemPrompt!, /starts automatically \(queued like any engineering job\)|up to 3 fix rounds/, "nothing in his instructions still promises the automatic loop");
+  assert.match(seen[0]!.systemPrompt!, /the review loop \(one review, then a message to Paul, and a fix round only when he asks for one\) works the same everywhere/);
+  // With rounds set to start on their own, he is told that, with the number.
+  assert.match(fixLoopNote(2), /starts automatically \(queued like any engineering job\), and the update is re-reviewed automatically, up to 2 fix rounds per pull request/);
+  assert.doesNotMatch(fixLoopNote(0) + fixLoopNote(3), /—/);
+  // The page offers the same words as one button, while the pull request is open and no round is under way.
+  const js = fs.readFileSync("public/app/app.js", "utf8");
+  assert.match(js, /const sent = await sendThread\(`one more fix round on \$\{v\.url\}`, `pull:\$\{v\.repo\}:\$\{v\.number\}`\);/);
+  assert.match(js, /r && r\.verdict === "changes_requested" && v\.state === "open" && !f\s*\? h\("div", \{ class: "links" \}, h\("button", \{[^}]*onclick: \(\) => void askForFix\(v\) \}, "Have these fixed, once"\)\)/);
+});

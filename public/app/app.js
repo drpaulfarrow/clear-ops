@@ -138,6 +138,10 @@ function pullWatch(v) {
       : null,
     r && r.verdict === "changes_requested" && v.state === "merged" ? h("p", { class: "prose muted" }, `What the review found is in ${v.base} now.`) : null,
     f ? h("p", { class: "prose" }, h("a", { href: `#/job/${f.job}` }, `${f.by} ${f.running ? "is on" : "is queued for"} fix round ${f.round} for this`), ". Merging now takes the version before those fixes.") : null,
+    // One round is his to ask for, while it is open and none is under way.
+    r && r.verdict === "changes_requested" && v.state === "open" && !f
+      ? h("div", { class: "links" }, h("button", { class: "btn", type: "button", disabled: state.busy !== undefined || state.thread?.sending, onclick: () => void askForFix(v) }, "Have these fixed, once"))
+      : null,
   );
 }
 
@@ -1139,6 +1143,17 @@ async function askToResolve(v) {
   say(sent ? `Asked ${CHIEF} to resolve the conflicts. The answer is in this pull request's thread.` : "That could not be sent just now.", !sent);
   if (sent && route().name !== "pull") location.hash = `#/pull/${v.repo}/${v.number}`;
   else draw();
+}
+
+/**
+ * Asks for one fix round on a pull request the maintainer asked for changes on: the service's own words
+ * for it, sent as his message in the pull request's thread. The service checks the pull request is
+ * still open and answers there.
+ */
+async function askForFix(v) {
+  const sent = await sendThread(`one more fix round on ${v.url}`, `pull:${v.repo}:${v.number}`);
+  say(sent ? "Asked for one fix round. The answer is in this pull request's thread." : "That could not be sent just now.", !sent);
+  draw();
 }
 
 /** One pull request of a managed repository. `wrote` is the repository as a worker mistyped it in its report. */
