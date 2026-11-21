@@ -96,6 +96,16 @@ test("the chat links to it, the job's page shows it with the note, and the app's
   assert.deepEqual(found.reports.map((r) => r.id), [w.fromUpload.id]);
   assert.deepEqual(appSearch(w.source, chat, "SECRET").reports, [], "nothing withheld for another reason is found");
   const js = fs.readFileSync("public/app/app.js", "utf8");
-  assert.match(js, /detail\.outputPrivate === "upload" \? h\("p", \{ class: "muted report-private" \}, "Made from a file you uploaded, so it is shown only here in the app: it has no report link and is not copied to the outputs repository\."\) : null,/);
+  assert.match(js, /detail\.outputPrivate === "upload" \? h\("p", \{ class: "muted report-private" \}, "Made from a file you uploaded, so it is shown only when you are signed in, here in the app and on the reports page\. It has no public report link and is not copied to the outputs repository\."\) : null,/);
   assert.equal(appSpace(w.source, chat, "nowhere"), undefined);
+});
+
+test("the signed-in reports page lists and serves it, marked private", async () => {
+  const w = world();
+  const { appReportEntries, renderReportsIndex } = await import("../src/reports.js");
+  const entries = appReportEntries(w.store);
+  assert.ok(entries.some((e) => e.id === w.fromUpload.id && e.private === "upload"));
+  assert.ok(entries.some((e) => e.id === w.plain.id && !e.private));
+  for (const j of [w.mail, w.cv, w.doc]) assert.ok(!entries.some((e) => e.id === j.id), "assistant, CV and private-doc outputs stay out");
+  assert.match(renderReportsIndex(entries, "tok"), /from your upload/);
 });

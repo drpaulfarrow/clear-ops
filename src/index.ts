@@ -47,7 +47,7 @@ import { VoiceBridge } from "./voice-bridge.js";
 import { BOARD_PATH, boardData, boardToken, boardTokenValid, refusedPage, renderBoard } from "./jobs-board.js";
 import { PASSWORD_PATH, SIGN_IN_PATH, SIGN_OUT_PATH, noPasswordPage, passwordPage, passwordSavedPage, signIn as pageSignIn, signInPage, SignInError } from "./sign-in.js";
 import type { SignIn } from "./sign-in.js";
-import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, reportEntries, reportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
+import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex, appReportEntries, appReportFor, reportsRefusedPage, reportsTokenValid } from "./reports.js";
 import { beatFor } from "./beats.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
@@ -711,8 +711,9 @@ export function buildApp(given: AppDeps) {
    * The reports view: every saved job output as a page Paul can read on his phone, at a stable
    * address. GET routes behind the same long-lived token /reports prints in chat, and nothing
    * else: no model call, no form and no write of any kind. Which outputs exist is decided by the same
-   * rules as the copy in the private outputs repository (src/output-folders.ts), so an assistant, CV
-   * or upload-derived output is not here either. The Markdown is rendered by src/reports.ts, which
+   * rules as the copy in the private outputs repository (src/output-folders.ts), so an assistant or CV
+   * output is not here. An output made from Paul's upload is listed and served here too, marked private,
+   * because every route under this path is behind his sign-in as well as the token (`appReportEntries`). The Markdown is rendered by src/reports.ts, which
    * escapes everything, and a saved .html file beside an output is served under a policy that allows
    * no script at all.
    */
@@ -725,11 +726,11 @@ export function buildApp(given: AppDeps) {
     reportHeaders(res, PAGE_CSP);
     const token = typeof req.query.t === "string" ? req.query.t : "";
     if (!reportsTokenValid(deps.store, token)) return res.status(404).type("html").send(reportsRefusedPage());
-    res.type("html").send(renderReportsIndex(reportEntries(deps.store), token));
+    res.type("html").send(renderReportsIndex(appReportEntries(deps.store), token));
   });
   app.get(`${REPORTS_PATH}/:id`, (req, res) => {
     const token = typeof req.query.t === "string" ? req.query.t : "";
-    const report = reportsTokenValid(deps.store, token) ? reportFor(deps.store, String(req.params.id ?? "")) : undefined;
+    const report = reportsTokenValid(deps.store, token) ? appReportFor(deps.store, String(req.params.id ?? "")) : undefined;
     if (!report) {
       reportHeaders(res, PAGE_CSP);
       return res.status(404).type("html").send(reportsRefusedPage());
