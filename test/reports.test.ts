@@ -217,15 +217,17 @@ test("the index lists saved outputs newest first, with title, kind, London date 
   assert.match(html, /href="\/reports\/[A-Za-z0-9_-]+\?t=token"/);
 });
 
-test("the assistant, CV and upload-derived outputs, a running job and a job with no output are never served", async () => {
+test("the assistant and CV outputs, a running job and a job with no output are never served; an upload-derived one only as private", async () => {
   const token = reportsToken(store);
-  for (const job of [eaJob, cvJob, uploadJob, noOutputJob, runningJob]) {
+  assert.equal(reportFor(store, uploadJob.id), undefined, "the public rule is unchanged");
+  assert.equal((await get(`${base}${REPORTS_PATH}/${uploadJob.id}?t=${token}`)).status, 200, "the signed-in view serves it");
+  for (const job of [eaJob, cvJob, noOutputJob, runningJob]) {
     assert.equal(reportFor(store, job.id), undefined, `${job.kind} output must not be served`);
     assert.equal((await get(`${base}${REPORTS_PATH}/${job.id}?t=${token}`)).status, 404);
   }
   assert.equal(reportFor(store, "orphan1"), undefined, "an output with no job record cannot be classified");
   const index = await (await get(`${base}${REPORTS_PATH}?t=${token}`)).text();
-  for (const id of [eaJob.id, cvJob.id, uploadJob.id, runningJob.id]) assert.ok(!index.includes(id), `${id} must not be linked`);
+  for (const id of [eaJob.id, cvJob.id, runningJob.id]) assert.ok(!index.includes(id), `${id} must not be linked`);
   assert.ok(!index.includes("orphan1"));
 });
 

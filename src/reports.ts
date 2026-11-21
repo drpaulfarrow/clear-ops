@@ -85,6 +85,8 @@ export interface ReportEntry {
   at: string;
   /** A self-contained .html page was saved beside the Markdown, so that is what the link opens. */
   html: boolean;
+  /** Made from a file Paul uploaded: listed and served only behind the sign-in, never by a bare link. */
+  private?: "upload";
 }
 
 export interface ReportPage {
@@ -188,7 +190,23 @@ export function appReportFor(store: Store, id: string): (ReportPage & { private?
   if (!ID.test(id)) return undefined;
   const job = store.getJob(id);
   const text = job ? fromHisUpload(store, job) : undefined;
-  return job && text !== undefined ? { entry: entryFor(job, false), markdown: text, private: "upload" } : undefined;
+  return job && text !== undefined ? { entry: { ...entryFor(job, false), private: "upload" }, markdown: text, private: "upload" } : undefined;
+}
+
+/**
+ * Every output the signed-in reports page lists, newest first: `reportEntries` plus the ones made from
+ * a file Paul uploaded, marked private. The reports routes sit behind the sign-in gate as well as the
+ * token (src/index.ts), so this is read by the same person who can already `show job <id>` in chat.
+ * It is still not what the outputs repository publisher or any report link outside the gate uses.
+ */
+export function appReportEntries(store: Store): ReportEntry[] {
+  const out: ReportEntry[] = [];
+  for (const job of store.allJobs().filter((j) => j.status === "done").sort(newestFirst)) {
+    if (out.length >= MAX_ENTRIES) break;
+    if (servable(store, job) !== undefined) out.push(entryFor(job, savedHtmlPath(store, job.id) !== undefined));
+    else if (fromHisUpload(store, job) !== undefined) out.push({ ...entryFor(job, false), private: "upload" });
+  }
+  return out;
 }
 
 /** The text of an output the app would show, for the app's own search. */
@@ -469,7 +487,7 @@ export function renderReportsIndex(entries: ReportEntry[], token: string): strin
   const rows = entries
     .map(
       (e) =>
-        `<div class="report"><div class="t"><a href="${reportHref(e.id, token)}">${escapeHtml(e.title)}</a>${e.html ? `<span class="badge">formatted</span>` : ""}</div>` +
+        `<div class="report"><div class="t"><a href="${reportHref(e.id, token)}">${escapeHtml(e.title)}</a>${e.html ? `<span class="badge">formatted</span>` : ""}${e.private ? `<span class="badge">from your upload</span>` : ""}</div>` +
         `<div class="m">${escapeHtml(e.kind)} &middot; ${escapeHtml(e.date)} &middot; <span class="id">${escapeHtml(e.id)}</span></div></div>`,
     )
     .join("");
