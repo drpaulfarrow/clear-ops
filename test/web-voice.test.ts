@@ -121,6 +121,31 @@ test("Cleo answers small talk herself: his words and hers are her own conversati
   assert.deepEqual(w.model.bodies[0]!.messages.slice(1), [{ role: "user", content: "Morning, Cleo." }]);
 });
 
+test("she is shown the board as it stands at each turn, and answers from it herself without asking the chief", async () => {
+  const w = world({ heard: "Are any jobs running right now?", streams: [[words("Nothing is running right now, Paul.")], [words("Still nothing.")], [words("Let me ask.")]] });
+  let reads = 0;
+  w.voice.sees(() => `The board as it stands, read ${++reads}.\nRunning now: nothing.`);
+  const turn = await w.voice.turn(MAIN, AUDIO);
+  assert.deepEqual([turn.said, turn.pending], ["Nothing is running right now, Paul.", undefined], "one answer, and no wait for the chief");
+  assert.deepEqual(w.asked, []);
+  assert.deepEqual(w.said(), [], "nothing was written in his feed");
+  const told = String(w.model.bodies[0]!.messages[0]!.content);
+  assert.ok(told.startsWith(WEB_VOICE_SYSTEM));
+  assert.match(told, /\n\nThe board as it stands, read 1\.\nRunning now: nothing\.\n\nMarlo's written answer to anything you ask him now goes to the feed called "Main"\.$/);
+  // It is read afresh for every turn, never remembered.
+  await w.voice.turn(MAIN, AUDIO);
+  assert.match(String(w.model.bodies[1]!.messages[0]!.content), /read 2\./);
+  assert.doesNotMatch(String(w.model.bodies[1]!.messages[0]!.content), /read 1\./);
+  // A board that cannot be read costs her nothing but the board: the turn is taken as before.
+  w.voice.sees(() => { throw new Error("the store is busy"); });
+  assert.equal((await w.voice.turn(MAIN, AUDIO)).said, "Let me ask.");
+  assert.doesNotMatch(String(w.model.bodies[2]!.messages[0]!.content), /The board as it stands|store is busy/);
+  // She is told what she may answer from it, and what she still cannot see.
+  assert.match(WEB_VOICE_SYSTEM, /When Paul's question is answered by what the board says, answer it yourself straight away/);
+  assert.match(WEB_VOICE_SYSTEM, /Say only what the board says: if it is not there, you do not know it\./);
+  assert.match(WEB_VOICE_SYSTEM, /You cannot see inside a job or a report, and you cannot see his email, calendar, files or repositories\./);
+});
+
 test("when she has to ask the chief she says so at once, and speaks again when he has answered", async () => {
   const space = "web:space:self";
   const w = world({ heard: "What is running?", streams: [[words("Okay, I'll ask Marlo."), asks("What is running?")], [words("I checked with Marlo, and he says two jobs are running. The rest is in the clear-ops feed.")]], chief: "Two jobs are running: **a1** and **b2**.", chiefAfterMs: 30 });

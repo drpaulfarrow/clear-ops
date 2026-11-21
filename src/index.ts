@@ -58,6 +58,7 @@ import { applyLive, LiveSettingError, setLive } from "./live-settings.js";
 import { repoLabel } from "./job-descriptions.js";
 import { createSpace, ownSpaceAddress, removeSpace, SpaceError, spaceNotes, updateSpace } from "./spaces.js";
 import { appCleo, appSearch, feedPlace } from "./app-search.js";
+import { cleoBrief } from "./cleo-brief.js";
 import { WebVoice, WebVoiceError, webVoiceAudio, WEB_VOICE_BODY_LIMIT } from "./web-voice.js";
 import { repoTokens } from "./repo-tokens.js";
 import { jobTitle } from "./titles.js";
@@ -304,6 +305,8 @@ export function buildApp(given: AppDeps) {
   const webVoice = deps.webVoice ?? new WebVoice({ ask: (sender, address, text) => orchestrator.handle(sender, text, { replyTo: address, web: true }), tap, chat });
   // She is told what the feed that is open is called, so she can say where Marlo's written answer is.
   if (webVoice instanceof WebVoice) webVoice.feeds((address) => feedPlace(deps.store, chat, address)?.title ?? "Main");
+  // And she is shown the board as the app shows it, read afresh for each turn, so she answers from it what it answers.
+  if (webVoice instanceof WebVoice) webVoice.sees(() => cleoBrief(appBoard(appSource())));
   const webVoiceOn = deps.webVoiceEnabled ?? voiceEnabled;
   const holdWatcher = new HoldWatcher(deps.store, googleApi, deps.messenger);
   // The board's health block (src/health.ts): one heartbeat a minute and a light probe of everything

@@ -13,7 +13,8 @@ import { WEB_SENDER, type WebChat } from "./web-chat.js";
  * spoken request reaches the chief only through `voiceRequestText`, whose prefix no approval command
  * can match, and the chief answers in the feed that was open, in writing.
  *
- * She speaks twice when she has to ask: straight away, to say she is asking Marlo, and again when he
+ * She is shown the board as it stands when he speaks (src/cleo-brief.ts), and answers from it herself
+ * what it answers. She speaks twice when she has to ask: straight away, to say she is asking Marlo, and again when he
  * has answered, to say what he said and where it is written. The first is the answer to the request
  * that carried his recording; the second waits in memory, briefly, for the page to collect.
  *
@@ -44,9 +45,11 @@ export const WEB_VOICE_SYSTEM = `You are Cleo, the voice of ClearOps, Paul's age
 
 How to speak: plain spoken sentences only. No lists, markdown, headings, links, URLs, emojis, code or symbols. One to three short sentences unless he asks for more. British English. Never use em dashes. Say numbers the way a person would.
 
-Who does what: Marlo is the chief of staff. He runs the workforce (research, writing, engineering, an email and calendar assistant, design and more) and writes his answers in his feeds, which Paul reads in the app. You cannot see Paul's jobs, email, calendar, files or repositories yourself. Small talk and quick general questions you answer yourself.
+Who does what: Marlo is the chief of staff. He runs the workforce (research, writing, engineering, an email and calendar assistant, design and more) and writes his answers in his feeds, which Paul reads in the app. Small talk and quick general questions you answer yourself.
 
-When Paul asks for anything Marlo would know or do (look something up, start or check work, remember something, act), say one short friendly sentence telling him you are going to ask Marlo, in your own words, and in the same turn call ask_clearops with his request in his own words plus any context from the conversation it needs. Do not guess at the answer.
+What you can see: the board as it stands right now, given to you below when it could be read. It says what is running, what is queued, what is waiting for Paul's approval, which pull requests are open, what finished lately, who is on shift and what has been spent today. When Paul's question is answered by what the board says, answer it yourself straight away, in a sentence or three, and do not ask Marlo. Say only what the board says: if it is not there, you do not know it. You cannot see inside a job or a report, and you cannot see his email, calendar, files or repositories.
+
+When Paul asks for anything else Marlo would know or do (what a job found, why something failed, look something up, start, stop or change work, remember something, act), say one short friendly sentence telling him you are going to ask Marlo, in your own words, and in the same turn call ask_clearops with his request in his own words plus any context from the conversation it needs. Do not guess at the answer.
 
 When Marlo's answer comes back, tell Paul what Marlo said in one to three sentences, and make it plain that you checked with Marlo and this is his answer. Vary how you put it. If there is more to it than you have said, tell him the rest is written in Marlo's feed, and name the feed. No links or ids unless he asks.
 
@@ -115,6 +118,7 @@ export class WebVoice {
   private asked: (() => void) | undefined;
   private waiting = false;
   private feed: ((address: string) => string) | undefined;
+  private board: (() => string) | undefined;
 
   constructor(private readonly deps: WebVoiceDeps) {
     this.brain = new VoiceBrain({ ask: deps.ask, tap: deps.tap, system: WEB_VOICE_SYSTEM, holding: false, context: () => this.about, onAsk: () => this.asked?.(), words: { answered: (answer) => `Marlo answered, and his answer in full is written in the feed. He says: ${answer}`, working: "Marlo is still working on it. Tell Paul in one short sentence that Marlo is on it and that his answer will be written in the feed." }, answerWaitMs: deps.answerWaitMs ?? WEB_VOICE_ANSWER_WAIT_MS, ...(deps.fetch ? { fetch: deps.fetch } : {}) });
@@ -123,6 +127,20 @@ export class WebVoice {
   /** How feeds are named to her, so she can say where Marlo's written answer is. */
   feeds(name: (address: string) => string): void {
     this.feed = name;
+  }
+
+  /** What she is shown of the board at the start of each turn (src/cleo-brief.ts), so she can answer from it herself. */
+  sees(board: () => string): void {
+    this.board = board;
+  }
+
+  /** The board as it stands, or nothing when it could not be read: she then asks the chief as before. */
+  private seen(): string {
+    try {
+      return this.board?.().trim() ?? "";
+    } catch {
+      return "";
+    }
   }
 
   private now(): number {
@@ -168,7 +186,8 @@ export class WebVoice {
       await this.deps.chat.spoken(address, "paul", heard);
       const said = [...this.talk(address), { role: "user" as const, content: heard }].slice(-WEB_VOICE_TURNS);
       const remember = (hers: string) => this.talks.set(address, { said: [...said, ...(hers ? [{ role: "assistant" as const, content: hers }] : [])].slice(-WEB_VOICE_TURNS), at: this.now() });
-      this.about = `Marlo's written answer to anything you ask him now goes to the feed called "${this.feed?.(address) ?? "Main"}".`;
+      const board = this.seen();
+      this.about = `${board ? `${board}\n\n` : ""}Marlo's written answer to anything you ask him now goes to the feed called "${this.feed?.(address) ?? "Main"}".`;
       let words = "";
       const asking = new Promise<"asked">(
         (resolve) =>
