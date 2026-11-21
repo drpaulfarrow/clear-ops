@@ -8,6 +8,8 @@ import type { Vault, CardVault } from "./vault.js";
 import { escapeHtml, field, htmlPage, expiredPage } from "./page-style.js";
 import { modelLine } from "./llm.js";
 import { spendLine } from "./spend.js";
+import { applyCatalogueRoles } from "./catalogue.js";
+import { ModelWatch } from "./model-ops.js";
 import { sdkRunner } from "./agents.js";
 import { JobRunner } from "./jobs.js";
 import { Orchestrator } from "./orchestrator.js";
@@ -188,8 +190,11 @@ export function buildApp(given: AppDeps) {
   const chat = given.webChat ?? serviceWebChat;
   const deps: AppDeps = { ...given, messenger: routeWeb(given.messenger, chat) };
   // What Paul changed from the app's Spend page (src/live-settings.ts) is laid over the deploy's own
-  // settings before anything here reads them.
+  // settings before anything here reads them, and the chief's model catalogue (src/catalogue.ts) is
+  // laid over the aliases under it: a model decision recorded in the catalogue is in force without a
+  // redeploy, and Paul's own app setting still wins.
   applyLive(deps.store);
+  applyCatalogueRoles(deps.store);
   // Paul's login vault and the card vault: the service's own singletons, unless a test injects ones with
   // a pinned clock, which is how the one-time links' expiry is exercised through the pages themselves.
   const loginVault = deps.vault ?? vault;
@@ -315,6 +320,12 @@ export function buildApp(given: AppDeps) {
   // tests never open a file or reach the network, and the timers are unref'd.
   const uptime = deps.uptime ?? new UptimeLog({ dir: config.dataDir });
   const probes = deps.probes ?? new HealthProbes(defaultProbes({ githubToken: () => githubAuth.token(), google: { connected: () => google.connected(), profile: () => googleApi.request("gmail", "GET", "profile") } }));
+  // The daily model check (src/model-ops.ts): once a day past its London hour the service reads
+  // OpenRouter's public model list, verifies every model in force and writes a report of offers and
+  // better-value alternatives. It recommends and never changes anything, and it messages Paul only
+  // when it recommends a change or a model failed its check. Started by the entry point, not tests.
+  const modelWatch = new ModelWatch({ store: deps.store, messenger: deps.messenger, to: config.allowedTelegramIds[0] ?? config.allowedDiscordIds[0] ?? config.allowedNumbers[0] });
+  const startModelWatch = () => modelWatch.start();
   // The start is recorded here rather than above, so a process that only builds the app (a test)
   // leaves no mark: a heartbeat file is written by a running service, and by nothing else.
   const startHealth = () => {
@@ -1103,6 +1114,9 @@ export function buildApp(given: AppDeps) {
     const body = (req.body ?? {}) as { key?: unknown; value?: unknown };
     try {
       const text = setLive(deps.store, body.key, body.value);
+      // The catalogue's role tiers step back for a role Paul has just set himself (and step in for
+      // one he has just cleared), the same order start-up applies them in.
+      applyCatalogueRoles(deps.store);
       tell(text);
       res.json({ ok: true, text });
     } catch (err) {
@@ -1211,7 +1225,7 @@ export function buildApp(given: AppDeps) {
     res.json(appSearch(appSource(), chat, req.query.q));
   });
 
-  return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, startHealth, voice };
+  return { app, orchestrator, jobs, scheduler, google, holdWatcher, startEaTimers, startHealth, startModelWatch, voice };
 }
 
 // Entry point when run directly
@@ -1259,7 +1273,7 @@ if (isMain) {
     console.log(imported.created ? `imported offboard run "${OFFBOARD_RUN_ID}" as job ${imported.job.id}` : `offboard run "${OFFBOARD_RUN_ID}" already imported as job ${imported.job.id}`);
     if (imported.created) outputs.publish(imported.job);
   }
-  const { app, orchestrator, jobs, startEaTimers, startHealth, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs, canary: defaultCanary() });
+  const { app, orchestrator, jobs, startEaTimers, startHealth, startModelWatch, voice } = buildApp({ messenger, runner: sdkRunner, store, outputs, canary: defaultCanary() });
   // Fail closed before listening: the chief's ops server must advertise the shape its namespace is
   // pinned with (src/ops-schema.ts). A schema change that forgot its version bump stops the boot here,
   // so the deploy's health check keeps the previous version serving rather than resumed chief sessions
@@ -1269,6 +1283,8 @@ if (isMain) {
   // The board's own timers: one heartbeat a minute and the dependency checks every five. Both are
   // read-only and unref'd, so neither holds the process open nor waits on anything.
   startHealth();
+  // The daily model check: unref'd like the board's timers, and off entirely with MODEL_CHECK=off.
+  startModelWatch();
   app.listen(config.port, () => console.log(`clear-ops listening on :${config.port} (${config.channels.join(", ")})`));
 
   if (config.channels.includes("telegram")) {
