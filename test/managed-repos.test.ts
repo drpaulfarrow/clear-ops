@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+process.env.AUTO_FIX_ROUNDS = "3"; // these tests are about the loop's own mechanics, which run when rounds are set to start on their own; the default is none (test/fix-rounds.test.ts)
 process.env.DAILY_BUDGET_USD = "20"; // the cap is off by default; this test turns it on
 process.env.ENGINEER_SLOTS = "1"; // the queue with one engineer per repository; test/parallel-engineers.test.ts covers two
 process.env.ENGINEER_TOTAL = "100"; // these tests are about per-repository slots; test/restarts covers the machine-wide limit

@@ -29,7 +29,7 @@ import { PR_KINDS, runLimits, workerSpec } from "./agents.js";
 import { failureLabel } from "./failures.js";
 import { boardHealth } from "./health.js";
 import { describeJob, kindDoes, kindName, liveStep, repoLabel } from "./job-descriptions.js";
-import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
+import { lockKey, parseReviewVerdicts, samePr, type JobRunner } from "./jobs.js";
 import { AGENT_NAMES, plainStop, REPORT_POINTER, shortText, stoppedEarly, stoppedEarlyWords } from "./messages.js";
 import { PER_JOB_MODELS, resolveModel, runRoute } from "./llm.js";
 import { londonYmd } from "./london.js";
@@ -894,6 +894,56 @@ export function appChat(source: AppSource, chat: Pick<WebChat, "view"> & Partial
     chats: (chat.ownChats?.() ?? []).map((c) => ({ id: c.id, title: c.title, count: c.count, lastAt: c.lastAt, ...(c.saidAt ? { saidAt: c.saidAt } : {}) })),
     ...(chat.mainSaidAt?.() ? { mainSaidAt: chat.mainSaidAt() } : {}),
   };
+}
+
+/* ---------- A pull request: what the maintainer said of it, and whether a fix is under way ---------- */
+
+/** How many of the newest finished reviews are looked through for a verdict on one pull request. */
+export const APP_PULL_REVIEWS = 40;
+
+export interface AppPullWatch {
+  /**
+   * The maintainer's latest verdict on this pull request that is not "merged": it asked for changes,
+   * or left it for Paul. So the page says so above the Merge button, where on 21 Nov 2026 it said
+   * nothing and two pull requests were merged minutes after changes were asked for.
+   */
+  review?: { verdict: "changes_requested" | "needs_founder"; by: string; detail?: string; job: string; at: string };
+  /** A fix round on this pull request that is queued or running now. Merging takes the version before it. */
+  fixing?: { by: string; job: string; round: number; running: boolean };
+}
+
+/**
+ * What the service's own records say of one pull request, beside what GitHub says of it. Read-only.
+ * A review covers the pull request it was started for and any other open one it looked at, so every
+ * recent review's verdict lines are read, and a line counts when it names this pull request: by its
+ * full address in this repository, or by number in a review that ran in this repository.
+ */
+export function appPullWatch(source: AppSource, pull: { repo: string; repository: string; number: number }): AppPullWatch {
+  const here = (j: Job) => (lockKey(j) ?? j.target ?? "product") === pull.repo;
+  const names = (ref: string, j: Job): boolean => {
+    const full = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/.exec(ref);
+    if (full) return full[1]!.toLowerCase() === pull.repository.toLowerCase() && Number(full[2]) === pull.number;
+    return here(j) && samePr(ref, `#${pull.number}`);
+  };
+  const out: AppPullWatch = {};
+  const reviews = source.store
+    .allJobs()
+    .filter((j) => j.kind === "maintain" && j.status === "done" && j.finishedAt)
+    .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))
+    .slice(0, APP_PULL_REVIEWS);
+  for (const j of reviews) {
+    const verdict = verdictsOf(source.store, j).filter((v) => names(v.pr, j)).at(-1);
+    if (!verdict) continue;
+    // The newest word on it is the one that stands: a later "merged" means there is nothing to warn of.
+    if (verdict.outcome !== "merged") out.review = { verdict: verdict.outcome, by: AGENT_NAMES.maintain, ...(verdict.detail ? { detail: shortText(redact(verdict.detail), 300) } : {}), job: j.id, at: j.finishedAt! };
+    break;
+  }
+  const fix = source.store
+    .allJobs()
+    .filter((j) => j.kind === "engineer" && (j.status === "running" || j.status === "queued") && !!j.fixRound && !!j.pr && names(j.pr, j))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  if (fix) out.fixing = { by: AGENT_NAMES.engineer, job: fix.id, round: fix.fixRound!, running: fix.status === "running" };
+  return out;
 }
 
 /* ---------- One space: Paul's notes for it, and its library ---------- */

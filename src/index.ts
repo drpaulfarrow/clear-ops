@@ -51,7 +51,7 @@ import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex,
 import { beatFor } from "./beats.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
-import { appAgent, appBoard, appSpace, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
+import { appAgent, appBoard, appPullWatch, appSpace, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
 import { mintAppApproval } from "./app-approver.js";
 import { PrStates } from "./pr-state.js";
 import { AppPulls, PullError } from "./app-pulls.js";
@@ -285,7 +285,8 @@ export function buildApp(given: AppDeps) {
   // gates (app-level allowlist, the grant's own scopes, no redirects, bounded reads); nothing else
   // here can read a document.
   const docs = new DocReader({ auth: google, dataDir: config.dataDir, allow: config.googleDocs.allow, ...(deps.googleFetch ? { fetch: deps.googleFetch } : {}) });
-  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, docs, ...(deps.canary ? { canary: deps.canary } : {}) });
+  // Before a fix round or its re-review is started, GitHub is asked whether the pull request is still open (src/pr-state.ts).
+  const jobs = new JobRunner(deps.store, withBridgeSink, deps.runner, toolsFor, { onOutput: deps.outputs ? (j) => deps.outputs?.publish(j) : undefined, purchase, otp, docs, ...(deps.canary ? { canary: deps.canary } : {}), prState: (url) => prStates.fresh(url) });
   const scheduler = new Scheduler(deps.store, jobs);
   // One private uploads store for the whole service: chat attachments and the documents the bridge takes in
   // (src/documents.ts) land in the same place, under the same name rules and the same size limit.
@@ -1060,7 +1061,9 @@ export function buildApp(given: AppDeps) {
   app.get(`${APP_PATH}/api/pulls/:repo/:number`, async (req, res) => {
     appHeaders(res);
     try {
-      res.json(await pulls.view(String(req.params.repo ?? ""), String(req.params.number ?? "")));
+      const view = await pulls.view(String(req.params.repo ?? ""), String(req.params.number ?? ""));
+      // Beside what GitHub says: what the maintainer said of it and whether a fix round is under way, from the service's own records.
+      res.json({ ...view, ...appPullWatch(appSource(), view) });
     } catch (err) {
       res.status(err instanceof PullError ? err.status : 502).json({ error: err instanceof PullError ? err.message : "GitHub could not be asked just now." });
     }
