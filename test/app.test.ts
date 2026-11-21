@@ -2065,6 +2065,26 @@ test("a spoken turn with Cleo is taken only from the signed-in app, for a conver
   }
 });
 
+test("a pull request's description is shown as the Markdown it is written in, and nothing in it can run", async () => {
+  resetPull();
+  // A description is usually Markdown, so the app is also given it rendered by the service's own renderer:
+  // headings, lists, code and links as that, and anything else in it as text that cannot run.
+  pull.pr = { ...pull.pr, body: "## Purpose\n\nThe models were hard-coded in `src/llm.ts`.\n\n- one **bold** point\n- [a link](https://example.org/x) and [a bad one](javascript:alert(1))\n\n<script>alert(1)</script> <img src=x onerror=alert(2)> ghp_abcdefghijklmnopqrstuvwxyz0123456789" };
+  const md = await newPulls().view("self", "12");
+  assert.match(md.bodyHtml!, /<h2[^>]*>Purpose<\/h2>/);
+  assert.match(md.bodyHtml!, /<code>src\/llm\.ts<\/code>/);
+  assert.match(md.bodyHtml!, /<li>one <strong>bold<\/strong> point<\/li>/);
+  assert.match(md.bodyHtml!, /<a href="https:\/\/example\.org\/x" rel="noopener noreferrer">a link<\/a>/);
+  assert.doesNotMatch(md.bodyHtml!, /<script|<img|javascript:|onerror=alert\(2\)>|ghp_/, "nothing in a description can run, and a token in it is redacted before it is rendered");
+  assert.match(md.bodyHtml!, /&#60;script&#62;alert\(1\)&#60;\/script&#62;/, "markup in it is shown as the text it is");
+  assert.doesNotMatch(md.bodyHtml!.replace(/<\/?(h2|p|ul|li|strong|code|a)\b[^>]*>/g, ""), /[<>]/, "the only tags in it are the renderer's own");
+  assert.ok(md.body!.startsWith("## Purpose\n\nThe models"), "the plain text is still sent");
+  pull.pr = { ...pull.pr, body: "" };
+  assert.deepEqual([(await newPulls().view("self", "12")).body, (await newPulls().view("self", "12")).bodyHtml], [undefined, undefined]);
+  const page = fs.readFileSync("public/app/app.js", "utf8");
+  assert.match(page, /v\.bodyHtml \? rendered\(v\.bodyHtml, "report pull-body"\) : h\("p", \{ class: "prose pull-body" \}, v\.body\)/, "shown through the one place that sets rendered text");
+});
+
 test("a pull request that conflicts says so, so the app can offer to have it resolved", async () => {
   resetPull();
   assert.equal((await newPulls().view("self", 12)).conflicts, false);

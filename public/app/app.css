@@ -279,6 +279,7 @@ a.card:hover{background:var(--raised);color:var(--text)}
 /* ---------- A job's pull request ---------- */
 .pull-title{font-family:var(--display);font-weight:700;font-size:17px;overflow-wrap:anywhere}
 .pull-body{max-height:260px;overflow:auto}
+.pull-body>:first-child{margin-top:0}.pull-body>:last-child{margin-bottom:0}
 .add{color:var(--ok-text)}
 .del{color:var(--bad-text)}
 .file{border:1px solid var(--line);border-radius:12px;background:var(--bg);min-width:0}
