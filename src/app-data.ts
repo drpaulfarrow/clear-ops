@@ -14,8 +14,10 @@
  *    (`usual`), and shown only as an estimate.
  *  - A trace is served exactly as src/trace.ts stored it: already clipped and redacted, and names and
  *    outcomes only for the kinds that work over Paul's mail, calendar, CV and zones.
- *  - A saved output is served only where src/reports.ts would serve it (`reportFor`), so an assistant,
- *    CV or upload-derived output is not here either.
+ *  - A saved output is served where src/reports.ts would serve it, so an assistant's or a CV output is
+ *    not here either. The one thing more is a report made from a file Paul uploaded (`appReportFor`):
+ *    the app is behind his own sign-in and its chat already prints it on `show job`, so it is shown
+ *    here, marked private, and still has no report link and no copy in the outputs repository.
  *  - Something waiting on Paul is shown as the gate itself would show it in chat (`preview`), because
  *    since slice 3 the app is a place he approves it (src/app-approver.ts). Each item carries a
  *    fingerprint of that exact text, and the approval route refuses a tap whose fingerprint is not the
@@ -31,7 +33,7 @@ import { lockKey, parseReviewVerdicts, type JobRunner } from "./jobs.js";
 import { AGENT_NAMES, plainStop, REPORT_POINTER, shortText, stoppedEarly, stoppedEarlyWords } from "./messages.js";
 import { PER_JOB_MODELS, resolveModel, runRoute } from "./llm.js";
 import { londonYmd } from "./london.js";
-import { renderMarkdown, reportFor } from "./reports.js";
+import { appReportFor, renderMarkdown } from "./reports.js";
 import { redact, repoRegistry } from "./repos.js";
 import { spendDisplay } from "./spend.js";
 import { jobTitle } from "./titles.js";
@@ -266,6 +268,8 @@ export interface AppJobDetail {
   trace: { lines: TraceLine[]; total: number; figures: TraceFigures };
   /** The saved output as HTML rendered by src/reports.ts, which escapes everything. */
   outputHtml?: string;
+  /** The report was made from a file Paul uploaded: it is shown in the app only, and has no report link and no copy in the outputs repository. */
+  outputPrivate?: "upload";
   /** Set when the job is recorded as done but wrote no report: why, and what to do, in place of `outputHtml`. */
   noReport?: string;
   /** What the app's buttons may do to it right now. */
@@ -831,7 +835,7 @@ export const APP_CHAT_JOBS = 40;
 
 /** One of the app's conversations with the chief (the main one, or a thread), and the jobs it started. */
 /**
- * Whether a finished job has a report the app would show (`reportFor`: saved, and not withheld),
+ * Whether a finished job has a report the app would show (`appReportFor`: saved, and not withheld from the app),
  * remembered per job. A chat is read every few seconds and a finished job's output does not change, so
  * the file is read once per finish and not on every read of the chat. Nothing is written anywhere.
  */
@@ -844,7 +848,7 @@ function hasReport(store: Store, job: Job): boolean {
   const kept = known.get(job.id);
   if (kept?.at === at) return kept.has;
   if (known.size > 500) known.clear();
-  const has = reportFor(store, job.id) !== undefined;
+  const has = appReportFor(store, job.id) !== undefined;
   known.set(job.id, { at, has });
   return has;
 }
@@ -909,7 +913,7 @@ export interface AppSpacePage {
   /** His own notes for the space, as he wrote them. */
   notes?: { text: string; updatedAt: string };
   notesMax: number;
-  /** The reports of the space's jobs, newest first: only ones the app would show (`reportFor`). */
+  /** The reports of the space's jobs, newest first: only ones the app would show (`appReportFor`). */
   reports: Array<{ id: string; title: string; kind: string; who: string; at: string }>;
   moreReports: boolean;
   /** The names of the files he sent in the space's chat, newest first. The files themselves are not served. */
@@ -1132,7 +1136,7 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
   const described = describeJob(job, { hasPullRequest: !!app.pr }, app.repository);
   const limits = runLimits(job.kind, job.depth);
   const lines = readTrace(job.id, source.traceDir);
-  const report = reportFor(source.store, job.id);
+  const report = appReportFor(source.store, job.id);
   const related: AppJobDetail["related"] = [];
   const add = (j: Job | undefined, relation: string) => j && related.push({ id: j.id, title: jobTitle(j), kind: j.kind, status: j.status, relation });
   if (job.reviewOf) add(source.store.getJob(job.reviewOf), "reviews");
@@ -1148,7 +1152,7 @@ export function appJob(source: AppSource, id: string): AppJobDetail | undefined 
     limits: { maxTurns: limits.maxTurns, ...(limits.realBudgetUsd !== undefined ? { budgetUsd: limits.realBudgetUsd } : {}) },
     trace: { lines: lines.slice(-APP_TRACE_LINES), total: lines.length, figures: traceFigures(lines) },
     // The stop line is not a report: the page says the job wrote none, in plain words, in its place.
-    ...(wroteNothing(job) ? { noReport: `${stoppedEarlyWords(wroteNothing(job)!)} There is nothing to read. Run it again to get one: a job that runs out of turns now writes up what it has.` } : report?.markdown !== undefined ? { outputHtml: renderMarkdown(report.markdown) } : {}),
+    ...(wroteNothing(job) ? { noReport: `${stoppedEarlyWords(wroteNothing(job)!)} There is nothing to read. Run it again to get one: a job that runs out of turns now writes up what it has.` } : report?.markdown !== undefined ? { outputHtml: renderMarkdown(report.markdown), ...(report.private ? { outputPrivate: report.private } : {}) } : {}),
     actions: actionsOf(job, !!pull, ev.estimates),
     ...(pull ? { pull: { repo: pull.repo, number: pull.number, ...(pull.wrote ? { wrote: pull.wrote } : {}) } } : {}),
     related,

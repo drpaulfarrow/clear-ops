@@ -152,7 +152,9 @@ test("searching writes nothing, reaches no model, and the page shows what it fou
   const code = fs.readFileSync("src/app-search.ts", "utf8");
   assert.doesNotMatch(code, /\.(updateJob|createJob|writeOutput|setSpaces|setSetting|save|send|inbound|open|close|forget)\(/, "it only reads");
   assert.doesNotMatch(code, /orchestrator|runner|readFileSync|readOutput\(|fetch\(/, "a report is read through the reports module's own rule and nothing else");
-  assert.match(code, /const text = reportText\(store, job\.id\)\?\.slice\(0, SEARCH_REPORT_CHARS\);/);
+  // What the search reads of a report is what the app itself would show (`appReportText`): the reports
+  // view's own, and one made from a file Paul uploaded (test/upload-report.test.ts).
+  assert.match(code, /const text = appReportText\(store, job\.id\)\?\.slice\(0, SEARCH_REPORT_CHARS\);/);
   const index = fs.readFileSync("src/index.ts", "utf8");
   assert.match(index, /app\.get\(`\$\{APP_PATH\}\/api\/search`, \(req, res\) => \{\s*appHeaders\(res\);\s*res\.json\(appSearch\(appSource\(\), chat, req\.query\.q\)\);\s*\}\);/);
   const js = fs.readFileSync("public/app/app.js", "utf8");

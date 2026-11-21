@@ -1824,6 +1824,8 @@ function jobPage() {
       "section",
       { class: `pane report-pane${open ? " open" : ""}`, id: "report", "aria-label": "Report" },
       h("div", { class: "pane-head" }, h("h2", {}, "Report"), h("button", { class: "btn quiet", type: "button", "aria-expanded": String(open), onclick: () => { state.reportOpen = open ? undefined : job.id; draw(); } }, open ? "Show less" : "Read it all")),
+      // Made from a file he uploaded: it is his to read here, and it is said that it goes nowhere else.
+      detail.outputPrivate === "upload" ? h("p", { class: "muted report-private" }, "Made from a file you uploaded, so it is shown only here in the app: it has no report link and is not copied to the outputs repository.") : null,
       h("div", { class: "report-body" }, rendered(detail.outputHtml, "report")),
     );
   }
