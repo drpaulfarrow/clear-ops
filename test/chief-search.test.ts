@@ -16,6 +16,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-chief-se
 const { config } = await import("../src/config.js");
 const search = await import("../src/search.js");
 const { chiefSearchRule, EVIDENCE_RULE } = await import("../src/retrieval.js");
+const { provider } = await import("../src/llm.js");
 const { Store } = await import("../src/store.js");
 const { JobRunner } = await import("../src/jobs.js");
 const { Orchestrator } = await import("../src/orchestrator.js");
@@ -69,7 +70,7 @@ test("the chief's search tools run at most the budget for one message and refuse
 });
 
 test("the chief is told the brief's rules as its own: when to search, when not, which engine, and never to invent", () => {
-  const rule = chiefSearchRule(true, 3);
+  const rule = chiefSearchRule("service", 3);
   for (const part of [
     /^Searching the web is your call: nothing is searched for you before you answer\./,
     /web_search \(Brave\), for news, prices, releases, versions and official pages, and exa_search \(Exa\), for finding companies, people, papers and lookalikes/,
@@ -83,9 +84,17 @@ test("the chief is told the brief's rules as its own: when to search, when not, 
   ])
     assert.match(rule, part);
   assert.doesNotMatch(rule, /the service decides before you answer|—/, "it is not told a search was run for it");
-  assert.match(chiefSearchRule(true, 1), /At most 1 search is run for one message/);
-  // With no search engine it is told so, and still held to saying what is memory.
-  const none = chiefSearchRule(false, 3);
+  assert.match(chiefSearchRule("service", 1), /At most 1 search is run for one message/);
+  // A chief run straight on Anthropic with no engine of the service's own has that API's WebSearch and
+  // nothing else: the same rules, and no claim that a tool will refuse, because nothing counts it.
+  const builtin = chiefSearchRule("builtin", 3);
+  assert.match(builtin, /^Searching the web is your call: nothing is searched for you before you answer\. You have WebSearch\./);
+  assert.match(builtin, /when you are unsure, search\./);
+  assert.match(builtin, /Keep to 3 searches for one message\./);
+  assert.doesNotMatch(builtin, /web_search|exa_search|the tools refuse more/);
+  assert.match(builtin, /never state a figure, quote or date that no source gave you\.$/);
+  // With no search at all it is told so, and still held to saying what is memory.
+  const none = chiefSearchRule("none", 3);
   assert.match(none, /^Searching the web: no search engine is configured, so you cannot search, and nothing is searched for you\./);
   assert.match(none, /say plainly that it comes from memory and may be out of date/);
   assert.doesNotMatch(none, /web_search|exa_search/);
@@ -116,10 +125,16 @@ test("the chief's turn makes no decision call and is handed no evidence: it gets
     assert.equal(seen.length, 1, "one run: the chief's own");
     const run = seen[0]!;
     assert.equal(run.prompt, "What is the latest Prebid.js release?", "his message arrives as he wrote it, with nothing put in front");
-    assert.ok(run.systemPrompt!.endsWith(chiefSearchRule(true, config.retrieval.maxSearches)));
+    assert.ok(run.systemPrompt!.endsWith(chiefSearchRule("service", config.retrieval.maxSearches)));
     assert.doesNotMatch(run.systemPrompt!, /the service decides before you answer/);
     assert.ok(Object.keys(run.mcpServers ?? {}).includes("search"), "it has the search tools");
     assert.ok(run.allowedTools!.includes("mcp__search__*"));
+    // This test runs with no OpenRouter key, so it is a chief run straight on Anthropic, where the
+    // API's own WebSearch exists and nothing counts it. It is not offered beside the capped tools, so
+    // there is one budget and no way round it.
+    assert.notEqual(provider(), "openrouter");
+    assert.ok(!run.allowedTools!.includes("WebSearch") && !run.tools!.includes("WebSearch"), "no uncapped search tool beside the capped ones");
+    assert.deepEqual(run.tools, ["WebFetch", "Read", "Glob", "Grep"]);
     assert.deepEqual(store.recentRetrievals(), [], "no decision is recorded for a chief turn any more");
     assert.ok(!m.sent.some((s) => /Checking whether this needs a search/.test(s.text)), "and nothing says it is checking");
     assert.equal(m.sent.at(-1)!.text, "Prebid 11.50 came out this week (https://example.org/prebid).");
@@ -128,7 +143,10 @@ test("the chief's turn makes no decision call and is handed no evidence: it gets
     config.search.exaKey = "";
     await orch.handle(FOUNDER, "And the one before?");
     assert.ok(!Object.keys(seen[1]!.mcpServers ?? {}).includes("search"));
-    assert.ok(seen[1]!.systemPrompt!.endsWith(chiefSearchRule(false, config.retrieval.maxSearches)));
+    // Then, straight on Anthropic, the API's own WebSearch is the one search it has, as it always was.
+    assert.deepEqual(seen[1]!.tools, ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]);
+    assert.ok(seen[1]!.allowedTools!.includes("WebSearch") && !seen[1]!.allowedTools!.includes("mcp__search__*"));
+    assert.ok(seen[1]!.systemPrompt!.endsWith(chiefSearchRule("builtin", config.retrieval.maxSearches)));
   } finally {
     globalThis.fetch = outside;
     config.search.braveKey = "";
