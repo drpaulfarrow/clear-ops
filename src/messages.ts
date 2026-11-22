@@ -59,7 +59,7 @@ export const MAX_SENTENCES = 4;
 export const MAX_MESSAGE_CHARS = 600;
 
 /** Lines the job runner reads from a report. They belong in the saved output, never in chat. */
-const MACHINE_LINE = /^[ \t>*`_-]*(?:REVIEW[ \t]+\S+?[ \t]*:|DESIGN[ \t]*:|IMAGE[ \t]*:|VERDICT[ \t]*:|GOAL[ \t]*:[ \t]*(?:not met|needs Paul|met)\b)/i;
+const MACHINE_LINE = /^[ \t>*`_-]*(?:REVIEW[ \t]+\S+?[ \t]*:|CARRY[ \t]+\S+?[ \t]*:|DESIGN[ \t]*:|IMAGE[ \t]*:|VERDICT[ \t]*:|GOAL[ \t]*:[ \t]*(?:not met|needs Paul|met)\b)/i;
 
 /** What a worker's own report says of how its job turned out. A claim to be shown as one, never evidence. */
 export interface ClaimedOutcome {
