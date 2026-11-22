@@ -54,7 +54,7 @@ test("product and self stay the defaults, and Paul's site is managed out of the 
 
 test("app-doubleshift and Paul's private test copy are managed out of the box, each as its own repository", () => {
   const list = repoRegistry.list();
-  assert.deepEqual(list.map((r) => r.alias), ["product", "self", "site", "doubleshift", "doubleshift-test"]);
+  assert.deepEqual(list.map((r) => r.alias), ["product", "self", "site", "doubleshift", "doubleshift-test", "lusana"]);
   const ds = repoRegistry.find("doubleshift")!;
   assert.equal(ds.slug, "shftd2-pre/app-doubleshift");
   assert.equal(ds.dir, path.join(config.reposDir, "doubleshift"), "its own working copy under the data volume");
@@ -74,6 +74,7 @@ test("app-doubleshift and Paul's private test copy are managed out of the box, e
       { alias: "site", slug: "drpaulfarrow/drpaulfarrowcom", names: ["drpaulfarrow.com"] },
       { alias: "doubleshift", slug: "shftd2-pre/app-doubleshift", names: [] },
       { alias: "doubleshift-test", slug: "drpaulfarrow/doubleshift-test", names: [] },
+      { alias: "lusana", slug: "drpaulfarrow/lusana", names: [] },
     ],
     "the default list parses as the setting does",
   );
@@ -120,6 +121,22 @@ test("the test copy parses like any other entry and a malformed one is still ign
   assert.equal(r.dir("doubleshift-test"), path.join("/tmp/r", "doubleshift-test"), "cloned under its own folder");
   assert.equal(r.find("drpaulfarrow/doubleshift-test")?.alias, "doubleshift-test");
   assert.ok(r.aliases().includes("doubleshift-test"));
+});
+
+test("the Lusana repository is managed out of the box: found by alias, owner/name or bare name, with its own checkout", () => {
+  const list = repoRegistry.list();
+  const lu = repoRegistry.find("lusana")!;
+  assert.equal(lu.slug, "drpaulfarrow/lusana");
+  assert.equal(lu.dir, path.join(config.reposDir, "lusana"), "its own working copy under the data volume");
+  assert.ok(lu.dir.startsWith(config.dataDir));
+  assert.equal(lu.created, undefined, "configured, not created by the workforce");
+  for (const n of ["lusana", "LUSANA", "drpaulfarrow/lusana", "https://github.com/drpaulfarrow/lusana", "https://github.com/drpaulfarrow/lusana.git"]) {
+    assert.equal(repoRegistry.find(n)?.alias, "lusana", n);
+  }
+  assert.ok(list.some((r) => r.alias === "lusana"));
+  assert.match(repoRegistry.describe(), /lusana \(drpaulfarrow\/lusana\)/);
+  const r = new RepoRegistry({ extra: "lusana=drpaulfarrow/lusana", reposDir: "/tmp/r", product: undefined });
+  assert.equal(r.dir("lusana"), path.join("/tmp/r", "lusana"), "cloned under its own folder");
 });
 
 test("created repositories are persisted in the store and managed again after a restart", () => {
@@ -380,7 +397,7 @@ test("the chief's prompt lists the repositories, how to choose one and how a new
   const c = chief([], async () => ({ text: "x" }));
   await c.orch.handle(FOUNDER, "hello");
   const p = c.prompt();
-  assert.match(p, /Repositories\. The workforce manages these: product \(acme\/clear-exchange\), self \(drpaulfarrow\/clear-ops\), site \(drpaulfarrow\/drpaulfarrowcom\), doubleshift \(shftd2-pre\/app-doubleshift\), doubleshift-test \(drpaulfarrow\/doubleshift-test\)/);
+  assert.match(p, /Repositories\. The workforce manages these: product \(acme\/clear-exchange\), self \(drpaulfarrow\/clear-ops\), site \(drpaulfarrow\/drpaulfarrowcom\), doubleshift \(shftd2-pre\/app-doubleshift\), doubleshift-test \(drpaulfarrow\/doubleshift-test\), lusana \(drpaulfarrow\/lusana\)/);
   assert.match(p, /"doubleshift" is app-doubleshift/);
   assert.match(p, /MANAGED_REPOS/);
   assert.match(p, /only when Paul asks for one in this conversation/);
