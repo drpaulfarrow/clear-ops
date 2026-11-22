@@ -78,6 +78,12 @@ export interface Job {
   pr?: string;
   /** The finish line the chief set for an engineer job before it started; also the last section of its brief. */
   doneWhen?: string;
+  /**
+   * The findings from earlier reviews this engineer job was handed to fix in its own pull request
+   * (src/carry.ts). Set by the service when the job starts running, and kept on the job after the
+   * held findings themselves are dropped, so the job still says what it was given.
+   */
+  carried?: Array<{ pr: string; text: string }>;
   /** Engineer jobs started automatically to address a review: 1 for the first round, and so on. */
   fixRound?: number;
   /** Maintainer jobs started automatically after an engineering job: the id of that job. */
@@ -430,6 +436,11 @@ export interface SignupAction {
 
 /** Runtime settings Paul sets from chat. */
 export interface Settings {
+  /**
+   * Review findings the maintainer carried instead of blocking a merge on, waiting for the next
+   * engineer job on their repository (src/carry.ts). Written only by the job runner.
+   */
+  carried?: import("./carry.js").CarriedFinding[];
   /** Sites Paul unlocked with "act as me on <site>" (src/site-policy.ts): only his own chat message sets this. */
   actAsMe?: string[];
   /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */

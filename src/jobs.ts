@@ -32,6 +32,8 @@ import { RealCostMeter, usdAmount, type JobCostWatch, type RealCost } from "./re
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
+import { CARRY_MAX_PER_REPO, CARRY_PER_JOB, carriedFree, carriedSection, parseCarryLines, type CarriedFinding } from "./carry.js";
+import { randomBytes } from "node:crypto";
 import { JobTrace, tracesDir, type RawTraceEvent } from "./trace.js";
 import { removeSnapshot, snapshotRepos } from "./bridge-snapshot.js";
 import { jobCredentialNote } from "./bootstrap.js";
@@ -1113,6 +1115,10 @@ export class JobRunner {
         ? `\n\nThis job was interrupted by a service restart and is being resumed (attempt ${job.resumed + 1}). Work from a previous attempt may exist: check the working directory, git status and branches before doing anything, keep what is good, and continue from there rather than starting again.`
         : "";
       const carryOn = job.savedWork ? `\n\n${savedWorkNote(job.savedWork)}` : "";
+      // Findings earlier reviews carried instead of blocking on (src/carry.ts): this engineer fixes
+      // them in the pull request it was going to open anyway. Taken when the job starts running, not
+      // when it was queued, so it gets what the review before it has only just written down.
+      const carried = carriedSection(this.takeCarried(job));
       // The private source bound to this job, if any (src/doc-reader.ts): its text is handed to
       // this job's worker alone, fenced as untrusted data with its provenance, after the snapshot
       // is verified against the fingerprint recorded when it was read. A job marked as carrying a
@@ -1187,7 +1193,7 @@ export class JobRunner {
       }
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       const opts = {
-        prompt: `${evidencePrefix}${job.brief}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${beatNote}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
+        prompt: `${evidencePrefix}${job.brief}${carried}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${beatNote}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
         cwd: bridged && snapshot ? snapshot : spec.cwd,
@@ -1355,7 +1361,7 @@ export class JobRunner {
           const which = pr ? `the pull request ${pr}, which the engineer just ${job.fixRound ? "updated to address your last review" : "opened for this task"}` : "the pull request just opened by the engineer for this task";
           const m = this.start(
             "maintain",
-            `Review ${which}, and any other open pull requests:\n\n${job.brief}\n\nEngineer's report:\n${report}`,
+            `Review ${which}, and any other open pull requests:\n\n${job.brief}${carriedSection(this.carriedFor(this.store.getJob(id) ?? job, pr))}\n\nEngineer's report:\n${report}`,
             job.requestedBy,
             job.target,
             job.replyTo,
@@ -1815,13 +1821,19 @@ export class JobRunner {
         ? { chained: "", escalation: `Design loop ${this.loopRef(reviewed.designLoop)} is paused: the maintainer gave no verdict on ${pr ?? "the round's pull request"}. Tell me to re-review it, or to carry on the loop.` }
         : { chained: "" };
     }
-    if (verdict.outcome === "merged") return reviewed.designLoop ? this.nextDesignRound(reviewed, verdict.pr) : { chained: "" };
-    const url = verdict.pr;
     const target = lockKey(reviewed) ?? reviewed.target ?? "product";
+    // A review that did not ask for changes has settled its pull request: what that job was handed to
+    // fix is dropped (the maintainer wrote a new CARRY line for anything still wrong), and what this
+    // review carried is held for the next engineer job on the repository. A review that did ask for
+    // changes holds nothing: the fix round reads the whole review, its CARRY lines included.
+    const held = verdict.outcome === "changes_requested" ? 0 : this.settleCarried(target, verdict.pr, review, text);
+    const heldNote = held ? `${held === 1 ? "One smaller finding from the review is" : `${held} smaller findings from the review are`} held for the next engineer job on this repository, to be fixed in its pull request.` : "";
+    if (verdict.outcome === "merged") return reviewed.designLoop ? this.nextDesignRound(reviewed, verdict.pr) : { chained: heldNote };
+    const url = verdict.pr;
     if (verdict.outcome === "needs_founder") {
       this.pauseLoop(reviewed.designLoop);
       return {
-        chained: "",
+        chained: heldNote,
         escalation: `Action needed from you on ${url}: ${verdict.detail ? shortText(verdict.detail, 400) : `the maintainer says only you can unblock it (show job ${review.id} has why).`}\nOnce that is done, tell me and I will have it re-reviewed.`,
       };
     }
@@ -1870,13 +1882,63 @@ export class JobRunner {
     return { chained: `Changes requested on ${url}. Started ${jobLabel(fix)} to fix them (round ${round} of ${MAX_FIX_ROUNDS}${this.queuedText(fix)}); it is re-reviewed automatically.` };
   }
 
+  /**
+   * Hands an engineer job the held findings for its repository (src/carry.ts), oldest first and a few
+   * at most, and records on each that this job has it. A fix round, a review-only job (no maintainer
+   * review would ever settle them) and a resumed run of a job that already has its own are left as
+   * they are. Returns what the job carries.
+   */
+  private takeCarried(job: Job): Array<{ pr: string; text: string }> | undefined {
+    if (job.carried) return job.carried;
+    if (job.kind !== "engineer" || job.fixRound || job.reviewOnly) return undefined;
+    const target = lockKey(job) ?? job.target ?? "product";
+    const all = this.store.settings().carried ?? [];
+    const mine = all.filter((c) => c.target === target && carriedFree(c, (id) => this.store.getJob(id))).slice(0, CARRY_PER_JOB);
+    if (!mine.length) return undefined;
+    const ids = new Set(mine.map((c) => c.id));
+    this.store.setSetting("carried", all.map((c) => (ids.has(c.id) ? { ...c, takenBy: job.id } : c)));
+    const carried = mine.map((c) => ({ pr: c.pr, text: c.text }));
+    this.store.updateJob(job.id, { carried });
+    return carried;
+  }
+
+  /** What the engineer job behind a pull request was handed to fix: its own, or for a fix round, the job that opened the pull request. */
+  private carriedFor(job: Job, pr: string | undefined): Array<{ pr: string; text: string }> | undefined {
+    if (job.carried?.length) return job.carried;
+    if (!pr) return undefined;
+    return this.store.allJobs().find((j) => j.kind === "engineer" && !!j.carried?.length && !!j.pr && samePr(j.pr, pr))?.carried;
+  }
+
+  /**
+   * Settles the held findings when a pull request's review did not ask for changes: drops the ones
+   * the job behind that pull request was handed, and holds this review's own CARRY lines for the
+   * repository. Returns how many it now holds from this review.
+   */
+  private settleCarried(target: JobTarget, pr: string, review: Job, text: string): number {
+    const before = this.store.settings().carried ?? [];
+    const kept = before.filter((c) => {
+      const taker = c.takenBy ? this.store.getJob(c.takenBy) : undefined;
+      return !(c.target === target && taker?.pr && samePr(taker.pr, pr));
+    });
+    const now = new Date().toISOString();
+    const fresh: CarriedFinding[] = parseCarryLines(text)
+      .filter((c) => samePr(c.pr, pr))
+      .map((c) => ({ id: randomBytes(4).toString("hex").slice(0, 6), target, pr: c.pr, text: c.text, at: now, review: review.id }));
+    if (!fresh.length && kept.length === before.length) return 0;
+    const others = kept.filter((c) => c.target !== target);
+    const here = [...kept.filter((c) => c.target === target), ...fresh].slice(-CARRY_MAX_PER_REPO);
+    const next = [...others, ...here];
+    this.store.setSetting("carried", next.length ? next : undefined);
+    return fresh.length;
+  }
+
   /** Starts one fix round on a reviewed pull request: an engineer job on the same branch, carrying the pull request and its round. */
   private startFix(reviewed: Job, review: Job, text: string, url: string, round: number, earlier: Array<{ id: string; text: string }>, asked?: { by: string; replyTo: string }): Job {
     const target = lockKey(reviewed) ?? reviewed.target ?? "product";
     const which = asked ? `fix round ${round}, asked for by the founder` : `automatic fix round ${round} of ${MAX_FIX_ROUNDS}`;
     return this.start(
       "engineer",
-      `Address the maintainer's review on the existing pull request ${url} (${which}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${originalTask(reviewed.brief)}\n\nMaintainer's review (job ${review.id}):\n${text}${deadEnds(earlier)}`,
+      `Address the maintainer's review on the existing pull request ${url} (${which}). Check out that pull request's branch, bring it up to date with the default branch, fix every blocking issue in the review, and its CARRY lines too so that nothing is left over for a later job, run the tests and typecheck, push to the same branch and reply to each review comment with gh. Read the review itself with gh pr view ${url} --comments. Do not open a new pull request. If a blocker can only be resolved by the founder (a secret, a GitHub or hosting setting, account access, a product decision), do everything else and say so plainly in your report.\n\nOriginal task:\n${originalTask(reviewed.brief)}\n\nMaintainer's review (job ${review.id}):\n${text}${deadEnds(earlier)}`,
       asked?.by ?? reviewed.requestedBy,
       target,
       asked?.replyTo ?? reviewed.replyTo,

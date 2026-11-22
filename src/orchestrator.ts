@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { CARRY_NOTE } from "./carry.js";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { OPS_SCHEMA_VERSION, OPS_SERVER_NAME, OPS_TOOLS, guardOpsSchema } from "./ops-schema.js";
 import { z } from "zod";
@@ -1755,6 +1756,10 @@ export const FIX_ROUND_COMMAND = /^one more fix round on\s+<?(https:\/\/github\.
  * itself (Paul's decision, 21 Nov 2026); with AUTO_FIX_ROUNDS set, that many rounds do, as before.
  */
 export function fixLoopNote(auto: number = config.autoFixRounds): string {
+  return `${fixLoopRule(auto)} ${CARRY_NOTE}`;
+}
+
+function fixLoopRule(auto: number): string {
   if (auto > 0)
     return `The review loop closes itself: when the maintainer requests changes on an engineer's or agent-creator's pull request, an engineer job to address that review on the same pull request starts automatically (queued like any engineering job), and the update is re-reviewed automatically, up to ${auto} fix ${auto === 1 ? "round" : "rounds"} per pull request; after that the review goes to Paul, and a further round is his to ask for with his own message "one more fix round on <the pull request's address>".`;
   return `The maintainer reviews an engineer's or agent-creator's pull request once. When it requests changes, nothing starts by itself: the service tells Paul what the review found, and a fix round starts only on his own message "one more fix round on <the pull request's address>", which the service handles itself (it checks the pull request is still open, starts one engineer job on that same pull request, and that is reviewed once). If he asks for a fix round in other words, give him that exact line with the address to send, and do not start an engineer job for it yourself: a job you start does not carry the pull request, so it would open a new one. A design loop keeps its own automatic rounds.`;

@@ -1,4 +1,5 @@
 import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMessage, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { MERGE_AND_CARRY_RULE } from "./carry.js";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
@@ -712,12 +713,14 @@ Rules: never force-push, never rewrite shared history, never commit secrets or .
 For each open pull request (gh pr list, newest first, or the one named in your brief):
 1. Fetch and check out the branch. Read the description, then the full diff against the default branch.
 2. Run npm run test:changed and npm run build. It runs the whole suite unless every file the branch changed is a documentation file (Markdown, plain text and the like, wherever it lives), in which case it prints what it saw and stops: documentation cannot change a source or test file, and CI has already run the full suite on the pull request, so check that with gh pr checks instead. It never skips silently; say in your report which of the two happened. Confirm CI is green on the pull request (gh pr checks). Red CI means not mergeable. ${BUILD_TEST_DISCIPLINE}
-3. Review for correctness, security (secrets, injection, unsafe shell, auth), tests that actually exercise the change, scope creep, and anything that weakens the invariants in CLAUDE.md. Be specific: file, line, what is wrong, what to do.
+3. Review for correctness, security (secrets, injection, unsafe shell, auth), tests that actually exercise the change, scope creep, and anything that weakens the invariants in CLAUDE.md. Be specific: file, line, what is wrong, what to do. Sort every finding into blocking or carried, by the rule below.
 4. If the only thing in the way is that the branch is behind the default branch and it merges cleanly, update it yourself with gh pr update-branch <number> (a merge, never --rebase), wait for CI to go green, then carry on. Nobody should have to click "Update branch".
-5. If it is mergeable: gh pr merge <number> --merge --delete-branch. If not: gh pr review <number> --request-changes with your comments, and do not merge. Your review is sent to an engineer automatically, who fixes it on the same branch, and you will review it again; so make each blocking comment specific enough to act on without asking.
+5. If nothing blocking remains: gh pr merge <number> --merge --delete-branch, whatever you are carrying. If something blocking remains: gh pr review <number> --request-changes with the blocking comments, and do not merge. A review that requests changes goes to an engineer, who fixes it on the same branch, or to Paul; either way make each blocking comment specific enough to act on without asking.
 6. Switch back to the default branch and pull.
 
 ${CONTRACT_RULE_MAINTAINER}
+
+${MERGE_AND_CARRY_RULE}
 
 ${PR_REPORT_RULE_MAINTAINER}
 
