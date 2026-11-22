@@ -79,6 +79,11 @@ export interface Job {
   /** The finish line the chief set for an engineer job before it started; also the last section of its brief. */
   doneWhen?: string;
   /**
+   * The plan this engineer job is a step of, and which step (src/plans.ts). Set by the plan driver on
+   * the step's job and carried by its fix rounds, so the step's progress can be read from the jobs.
+   */
+  plan?: { id: string; step: number };
+  /**
    * The findings from earlier reviews this engineer job was handed to fix in its own pull request
    * (src/carry.ts). Set by the service when the job starts running, and kept on the job after the
    * held findings themselves are dropped, so the job still says what it was given.
@@ -441,6 +446,8 @@ export interface Settings {
    * engineer job on their repository (src/carry.ts). Written only by the job runner.
    */
   carried?: import("./carry.js").CarriedFinding[];
+  /** The plans the service runs to completion (src/plans.ts). Written only by the plan driver. */
+  plans?: import("./plans.js").Plan[];
   /** Sites Paul unlocked with "act as me on <site>" (src/site-policy.ts): only his own chat message sets this. */
   actAsMe?: string[];
   /** Paul's Google Calendar appointment-schedule booking link, offered in scheduling drafts. */
