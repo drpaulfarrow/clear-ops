@@ -6,12 +6,18 @@
  * What is read is public: GET https://openrouter.ai/api/v1/models, no key, no other endpoint. It
  * says what a model costs (per-token strings, USD), whether it supports tools (its
  * supported_parameters) and how much context it takes. It says nothing about how well a model
- * works, and this file never invents that: a recommendation is price, tool support and context
- * length only, and every report and message says so plainly.
+ * works, and this file never invents that: what it calls a candidate is price, tool support and
+ * context length only, and the report says so plainly.
  *
- * The daily check never applies a recommendation: that stays the chief's decision (model_apply,
+ * Since 22 Nov 2026 the daily check acts on what it finds, on Paul's say: for the cheapest tier a
+ * role runs on, it looks a cheaper candidate up with the service's own search and moves the tier
+ * only when published benchmarks report the candidate level or ahead of the model in force
+ * (src/model-evidence.ts). No information means no move, a free model is never a candidate, and Paul
+ * hears only when a move was made. The move is an ordinary recorded change (by "model-check"), with
+ * the benchmarks as its reason, and model_revert undoes it; a model a change was reverted from is
+ * never taken up again. Every other change stays the chief's decision (model_apply,
  * src/orchestrator.ts), recorded in the catalogue with its reason (src/catalogue.ts), and every change
- * can be undone without a deploy. The one availability move that happens without a decision is the
+ * can be undone without a deploy. The availability move that happens without a decision is the
  * previous-model fallback, in two halves for the same record: the daily check moves a tier whose model
  * has left OpenRouter's list back to the model the catalogue kept for it, and a run that OpenRouter
  * refuses because its model no longer exists is retried at once on that same recorded model
@@ -27,6 +33,8 @@ import { config } from "./config.js";
 import { MODEL_ALIASES, OPENROUTER_BASE_URL, modelPrices, openrouterModels, priceOf, provider, type ModelAlias } from "./llm.js";
 import { applyCatalogueRoles, CATALOGUE_ROLES, isAliasName, isRoleName, MAX_CATALOGUE_CHANGES, readCatalogue, recordChange, writeCatalogue, type Catalogue, type CatalogueChange, type CatalogueRole, type PriceRow } from "./catalogue.js";
 import { londonYmd } from "./london.js";
+import { benchmarkEvidence, rowWords, type EvidenceVerdict } from "./model-evidence.js";
+import { searchEngines } from "./search.js";
 import type { Store } from "./store.js";
 
 /** The public model list. No credential is sent: the endpoint needs none. */
@@ -35,8 +43,18 @@ export const MODELS_URL = `${OPENROUTER_BASE_URL}/v1/models`;
 export const MODELS_TIMEOUT_MS = 15_000;
 /** How often the service looks whether the daily check is due. */
 export const MODEL_WATCH_TICK_MS = 30 * 60_000;
-/** A change is recommended only when the alternative is this much cheaper on both input and output. */
+/** A model is a candidate only when it is this much cheaper on both input and output. */
 export const RECOMMEND_FRACTION = 0.2;
+/** How many candidates one day's check looks up, cheapest first. */
+export const MAX_CANDIDATES_PER_CHECK = 3;
+/** How long a candidate the evidence did not support is left before it is looked up again. */
+export const EVIDENCE_RECHECK_DAYS = 7;
+/** How long the check leaves a tier alone after moving it, so a move has time to show how it runs. */
+export const SWITCH_COOLDOWN_DAYS = 7;
+const DAY_MS = 24 * 60 * 60_000;
+
+/** True for a model that costs nothing: a free variant is rate-limited for the whole account, so it is never a candidate. */
+export const isFreeModel = (m: LiveModel): boolean => /:free$/i.test(m.id) || m.input === 0 || m.output === 0;
 
 /** A refusal in plain words: the model was not changed. */
 export class ModelCheckError extends Error {}
@@ -484,15 +502,41 @@ export interface ModelWatchOptions {
   hour?: number;
   intervalMs?: number;
   messenger?: { send: (to: string, text: string) => Promise<unknown> };
-  /** Paul's chat address, the one the check messages when it recommends a change. */
+  /** Paul's chat address, the one the check messages when it has moved a tier or a model is broken. */
   to?: string;
   warn?: (m: string) => void;
+  /**
+   * The benchmark lookup for one candidate against the model in force. Defaults to the service's own
+   * search and one reading call (src/model-evidence.ts), and to "no" when no search engine is set.
+   */
+  evidence?: (candidate: LiveModel, current: LiveModel) => Promise<EvidenceVerdict>;
+}
+
+/** A tier the check moved on benchmark evidence. */
+export interface AppliedSwitch {
+  alias: ModelAlias;
+  from: string;
+  to: string;
+  fromPrice?: PriceRow;
+  toPrice: PriceRow;
+  verdict: EvidenceVerdict;
+}
+
+/** What the check did about one candidate, for the report. */
+interface CandidateNote {
+  model: string;
+  /** The lookup's verdict, when one ran today. */
+  verdict?: EvidenceVerdict;
+  /** Why no lookup ran, or why a supported move was not made. */
+  note?: string;
 }
 
 export interface ModelCheckOutcome {
   ran: boolean;
-  /** True when the report recommends at least one change. */
+  /** True when a cheaper candidate exists for the cheapest tier in use, whether or not it was taken up. */
   recommend: boolean;
+  /** The move the check made today on benchmark evidence, if any. */
+  applied?: AppliedSwitch;
   /** True when a model in force failed its check. */
   flagged: boolean;
   /** The availability fallbacks the check engaged: one tier's model had left OpenRouter's list. */
@@ -518,7 +562,8 @@ interface TierVerdict {
 
 /**
  * The better-value alternatives for one model, tier-backed or a direct provider id: tool-capable,
- * priced, at least RECOMMEND_FRACTION cheaper on both input and output, and with no smaller context.
+ * priced (a free variant is not one: its request limits are the account's, not the model's), at least
+ * RECOMMEND_FRACTION cheaper on both input and output, and with no smaller context.
  */
 function alternativesFor(list: LiveModel[], model: string, price: PriceRow | undefined, contextLength: number | undefined): LiveModel[] {
   if (!price || price.input <= 0 || price.output <= 0) return [];
@@ -528,6 +573,7 @@ function alternativesFor(list: LiveModel[], model: string, price: PriceRow | und
         m.tools &&
         m.input !== undefined &&
         m.output !== undefined &&
+        !isFreeModel(m) &&
         m.input <= price.input * (1 - RECOMMEND_FRACTION) &&
         m.output <= price.output * (1 - RECOMMEND_FRACTION) &&
         (m.contextLength === undefined || contextLength === undefined || m.contextLength >= contextLength) &&
@@ -577,8 +623,9 @@ const priceWords = (p: PriceRow) => `$${p.input.toFixed(2)}/M in and $${p.output
 
 /**
  * The daily check: verifies every model in force, writes the report of offers and better-value
- * alternatives per role with its recommendation and reasoning, and messages Paul only when there is
- * one. No model is changed here, ever; applying stays the chief's recorded decision.
+ * alternatives per role, and for the cheapest tier in use looks its cheaper candidates up and moves
+ * the tier when published benchmarks support it (see the header). Paul is messaged only when a tier
+ * was moved, a fallback engaged or a model in force failed its check.
  */
 export class ModelWatch {
   private timer?: NodeJS.Timeout;
@@ -586,10 +633,10 @@ export class ModelWatch {
 
   /**
    * The cheapest tier a role actually runs on, which is the one bought on price. A stronger tier is
-   * bought for strength, and OpenRouter's public list cannot measure that, so the check reports its
-   * cheaper alternatives but recommends only for the cheapest tier in use, and never nags to trade a
-   * strong tier down on price alone. A tier no role runs on is never recommended for, however cheap:
-   * moving the workforce onto it would be a decision about roles, not a saving on the tier they use.
+   * bought for strength, so the check reports its cheaper alternatives but looks candidates up, and
+   * moves, only for the cheapest tier in use, and never trades a strong tier down. A tier no role runs
+   * on is never moved, however cheap its alternatives: moving the workforce onto it would be a
+   * decision about roles, not a saving on the tier they use.
    */
   private cheapestTier(tiers: TierVerdict[]): TierVerdict | undefined {
     const inUse = new Set(CATALOGUE_ROLES.map((r) => roleTier(r)).filter(isAliasName));
@@ -631,33 +678,113 @@ export class ModelWatch {
     const engaged = this.engageFallbacks(dir, list, tiers, at);
     // The report and the recommendation are computed on what is in force now the fallbacks are.
     const fresh = engaged.length ? verdicts(list) : tiers;
-    const byAlias = new Map(fresh.map((t) => [t.alias, t]));
     const cheapest = this.cheapestTier(fresh);
     const recommend = (cheapest?.alternatives.length ?? 0) > 0;
-    const report = this.report(today, at, byAlias, cheapest, list, engaged);
+    // The one decision the check takes itself: a cheaper candidate for the cheapest tier in use is
+    // looked up, and taken up only when published benchmarks support it. Not on a day a fallback
+    // engaged: that day's news is the fallback, and the tier has only just changed.
+    const looked = this.opts.store?.settings().modelWatch?.looked ?? {};
+    const { applied, notes } = cheapest && recommend && !engaged.length ? await this.consider(cheapest, list, dir, at, today, looked) : { applied: undefined, notes: [] as CandidateNote[] };
+    // The report describes what is in force once any move has been made.
+    const after = applied ? verdicts(list) : fresh;
+    const report = this.report(today, at, new Map(after.map((t) => [t.alias, t])), applied ? this.cheapestTier(after) : cheapest, list, engaged, notes, applied);
     const reportDir = path.join(dir, "model-watch");
     fs.mkdirSync(reportDir, { recursive: true });
     const reportPath = path.join(reportDir, `${today}.md`);
     fs.writeFileSync(reportPath, report);
-    this.opts.store?.setSetting("modelWatch", { ymd: today, at: at.toISOString() });
-    if ((recommend || flagged) && this.opts.messenger && this.opts.to) {
-      const text = this.message(today, fresh, cheapest, reportPath, engaged);
-      await this.opts.messenger.send(this.opts.to, text).catch((err) => this.warn(`Paul could not be told (${err instanceof Error ? err.message : String(err)}).`));
+    const kept = Object.fromEntries(Object.entries(looked).filter(([, ymd]) => at.getTime() - Date.parse(ymd) < 30 * DAY_MS));
+    this.opts.store?.setSetting("modelWatch", { ymd: today, at: at.toISOString(), ...(Object.keys(kept).length ? { looked: kept } : {}) });
+    // Paul hears only when something happened: a tier was moved, or a model in force is broken. A day
+    // with both says both. A cheaper candidate the evidence did not support is in the report and no message.
+    const texts = [...(applied ? [this.movedMessage(today, applied, reportDir)] : []), ...(flagged ? [this.message(today, fresh, reportPath, engaged)] : [])];
+    for (const text of this.opts.messenger && this.opts.to ? texts : []) {
+      await this.opts.messenger!.send(this.opts.to!, text).catch((err) => this.warn(`Paul could not be told (${err instanceof Error ? err.message : String(err)}).`));
     }
     return {
       ran: true,
       recommend,
+      ...(applied ? { applied } : {}),
       flagged,
       engaged,
       reportPath,
       summary: engaged.length
         ? `fell back to the previous model for ${engaged.map((e) => e.alias).join(", ")}`
-        : recommend
-          ? "recommends a change"
+        : applied
+          ? `moved the ${applied.alias} tier to ${applied.to} on benchmark evidence`
           : flagged
             ? "a model failed its check"
-            : "all models verified, nothing to recommend",
+            : recommend
+              ? "a cheaper candidate exists, and the evidence did not support a move"
+              : "all models verified, nothing cheaper to consider",
     };
+  }
+
+  /**
+   * Looks the tier's cheaper candidates up, cheapest first, and moves the tier to the first one the
+   * published benchmarks support. Nothing here trusts price alone: a candidate with no evidence, or
+   * with evidence against it, is left, and is not looked up again for EVIDENCE_RECHECK_DAYS. A tier
+   * the deploy pins, or one this check moved within SWITCH_COOLDOWN_DAYS, is not looked at; a model a
+   * recorded change was reverted from (Paul undid it, or it left the list) is never taken up again.
+   * `looked` is the record of what was looked up when, updated in place.
+   */
+  private async consider(tier: TierVerdict, list: LiveModel[], dir: string, at: Date, today: string, looked: Record<string, string>): Promise<{ applied?: AppliedSwitch; notes: CandidateNote[] }> {
+    const notes: CandidateNote[] = [];
+    if (!tier.check.ok) return { notes };
+    const current = tier.check.model;
+    const pin = deployPin(tier.alias);
+    if (pin) return { notes: [{ model: tier.alternatives[0]!.id, note: `${pin} is set in the deploy, so the check cannot move the ${tier.alias} tier and looked nothing up.` }] };
+    const changes = readCatalogue(dir).changes ?? [];
+    const own = changes.filter((c) => c.by === "model-check" && c.kind === "alias" && c.target === tier.alias && !c.reverted).at(-1);
+    if (own && at.getTime() - Date.parse(own.at) < SWITCH_COOLDOWN_DAYS * DAY_MS) {
+      return { notes: [{ model: tier.alternatives[0]!.id, note: `The check moved the ${tier.alias} tier on ${own.at.slice(0, 10)}, and leaves it alone for ${SWITCH_COOLDOWN_DAYS} days after a move.` }] };
+    }
+    const undone = new Set(changes.filter((c) => c.kind === "alias" && c.target === tier.alias && c.reverted).map((c) => c.to));
+    const evidence =
+      this.opts.evidence ??
+      ((candidate: LiveModel, inForce: LiveModel) =>
+        searchEngines().length && config.openrouter.apiKey
+          ? benchmarkEvidence(candidate, inForce)
+          : Promise.resolve<EvidenceVerdict>({ ok: false, reason: "no search engine is configured, so there is nothing to look benchmarks up with.", rows: [], searches: [] }));
+    let lookups = 0;
+    for (const candidate of tier.alternatives) {
+      if (undone.has(candidate.id)) {
+        notes.push({ model: candidate.id, note: "A change to this model was undone before, so it is not taken up again." });
+        continue;
+      }
+      const key = `${candidate.id}>${current.id}`;
+      const last = looked[key];
+      if (last && at.getTime() - Date.parse(last) < EVIDENCE_RECHECK_DAYS * DAY_MS) {
+        notes.push({ model: candidate.id, note: `Looked up on ${last} and not supported; it is looked up again after ${EVIDENCE_RECHECK_DAYS} days.` });
+        continue;
+      }
+      if (lookups >= MAX_CANDIDATES_PER_CHECK) break;
+      lookups += 1;
+      let verdict: EvidenceVerdict;
+      try {
+        verdict = await evidence(candidate, current);
+      } catch (err) {
+        verdict = { ok: false, reason: `the lookup failed (${err instanceof Error ? err.message : String(err)}).`, rows: [], searches: [] };
+      }
+      looked[key] = today;
+      if (!verdict.ok) {
+        notes.push({ model: candidate.id, verdict });
+        continue;
+      }
+      // The recorded reason is read by the chief (the models view), so it carries the numbers and not
+      // the benchmarks' names, which are text from the web: those stay in the report and Paul's message.
+      const scores = verdict.rows.slice(0, 6).map((r) => `${r.candidate} against ${r.current}`).join(", ");
+      const why = `The daily check moved the tier on benchmark evidence: against ${current.id}, level or ahead on all ${verdict.rows.length} published benchmarks that report both models (${scores}). Names and sources are in the model report for ${today}.`;
+      try {
+        await applyModelChange({ store: this.opts.store, dataDir: dir, fetch: this.opts.fetch, now: () => at, by: "model-check" }, { alias: tier.alias, model: candidate.id, why });
+      } catch (err) {
+        notes.push({ model: candidate.id, verdict, note: `The evidence supported it, and the move was refused: ${err instanceof Error ? err.message : String(err)}` });
+        continue;
+      }
+      delete looked[key];
+      notes.push({ model: candidate.id, verdict });
+      return { applied: { alias: tier.alias, from: current.id, to: candidate.id, ...(tier.price ? { fromPrice: tier.price } : {}), toPrice: priceRow(candidate), verdict }, notes };
+    }
+    return { notes };
   }
 
   /**
@@ -715,11 +842,11 @@ export class ModelWatch {
   }
 
   /** The report, one file per London day, with the plain statement of what OpenRouter's list does not say. */
-  private report(today: string, at: Date, byAlias: Map<ModelAlias, TierVerdict>, cheapest: TierVerdict | undefined, list: LiveModel[], engaged: Array<{ alias: string; from: string; to: string }>): string {
+  private report(today: string, at: Date, byAlias: Map<ModelAlias, TierVerdict>, cheapest: TierVerdict | undefined, list: LiveModel[], engaged: Array<{ alias: string; from: string; to: string }>, notes: CandidateNote[] = [], applied?: AppliedSwitch): string {
     const lines: string[] = [];
     lines.push(`# Model check — ${today}`);
     lines.push("");
-    lines.push(`Prices are USD per million tokens, read from OpenRouter's public model list (${MODELS_URL}) at ${at.toISOString()}. It states each model's price, whether it supports tools and its context length. OpenRouter's public model list carries no performance or quality measure, so nothing here ranks models by how well they work: a recommendation is price, tool support and context length only, and how good a model actually is stays Paul's and the chief's judgement.`);
+    lines.push(`Prices are USD per million tokens, read from OpenRouter's public model list (${MODELS_URL}) at ${at.toISOString()}. It states each model's price, whether it supports tools and its context length. OpenRouter's public model list carries no performance or quality measure, so nothing in the lists below ranks models by how well they work: they are price, tool support and context length only. For the cheapest tier in use the check looks its cheaper candidates up with the service's own web search, and moves the tier only when at least two published benchmarks report both models and the candidate is level or ahead on each. No information means no move, and a free model is never a candidate.`);
     lines.push("");
     if (engaged.length) {
       lines.push(`## Fallbacks engaged today`);
@@ -742,17 +869,27 @@ export class ModelWatch {
       const bp = priceRow(best);
       const context = best.contextLength !== undefined && v.check.ok && v.check.model.contextLength !== undefined ? `, context ${best.contextLength} ≥ ${v.check.model.contextLength}` : "";
       if (v.alias !== undefined && cheapest?.alias === v.alias) {
-        lines.push(`  Better value: ${best.id} at ${priceWords(bp)}${context}, tool-capable, at least 20% cheaper on both input and output. RECOMMENDED for the ${v.alias} tier.`);
+        lines.push(`  Cheaper candidate: ${best.id} at ${priceWords(bp)}${context}, tool-capable, at least 20% cheaper on both input and output. Taken up only on benchmark evidence (below).`);
       } else if (v.alias !== undefined) {
         lines.push(`  Cheaper on price alone: ${best.id} at ${priceWords(bp)}${context}, tool-capable. Listed, not recommended: this tier is bought for strength, which the list cannot measure.`);
       } else {
         lines.push(`  Cheaper on price alone: ${best.id} at ${priceWords(bp)}${context}, tool-capable. Listed, not recommended: this role's model is a direct provider id the deploy or Paul set, and moving it is the chief's recorded decision, not the check's.`);
       }
     }
+    if (applied || notes.length) {
+      lines.push("");
+      lines.push(`## Benchmark evidence`);
+      if (applied) lines.push(`The ${applied.alias} tier was moved from ${applied.from} to ${applied.to} today: ${applied.verdict.reason}`);
+      for (const n of notes) {
+        lines.push(`- ${n.model}: ${n.verdict ? `${n.verdict.ok ? "supported" : "not supported"}, ${n.verdict.reason}` : ""}${n.verdict && n.note ? " " : ""}${n.note ?? ""}`);
+        for (const s of n.verdict?.searches ?? []) lines.push(`  Searched ${s.engine} for "${s.query}": ${s.error ? `failed (${s.error})` : `${s.results} results`}.`);
+        for (const r of n.verdict?.rows ?? []) lines.push(`  ${r.benchmark}: ${r.candidate} (${r.candidateUrl}) against ${r.current} (${r.currentUrl}).`);
+      }
+    }
     lines.push("");
     lines.push(`## Offers — the cheapest tool-capable models on the list today (price only; the list carries no performance or quality measure)`);
     for (const m of list.filter((m) => m.tools && m.input !== undefined && m.output !== undefined).sort((a, b) => a.output! - b.output! || a.input! - b.input!).slice(0, 8)) {
-      lines.push(`- ${m.id} — $${m.input!.toFixed(2)}/M in, $${m.output!.toFixed(2)}/M out${m.contextLength !== undefined ? `, context ${m.contextLength}` : ""}`);
+      lines.push(`- ${m.id} — $${m.input!.toFixed(2)}/M in, $${m.output!.toFixed(2)}/M out${m.contextLength !== undefined ? `, context ${m.contextLength}` : ""}${isFreeModel(m) ? " (free: rate-limited for the whole account, never a candidate)" : ""}`);
     }
     const changes = readCatalogue(this.opts.dataDir).changes ?? [];
     if (changes.length) {
@@ -763,25 +900,29 @@ export class ModelWatch {
     lines.push("");
     lines.push(engaged.length
       ? `The only change made by this check was the fallback above, recorded like any change. Every other change is the chief's recorded decision (model_apply), which Paul can undo with model_revert.`
-      : `Nothing was changed by this check. Applying a change is the chief's recorded decision (model_apply), which Paul can undo with model_revert.`);
+      : applied
+        ? `The only change made by this check was the move above, recorded like any change with the benchmarks as its reason. Paul can undo it with model_revert, and a model a change was undone from is never taken up again.`
+        : `Nothing was changed by this check. It moves a tier only on benchmark evidence; any other change is the chief's recorded decision (model_apply), which Paul can undo with model_revert.`);
     return `${lines.join("\n")}\n`;
   }
 
-  /** What Paul is told, only when there is something to decide. Three or four sentences, no more. */
-  private message(today: string, tiers: TierVerdict[], cheapest: TierVerdict | undefined, reportPath: string, engaged: Array<{ alias: string; from: string; to: string }>): string {
+  /** What Paul is told when the check has moved a tier. Three or four sentences, no more. */
+  private movedMessage(today: string, a: AppliedSwitch, reportDir: string): string {
+    const onIt = CATALOGUE_ROLES.filter((r) => roleTier(r) === a.alias).map((r) => ROLE_LABELS[r]);
+    const price = a.fromPrice ? `, which costs ${priceWords(a.toPrice)} instead of ${priceWords(a.fromPrice)}` : `, which costs ${priceWords(a.toPrice)}`;
+    const rows = a.verdict.rows;
+    const shown = rows.slice(0, 3).map(rowWords).join(", ");
+    return `Model check for ${today}: the ${a.alias} tier, which ${onIt.join(" and ")} run${onIt.length === 1 ? "s" : ""} on, was moved from ${a.from} to ${a.to}${price}. Published benchmarks put the new model level or ahead on all ${rows.length} that report both: ${shown}${rows.length > 3 ? " and more" : ""}. The sources are in today's report under ${reportDir}. Tell Marlo to revert the ${a.alias} tier if you want the old model back.`;
+  }
+
+  /** What Paul is told when a fallback engaged or a model in force failed its check. Three or four sentences, no more. */
+  private message(today: string, tiers: TierVerdict[], reportPath: string, engaged: Array<{ alias: string; from: string; to: string }>): string {
     const roles = CATALOGUE_ROLES.map((r) => ({ role: r, tier: roleTier(r) })).filter((r) => isAliasName(r.tier));
     const broken = tiers.flatMap((t) => (t.check.ok ? [] : [{ alias: t.alias, model: t.model, reason: t.check.reason }]));
     if (engaged.length) {
       const e = engaged[0]!;
       const onIt = roles.filter((r) => r.tier === e.alias).map((r) => ROLE_LABELS[r.role]);
       return `Model check for ${today}: ${e.from} has left OpenRouter's model list, so the ${e.alias} tier (which ${onIt.join(" and ")} run${onIt.length === 1 ? "s" : ""} on) was moved back to its previous model ${e.to}, recorded like any change; a run that hits ${e.from} is retried on ${e.to} at once, so jobs on the tier did not wait for this check. The full report is at ${reportPath}. Tell Marlo if you want a different model; nothing else has changed.`;
-    }
-    if (cheapest?.alternatives.length) {
-      const best = cheapest.alternatives[0]!;
-      const onIt = roles.filter((r) => r.tier === cheapest.alias).map((r) => ROLE_LABELS[r.role]);
-      const oldPrice = cheapest.price;
-      const bp = priceRow(best);
-      return `Model check for ${today}: the ${cheapest.alias} tier, which ${onIt.join(" and ")} run${onIt.length === 1 ? "s" : ""} on, could move to ${best.id} at $${bp.input.toFixed(2)}/M in and $${bp.output.toFixed(2)}/M out${oldPrice ? `, instead of ${cheapest.model} at $${oldPrice.input.toFixed(2)}/M in and $${oldPrice.output.toFixed(2)}/M out` : ""}, at least 20% cheaper on both and tool-capable. The list says prices and tools only, not how well a model works. The full report is at ${reportPath}. Tell Marlo to apply it if you want it; nothing has changed yet.`;
     }
     const b = broken[0]!;
     // A recorded fallback is engaged only for a model that has left the list. One still on the list but

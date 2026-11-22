@@ -14,10 +14,11 @@ for (const k of ["CHIEF_MODEL", "WORKER_MODEL", "ENGINEER_MODEL", "MAINTAINER_MO
  * a model that is unknown, not tool-capable or unpriced (null and empty price fields count as
  * unreadable, never as free), recording every applied change with its reason and price delta — for a
  * role change as for a tier change — reverting one without a deploy (including a role whose previous
- * model was a full provider id), and the once-a-day check that reports offers and better-value
- * alternatives per role and messages Paul only when it recommends a change. The check never applies a
- * recommendation; the one change it makes itself is the previous-model fallback for a tier whose model
- * has left OpenRouter's list, recorded and told. It never invents a performance score: OpenRouter's
+ * model was a full provider id), and the once-a-day check that reports offers and cheaper alternatives
+ * per role. For the cheapest tier in use the check moves the tier to a cheaper model itself, only when
+ * the benchmark lookup supports it (src/model-evidence.ts, faked here), and messages Paul only when it
+ * has moved a tier or a model is broken; the other change it makes itself is the previous-model
+ * fallback for a tier whose model has left OpenRouter's list. It never invents a performance score: OpenRouter's
  * public list carries prices, tool support and context length, and the report says so.
  */
 const { config } = await import("../src/config.js");
@@ -341,7 +342,8 @@ test("a cheaper tier no role runs on is never recommended", async () => {
   assert.equal(result.engaged.length, 0);
   assert.equal(sent.length, 0, "nothing for Paul to decide means no message");
   const report = fs.readFileSync(path.join(DIR, "model-watch", `${londonYmd(now())}.md`), "utf8");
-  assert.ok(!report.includes("RECOMMENDED"), "no recommendation appears in the report");
+  assert.ok(!report.includes("Cheaper candidate"), "no candidate appears in the report");
+  assert.ok(!report.includes("## Benchmark evidence"), "and nothing was looked up");
   assert.ok(!report.includes("for the sonnet tier"), "nothing is recommended for a tier no role runs on");
   store.setSetting("modelWatch", undefined);
   cat.writeCatalogue(DIR, { version: 1 });
@@ -367,7 +369,7 @@ test("a role on a direct provider model id is verified and gets the same better-
   cat.writeCatalogue(DIR, { version: 1 });
 });
 
-test("the daily check writes a per-role report and messages Paul only when it recommends a change", async () => {
+test("the daily check writes a per-role report, and a cheaper model with no benchmark evidence changes nothing and sends nothing", async () => {
   cat.writeCatalogue(DIR, { version: 1 });
   const sent: Array<{ to: string; text: string }> = [];
   const watch = new ops.ModelWatch({
@@ -390,10 +392,17 @@ test("the daily check writes a per-role report and messages Paul only when it re
   assert.match(report, /OpenRouter's public model list carries no performance or quality measure/, "no performance score is invented");
   assert.equal(store.settings().modelWatch?.ymd, today, "the run is marked so it does not repeat");
   assert.equal(watch.due(), false);
-  assert.equal(sent.length, 1, "Paul is messaged when a change is recommended");
-  assert.match(sent[0]!.text, /qwen\/qwen3\.8-flash/);
-  assert.match(sent[0]!.text, /nothing has changed yet/);
-  // A day with nothing to recommend is silent.
+  // No search engine is configured here, so there is nothing to look benchmarks up with: no
+  // information, no move, and no daily note about a model that is merely cheaper.
+  assert.equal(result.recommend, true, "a cheaper candidate exists");
+  assert.equal(result.applied, undefined);
+  assert.equal(llm.openrouterModels().haiku, "deepseek/deepseek-v4.1-flash", "the tier has not moved");
+  assert.equal(cat.readCatalogue(DIR).changes, undefined, "nothing was recorded");
+  assert.match(report, /Cheaper candidate: qwen\/qwen3\.8-flash.*Taken up only on benchmark evidence/);
+  assert.match(report, /## Benchmark evidence\n- qwen\/qwen3\.8-flash: not supported, no search engine is configured/);
+  assert.match(report, /Nothing was changed by this check\. It moves a tier only on benchmark evidence/);
+  assert.equal(sent.length, 0, "a cheaper model the evidence does not support is not worth a message");
+  // A day with nothing cheaper is silent too.
   const quietList = () => [DEEPSEEK, GLM, KIMI, row("barely/cheaper", "0.00000029", "0.0000012")];
   store.setSetting("modelWatch", undefined);
   sent.length = 0;
@@ -401,7 +410,7 @@ test("the daily check writes a per-role report and messages Paul only when it re
   const quietResult = await quiet.run();
   assert.equal(quietResult.ran, true);
   assert.equal(quietResult.recommend, false);
-  assert.equal(sent.length, 0, "no recommendation means no message");
+  assert.equal(sent.length, 0, "nothing cheaper means no message");
   // A model that has disappeared is flagged and Paul is told.
   store.setSetting("modelWatch", undefined);
   sent.length = 0;
@@ -440,4 +449,200 @@ test("the check waits for its hour and runs at most once a day", () => {
   assert.equal(early.due(), false, "before the London hour it waits");
   const later = new ops.ModelWatch({ store, dataDir: DIR, now: () => new Date("2026-11-22T09:30:00Z"), fetch: (async () => Promise.resolve(modelsBody(fullList()))) as typeof fetch, warn: () => undefined });
   assert.equal(later.due(), true, "the next day it is due again");
+});
+
+/* ------------------------------------------------------------------ the check's own moves, on evidence */
+
+type Verdict = import("../src/model-evidence.js").EvidenceVerdict;
+const ROWS = [
+  { benchmark: "SWE-bench Verified", candidate: 71.2, current: 68, candidateUrl: "https://bench.example/compare", currentUrl: "https://bench.example/compare" },
+  { benchmark: "MMLU-Pro", candidate: 82.1, current: 80.3, candidateUrl: "https://a.example/qwen", currentUrl: "https://b.example/deepseek" },
+];
+const SUPPORTED: Verdict = { ok: true, reason: "it is level or ahead on all 2 benchmarks that report both models: SWE-bench Verified 71.2 against 68, MMLU-Pro 82.1 against 80.3.", rows: ROWS, searches: [{ engine: "exa", query: "qwen3.8-flash vs deepseek-v4.1-flash benchmark comparison", results: 5 }] };
+const UNSUPPORTED: Verdict = { ok: false, reason: "no benchmark reporting both models was found.", rows: [], searches: [{ engine: "brave", query: "qwen3.8-flash benchmark scores", results: 0 }] };
+const at = (iso: string) => () => new Date(iso);
+
+/** A check with a faked benchmark lookup, recording which candidates were looked up against what. */
+function watching(list: unknown[], answer: (candidate: string) => Verdict, when = now) {
+  const sent: string[] = [];
+  const asked: string[] = [];
+  const watch = new ops.ModelWatch({
+    store,
+    dataDir: DIR,
+    now: when,
+    fetch: (async () => Promise.resolve(modelsBody(list))) as typeof fetch,
+    messenger: { send: async (_to, text) => void sent.push(text) },
+    to: "tg:123",
+    warn: () => undefined,
+    evidence: async (candidate, current) => {
+      asked.push(`${candidate.id}>${current.id}`);
+      return answer(candidate.id);
+    },
+  });
+  return { watch, sent, asked };
+}
+const fresh = () => {
+  cat.writeCatalogue(DIR, { version: 1 });
+  store.setSetting("modelWatch", undefined);
+};
+
+test("benchmark evidence moves the cheapest tier in use: recorded, told once, and undone with a revert that sticks", async () => {
+  fresh();
+  const day1 = watching(fullList(), () => SUPPORTED);
+  const result = await day1.watch.run();
+  assert.deepEqual(day1.asked, ["qwen/qwen3.8-flash>deepseek/deepseek-v4.1-flash"]);
+  assert.equal(result.applied?.to, "qwen/qwen3.8-flash");
+  assert.match(result.summary, /moved the haiku tier to qwen\/qwen3\.8-flash on benchmark evidence/);
+  assert.equal(llm.openrouterModels().haiku, "qwen/qwen3.8-flash", "the tier runs on the cheaper model from the next run, with no deploy");
+  const after = cat.readCatalogue(DIR);
+  const record = after.changes!.at(-1)!;
+  assert.equal(record.by, "model-check");
+  assert.equal(record.kind, "alias");
+  assert.equal(record.from, "deepseek/deepseek-v4.1-flash");
+  assert.equal(record.why, "The daily check moved the tier on benchmark evidence: against deepseek/deepseek-v4.1-flash, level or ahead on all 2 published benchmarks that report both models (71.2 against 68, 82.1 against 80.3). Names and sources are in the model report for 2026-11-21.", "the recorded reason, which the chief reads, carries numbers and no text from the web");
+  assert.equal(record.toPrice!.input, 0.15, "the new price is recorded");
+  assert.equal(after.fallbacks!.haiku, "deepseek/deepseek-v4.1-flash", "the model it left is kept, so a refused run is retried on it");
+  // Paul is told once, in a few plain sentences, with what the evidence was and how to undo it.
+  assert.equal(day1.sent.length, 1);
+  const text = day1.sent[0]!;
+  assert.match(text, /^Model check for 2026-11-21: the haiku tier, which chief and workers and engineers and maintainer and designer run on, was moved from deepseek\/deepseek-v4\.1-flash to qwen\/qwen3\.8-flash, which costs \$0\.15\/M in and \$0\.50\/M out instead of \$0\.30\/M in and \$1\.20\/M out\./);
+  assert.match(text, /level or ahead on all 2 that report both: SWE-bench Verified 71\.2 against 68, MMLU-Pro 82\.1 against 80\.3\./);
+  assert.match(text, /Tell Marlo to revert the haiku tier if you want the old model back\.$/);
+  assert.ok(!text.includes("—"), "no em dash");
+  assert.ok(!/\.md\b/.test(text), "no file name a chat app would turn into a web link");
+  const report = fs.readFileSync(path.join(DIR, "model-watch", "2026-11-21.md"), "utf8");
+  assert.match(report, /## Benchmark evidence\nThe haiku tier was moved from deepseek\/deepseek-v4\.1-flash to qwen\/qwen3\.8-flash today/);
+  assert.match(report, /Searched exa for "qwen3\.8-flash vs deepseek-v4\.1-flash benchmark comparison": 5 results\./);
+  assert.match(report, /MMLU-Pro: 82\.1 \(https:\/\/a\.example\/qwen\) against 80\.3 \(https:\/\/b\.example\/deepseek\)\./);
+  assert.match(report, /chief: haiku → qwen\/qwen3\.8-flash/, "the report describes what is in force after the move");
+  assert.match(report, /The only change made by this check was the move above/);
+
+  // Paul undoes it. The model is never taken up again, whatever the evidence says later.
+  const back = await ops.revertModelChange(deps(async () => Promise.resolve(modelsBody(fullList()))), { alias: "haiku" });
+  assert.match(back, /haiku tier is back on deepseek\/deepseek-v4\.1-flash/);
+  const later = watching(fullList(), () => SUPPORTED, at("2026-12-20T09:30:00Z"));
+  const again = await later.watch.run();
+  assert.deepEqual(later.asked, [], "a model a change was undone from is not even looked up");
+  assert.equal(again.applied, undefined);
+  assert.equal(llm.openrouterModels().haiku, "deepseek/deepseek-v4.1-flash");
+  assert.equal(later.sent.length, 0);
+  assert.match(fs.readFileSync(path.join(DIR, "model-watch", "2026-12-20.md"), "utf8"), /qwen\/qwen3\.8-flash: A change to this model was undone before, so it is not taken up again\./);
+  fresh();
+});
+
+test("a candidate the evidence does not support is left, silently, and is not searched for again every morning", async () => {
+  fresh();
+  const day1 = watching(fullList(), () => UNSUPPORTED);
+  const first = await day1.watch.run();
+  assert.equal(first.applied, undefined);
+  assert.match(first.summary, /the evidence did not support a move/);
+  assert.equal(llm.openrouterModels().haiku, "deepseek/deepseek-v4.1-flash");
+  assert.equal(day1.sent.length, 0, "no daily note");
+  assert.deepEqual(store.settings().modelWatch?.looked, { "qwen/qwen3.8-flash>deepseek/deepseek-v4.1-flash": "2026-11-21" });
+  // The next morning: no search, no message.
+  const day2 = watching(fullList(), () => SUPPORTED, at("2026-11-22T09:30:00Z"));
+  await day2.watch.run();
+  assert.deepEqual(day2.asked, [], "looked up yesterday, so not again today");
+  assert.equal(day2.sent.length, 0);
+  assert.match(fs.readFileSync(path.join(DIR, "model-watch", "2026-11-22.md"), "utf8"), /Looked up on 2026-11-21 and not supported; it is looked up again after 7 days\./);
+  // A week on it is looked up again, and benchmarks that have appeared since move the tier.
+  const day8 = watching(fullList(), () => SUPPORTED, at("2026-11-28T09:30:00Z"));
+  const moved = await day8.watch.run();
+  assert.deepEqual(day8.asked, ["qwen/qwen3.8-flash>deepseek/deepseek-v4.1-flash"]);
+  assert.equal(moved.applied?.to, "qwen/qwen3.8-flash");
+  assert.equal(store.settings().modelWatch?.looked, undefined, "a candidate that was taken up is no longer waiting");
+  fresh();
+});
+
+test("a free model is never a candidate, however the list prices it", async () => {
+  fresh();
+  const FREE = row("inclusionai/ling-3.2-flash:free", "0", "0", true, 1000000);
+  const ZERO = row("vendor/costs-nothing", "0", "0", true, 1000000);
+  const only = watching([DEEPSEEK, GLM, KIMI, FREE, ZERO], () => SUPPORTED);
+  const result = await only.watch.run();
+  assert.equal(result.recommend, false, "with only free models cheaper, there is nothing to consider");
+  assert.deepEqual(only.asked, []);
+  assert.equal(only.sent.length, 0);
+  assert.equal(llm.openrouterModels().haiku, "deepseek/deepseek-v4.1-flash");
+  const report = fs.readFileSync(path.join(DIR, "model-watch", "2026-11-21.md"), "utf8");
+  assert.match(report, /chief: haiku → deepseek\/deepseek-v4\.1-flash.*\n  No cheaper tool-capable alternative today\./);
+  assert.match(report, /inclusionai\/ling-3\.2-flash:free — \$0\.00\/M in, \$0\.00\/M out, context 1000000 \(free: rate-limited for the whole account, never a candidate\)/);
+  // Beside a paid candidate, the free ones are still passed over and the paid one is what is looked up.
+  store.setSetting("modelWatch", undefined);
+  const mixed = watching([...fullList(), FREE, ZERO], () => UNSUPPORTED);
+  await mixed.watch.run();
+  assert.deepEqual(mixed.asked, ["qwen/qwen3.8-flash>deepseek/deepseek-v4.1-flash"]);
+  fresh();
+});
+
+test("candidates are looked up cheapest first, three a day at most, and the first one supported is taken", async () => {
+  fresh();
+  const cheaper = [row("a/one", "0.00000005", "0.0000001"), row("b/two", "0.00000005", "0.0000002"), row("c/three", "0.00000005", "0.0000003"), row("d/four", "0.00000005", "0.0000004")];
+  const none = watching([...fullList(), ...cheaper], () => UNSUPPORTED);
+  await none.watch.run();
+  assert.deepEqual(none.asked.map((a) => a.split(">")[0]), ["a/one", "b/two", "c/three"], "three lookups, cheapest first");
+  // The next day the three already looked up are skipped, and the next cheapest get their turn.
+  const next = watching([...fullList(), ...cheaper], (id) => (id === "qwen/qwen3.8-flash" ? SUPPORTED : UNSUPPORTED), at("2026-11-22T09:30:00Z"));
+  const result = await next.watch.run();
+  assert.deepEqual(next.asked.map((a) => a.split(">")[0]), ["d/four", "qwen/qwen3.8-flash"]);
+  assert.equal(result.applied?.to, "qwen/qwen3.8-flash", "the first candidate the evidence supports is taken, not the cheapest on the list");
+  fresh();
+});
+
+test("a tier the check has just moved is left alone for a week, and a tier the deploy pins is never looked at", async () => {
+  fresh();
+  const day1 = watching(fullList(), () => SUPPORTED);
+  await day1.watch.run();
+  assert.equal(llm.openrouterModels().haiku, "qwen/qwen3.8-flash");
+  const EVEN_CHEAPER = row("x/cheaper-still", "0.00000005", "0.0000001", true, 256000);
+  const day2 = watching([...fullList(), EVEN_CHEAPER], () => SUPPORTED, at("2026-11-22T09:30:00Z"));
+  const held = await day2.watch.run();
+  assert.deepEqual(day2.asked, [], "no lookup the day after a move");
+  assert.equal(held.applied, undefined);
+  assert.equal(day2.sent.length, 0);
+  assert.match(fs.readFileSync(path.join(DIR, "model-watch", "2026-11-22.md"), "utf8"), /The check moved the haiku tier on 2026-11-21, and leaves it alone for 7 days after a move\./);
+  const day9 = watching([...fullList(), EVEN_CHEAPER], () => UNSUPPORTED, at("2026-11-29T09:30:00Z"));
+  await day9.watch.run();
+  assert.deepEqual(day9.asked, ["x/cheaper-still>qwen/qwen3.8-flash"], "after a week the tier is looked at again, against the model now in force");
+  fresh();
+  // The deploy's own variable outranks the catalogue, so there is nothing the check could move.
+  config.openrouter.models.haiku = "deepseek/deepseek-v4.1-flash";
+  const pinned = watching(fullList(), () => SUPPORTED);
+  const result = await pinned.watch.run();
+  config.openrouter.models.haiku = "";
+  assert.deepEqual(pinned.asked, []);
+  assert.equal(result.applied, undefined);
+  assert.equal(pinned.sent.length, 0);
+  assert.match(fs.readFileSync(path.join(DIR, "model-watch", "2026-11-21.md"), "utf8"), /OPENROUTER_HAIKU_MODEL is set in the deploy, so the check cannot move the haiku tier and looked nothing up\./);
+  fresh();
+});
+
+test("a stronger tier is never traded down, and a day with a move and a broken model says both", async () => {
+  fresh();
+  // As deployed: engineers on sonnet, the maintainer on opus. The engineers' model has an alternative
+  // well under its own price (and above the cheap tier's). It is listed and never looked up.
+  const deployed = () => {
+    cat.writeCatalogue(DIR, { version: 1, roles: { engineer: "sonnet", maintainer: "opus" } });
+    cat.applyCatalogueRoles(store, DIR);
+  };
+  deployed();
+  const day = watching([...fullList(), row("cheap/coder", "0.0000008", "0.000003")], () => SUPPORTED);
+  await day.watch.run();
+  assert.deepEqual(day.asked, ["qwen/qwen3.8-flash>deepseek/deepseek-v4.1-flash"], "only the cheapest tier in use is looked at");
+  assert.equal(llm.openrouterModels().sonnet, "z-ai/glm-5.3", "the engineers' tier has not moved");
+  assert.match(day.sent[0]!, /the haiku tier, which chief and workers and designer run on, was moved/);
+  assert.match(fs.readFileSync(path.join(DIR, "model-watch", "2026-11-21.md"), "utf8"), /engineers: sonnet → z-ai\/glm-5\.3 .*\n  Cheaper on price alone: .*Listed, not recommended: this tier is bought for strength/);
+  fresh();
+  deployed();
+  // The maintainer's model has lost its tools the same morning the cheap tier is moved.
+  const both = watching([DEEPSEEK, QWEN, GLM, row("moonshotai/kimi-k3.1-pro", "0.000002", "0.00001", false)], () => SUPPORTED);
+  const result = await both.watch.run();
+  assert.equal(result.applied?.to, "qwen/qwen3.8-flash");
+  assert.equal(result.flagged, true);
+  assert.equal(both.sent.length, 2, "one message for the move, one for the broken model");
+  assert.match(both.sent[0]!, /was moved from deepseek\/deepseek-v4\.1-flash to qwen\/qwen3\.8-flash/);
+  assert.match(both.sent[1]!, /moonshotai\/kimi-k3\.1-pro (?:has|and others have) failed the check/);
+  fresh();
+  cat.applyCatalogueRoles(store, DIR);
+  assert.equal(config.models.engineer, "haiku", "the config overlay is put back for later tests");
 });

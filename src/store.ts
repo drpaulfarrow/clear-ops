@@ -480,9 +480,11 @@ export interface Settings {
   live?: { dailyBudgetUsd?: number; engineerBudgetUsd?: number; jobBudgetUsd?: number; models?: { chief?: string; worker?: string; engineer?: string; maintainer?: string } };
   /**
    * The day the model check last ran (src/model-ops.ts): the London date it reported and when, so a
-   * restart does not run it twice and a missed day runs it on the next boot. Written only by the check.
+   * restart does not run it twice and a missed day runs it on the next boot. `looked` is the London
+   * day each cheaper candidate was last looked up against the model then in force ("candidate>current"),
+   * so the same unsupported candidate is not searched for every morning. Written only by the check.
    */
-  modelWatch?: { ymd: string; at: string };
+  modelWatch?: { ymd: string; at: string; looked?: Record<string, string> };
 }
 
 interface State {
