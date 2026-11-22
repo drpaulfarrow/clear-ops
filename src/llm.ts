@@ -70,6 +70,15 @@ function allPrices(): Record<string, Price> {
   return { ...DEFAULT_OPENROUTER_PRICES, ...(readCatalogue().prices ?? {}), ...parsePrices(config.openrouter.prices) };
 }
 
+/**
+ * The price row for one model id from the full table (defaults, catalogue, OPENROUTER_PRICES), whether
+ * or not the model is in use. `modelPrices` below is filtered to the models in use for the SDK's caps;
+ * a change or a fallback also needs the row of a model the tier is about to move to or from.
+ */
+export function priceOf(id: string): Price | undefined {
+  return allPrices()[id];
+}
+
 export function provider(): Provider {
   // A declared provider wins, key or no key: with LLM_PROVIDER=openrouter and the key missing, runs fail
   // (openRouterKeyMissing) rather than falling back to Claude on the Anthropic key.

@@ -44,9 +44,10 @@ export interface PriceRow {
 export interface CatalogueChange {
   /** When it was applied, ISO. */
   at: string;
-  /** Who applied it: "chief" (a model_apply tool call). */
+  /** Who applied it: "chief" (a model_apply tool call), "model-check" (the daily check's fallback) or "runtime-fallback" (a run retried on its tier's previous model). */
   by: string;
-  kind: "alias" | "role";
+  /** "alias" and "role" are decisions; "fallback" is the check moving a tier back when its model vanished. */
+  kind: "alias" | "role" | "fallback";
   /** The tier (an alias change) or the role (a role change). */
   target: string;
   from: string;
@@ -69,6 +70,21 @@ export interface Catalogue {
   prices?: Record<string, PriceRow>;
   /** A role's tier, under Paul's own app setting (src/live-settings.ts). */
   roles?: Partial<Record<CatalogueRole, AliasName>>;
+  /**
+   * Per tier, the model it ran on before the current one (written whenever a tier's model changes).
+   * It protects availability in both directions (src/model-ops.ts): the daily check engages it when
+   * the tier's model has left OpenRouter's list, and a run that OpenRouter refuses because its model
+   * no longer exists is retried on it at once (src/jobs.ts), so a withdrawn model does not stop jobs.
+   */
+  fallbacks?: Partial<Record<AliasName, string>>;
+  /**
+   * Per role, the tier (or full provider id) it ran on before the current one, written whenever a
+   * role's tier changes, applied or reverted. It is the role's own half of the availability
+   * fallback: a run of that role that OpenRouter refuses because its model no longer exists is
+   * retried on it at once (src/model-ops.ts engageRunFallback, src/jobs.ts), so a role-only
+   * decision protects its runs exactly as a tier change protects the tier's.
+   */
+  roleFallbacks?: Partial<Record<CatalogueRole, string>>;
   /** Every applied change, newest last, bounded. */
   changes?: CatalogueChange[];
 }
@@ -113,11 +129,23 @@ function kept(raw: unknown): Catalogue {
     for (const [k, v] of Object.entries(file.roles)) if (isRoleName(k) && isAliasName(v)) roles[k] = v;
     if (Object.keys(roles).length) out.roles = roles;
   }
+  if (file.fallbacks && typeof file.fallbacks === "object") {
+    const fallbacks: Partial<Record<AliasName, string>> = {};
+    for (const [k, v] of Object.entries(file.fallbacks)) if (isAliasName(k) && typeof v === "string" && v.includes("/")) fallbacks[k] = v;
+    if (Object.keys(fallbacks).length) out.fallbacks = fallbacks;
+  }
+  if (file.roleFallbacks && typeof file.roleFallbacks === "object") {
+    // A role's fallback is the tier it ran on before, or the full provider id the deploy set: both
+    // are restorable, anything else is dropped rather than trusted.
+    const roleFallbacks: Partial<Record<CatalogueRole, string>> = {};
+    for (const [k, v] of Object.entries(file.roleFallbacks)) if (isRoleName(k) && typeof v === "string" && (isAliasName(v) || v.includes("/"))) roleFallbacks[k] = v;
+    if (Object.keys(roleFallbacks).length) out.roleFallbacks = roleFallbacks;
+  }
   if (Array.isArray(file.changes)) {
     const changes = file.changes.filter(
       (c): c is CatalogueChange =>
         !!c && typeof c === "object" && typeof (c as CatalogueChange).at === "string" && (c as CatalogueChange).at !== "" &&
-        ((c as CatalogueChange).kind === "alias" || (c as CatalogueChange).kind === "role") &&
+        ((c as CatalogueChange).kind === "alias" || (c as CatalogueChange).kind === "role" || (c as CatalogueChange).kind === "fallback") &&
         typeof (c as CatalogueChange).target === "string" && typeof (c as CatalogueChange).from === "string" && typeof (c as CatalogueChange).to === "string" && typeof (c as CatalogueChange).why === "string" && (c as CatalogueChange).why !== "",
     );
     if (changes.length) out.changes = changes.slice(-MAX_CATALOGUE_CHANGES);

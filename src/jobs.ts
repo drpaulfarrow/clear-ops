@@ -7,6 +7,8 @@ import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { BEAT_NOTE, BEAT_SERVER, BEAT_TOOLS, beatServer } from "./beats.js";
 import { perJobModelError, provider, runRoute } from "./llm.js";
+import { engageRunFallback, isWithdrawnModelFailure } from "./model-ops.js";
+import { isAliasName, type CatalogueRole } from "./catalogue.js";
 import type { OtpRelay } from "./otp.js";
 import { DocReaderError, type DocReader } from "./doc-reader.js";
 import { execFile } from "node:child_process";
@@ -54,6 +56,17 @@ export function lockKey(job: Pick<Job, "kind" | "target">): JobTarget | undefine
   if (!PR_KINDS.includes(job.kind)) return undefined;
   if (job.kind === "create_agent") return "self";
   return job.target ?? "product";
+}
+
+/**
+ * The catalogue role a job's kind runs as, for the runtime model fallback (src/model-ops.ts
+ * engageRunFallback): the worker, engineer, maintainer and designer tiers the catalogue can move.
+ * An executive-assistant job has none (it runs on Anthropic, where the fallback path never fires);
+ * every other kind the runner starts is one of the four.
+ */
+function catalogueRole(kind: JobKind): CatalogueRole | undefined {
+  const role = roleForKind(kind);
+  return role === "worker" || role === "engineer" || role === "maintainer" || role === "designer" ? role : undefined;
 }
 
 /** Why the service stopped a running job. */
@@ -1230,6 +1243,30 @@ export class JobRunner {
           // nothing back; that is a budget stop, not a crash, and it is classified below.
           if (live.stop) throw err;
           result = { text: "", error: failureFromError(err) };
+        }
+      }
+      // The one failure the service cures by itself: a run whose model OpenRouter no longer offers
+      // (withdrawn mid-flight). The recorded previous model is engaged at once, the move is recorded
+      // like any change, and the run happens again on it, so the job does not die waiting for the
+      // next daily check (src/model-ops.ts engageRunFallback, the same record the daily check
+      // engages). A role change recorded the role's own previous tier (catalogue.roleFallbacks), and
+      // for a run of that role it wins: the role is moved back, never the whole tier, and the retry is
+      // started on what it ran on before. Once only: engaging spends the fallback, so a second
+      // refusal fails the job honestly. A run pinned to a model by its id (never an alias) and every
+      // run on Anthropic have no fallback and fail as before.
+      if (!live.stop && !onAnthropic && isAliasName(route.model) && result?.error && isWithdrawnModelFailure(result.error)) {
+        const withdrew = engageRunFallback(route.model, undefined, result.error.detail, catalogueRole(job.kind), this.store);
+        if (withdrew) {
+          trace.note(`model ${withdrew.from} was refused by OpenRouter mid-run; retried on its recorded previous ${withdrew.role ? `tier for ${withdrew.role}` : "model"} ${withdrew.to}`);
+          shown.note(`The model this job started on is gone from OpenRouter; retrying on ${withdrew.to}`);
+          result = undefined;
+          try {
+            result = await this.run(withdrew.retryOn ? { ...opts, model: withdrew.retryOn } : opts);
+          } catch (err) {
+            if (live.stop) throw err;
+            result = { text: "", error: failureFromError(err) };
+          }
+          if (!runFailure(result)) result.text = addToReport(result.text, `The model this job started on (${withdrew.from}) had been withdrawn from OpenRouter, so the run was retried once on its recorded previous model (${withdrew.to}).`);
         }
       }
       // Out of turns before it wrote anything up (the SDK's error_max_turns). The reading is done and
