@@ -239,10 +239,11 @@ export const config = {
   /**
    * The daily model check (src/model-ops.ts): once a day, past the given London hour, the service
    * reads OpenRouter's public model list, verifies every model the workforce runs on and writes a
-   * report of offers and better-value alternatives. It recommends and never applies a recommendation;
-   * the one change it makes itself is the availability fallback, when a model in force has left
-   * OpenRouter's list and the catalogue holds the tier's previous model (recorded, and Paul is told).
-   * It messages Paul only when it recommends a change or a model has gone missing. MODEL_CHECK=off
+   * report of offers and cheaper alternatives. For the cheapest tier in use it moves the tier to a
+   * cheaper model itself, only when published benchmarks found by the service's own search support it
+   * (src/model-evidence.ts). The other change it makes itself is the availability fallback, when a
+   * model in force has left OpenRouter's list and the catalogue holds the tier's previous model. Both
+   * are recorded, and Paul is told; otherwise it is silent unless a model is broken. MODEL_CHECK=off
    * turns it off; MODEL_CHECK_HOUR is the London hour it runs at (0-23).
    */
   modelCheck: {
