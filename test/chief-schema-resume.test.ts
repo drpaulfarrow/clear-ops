@@ -233,8 +233,8 @@ test("the merged current schema: a resumed session under the versioned namespace
   // them as one schema, version 4, so the versioned ops namespace stays the single source of truth.
   // Version 5 since 19 Nov 2026: the usage_report tool, a new tool and so a schema change of its own.
   // Version 6: the model catalogue tools (models, model_apply, model_revert), three new tools of their own.
-  assert.equal(OPS_SCHEMA_VERSION, 6, "the current version: 4 merged both version 3s, 5 added usage_report, 6 added the model catalogue tools");
-  assert.equal(OPS_SERVER_NAME, "ops_v6", "the one current namespace carries both parameters");
+  assert.equal(OPS_SCHEMA_VERSION, 7, "the current version: 4 merged both version 3s, 5 added usage_report, 6 added the model catalogue tools, 7 added the plan tools");
+  assert.equal(OPS_SERVER_NAME, "ops_v7", "the one current namespace carries both parameters");
   // The same session again, resumed under the current namespace with the merged schema: the model
   // must be advertised doneWhen and source together, and the real CLI must dispatch both.
   const four = await runTurn("turn-four", { resume: firstSession, name: OPS_SERVER_NAME, withReviewOnly: true, withCurrent: true, callArgs: { kind: "engineer", doneWhen: "npm test passes", title: "Schema turn four", brief: "Synthetic brief.", reviewOnly: true, source: "synthetic-source-reference" } });

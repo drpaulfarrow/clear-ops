@@ -32,6 +32,7 @@ import { RealCostMeter, usdAmount, type JobCostWatch, type RealCost } from "./re
 import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
+import { PLAN_FIX_ROUNDS, PlanRunner } from "./plans.js";
 import { CARRY_MAX_PER_REPO, CARRY_PER_JOB, carriedFree, carriedSection, parseCarryLines, type CarriedFinding } from "./carry.js";
 import { randomBytes } from "node:crypto";
 import { JobTrace, tracesDir, type RawTraceEvent } from "./trace.js";
@@ -405,9 +406,42 @@ export class JobRunner {
     this.copyWaitMs = l.copyWaitMs ?? COPY_WAIT_MS;
     this.saveWork = l.saveWork ?? defaultSaveWork;
     this.failures = new FailureNotifier(messenger, opts.failureNotices, (kind) => this.holdSentence(kind));
+    this.plans = new PlanRunner(store, this, messenger, () => this.now());
   }
 
-  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly" | "doneWhen"> = {}, launch: { source?: string } = {}): Job {
+  /** The plans this runner drives to completion (src/plans.ts). */
+  readonly plans: PlanRunner;
+
+  /** True when a daily spending cap is set at all: a plan is not started without one (src/plans.ts). */
+  hasDailyCap(): boolean {
+    return config.dailyBudgetUsd !== undefined;
+  }
+
+  /** A pull request's state as GitHub has it now, for the plan driver. Undefined when it cannot be read. */
+  async pullState(url: string): Promise<"open" | "merged" | "closed" | undefined> {
+    if (!this.prState) return undefined;
+    const state = await this.prState(url).catch(() => undefined);
+    return state === "open" || state === "merged" || state === "closed" ? state : undefined;
+  }
+
+  /** The verdict a finished review gave on a pull request (its last one), read from its saved report. */
+  verdictOf(review: Job, pr: string | undefined): ReviewVerdict | undefined {
+    const verdicts = parseReviewVerdicts(this.store.readOutput(review.id) ?? "");
+    return (pr ? verdicts.filter((v) => samePr(v.pr, pr)) : verdicts).at(-1);
+  }
+
+  /**
+   * Has the maintainer review an engineer job's pull request again, exactly as the review that
+   * followed the job did. For a plan Paul resumes after sorting out what a review was waiting on.
+   */
+  reviewAgain(id: string): Job {
+    const job = this.store.getJob(id);
+    if (!job || job.kind !== "engineer" || !job.pr) throw new Error(`Job ${id} has no pull request to review again.`);
+    const report = this.store.readOutput(id) ?? "";
+    return this.start("maintain", `Review the pull request ${job.pr} again: what it was waiting on has been dealt with.\n\n${job.brief}${carriedSection(this.carriedFor(job, job.pr))}\n\nEngineer's report:\n${report}`, job.requestedBy, job.target, job.replyTo, { title: reviewTitle(job), reviewOf: id, pr: job.pr });
+  }
+
+  start(kind: JobKind, brief: string, requestedBy: string, target: JobTarget = "product", replyTo?: string, extra: Pick<Job, "title" | "pr" | "fixRound" | "reviewOf" | "permits" | "designLoop" | "designRound" | "designFinal" | "awaitDeploy" | "depth" | "origin" | "triggerMessage" | "model" | "reviewOnly" | "doneWhen" | "plan"> = {}, launch: { source?: string } = {}): Job {
     // Permits are per kind: the executive assistant's drafts and holds, and an engineer's create_repo.
     // The chief grants them only when Paul asked in chat; nothing else gets any.
     extra = { ...extra };
@@ -1646,6 +1680,8 @@ export class JobRunner {
   startWatchdog(intervalMs = MINUTE): () => void {
     const timer = setInterval(() => {
       this.checkLiveness().catch((err) => console.warn(`liveness check failed: ${err instanceof Error ? err.message : err}`));
+      // The plan driver's turn (src/plans.ts): it never throws.
+      void this.plans.tick();
     }, intervalMs);
     timer.unref?.();
     return () => clearInterval(timer);
@@ -1865,10 +1901,14 @@ export class JobRunner {
     // How many rounds start on their own is Paul's setting, and none by default (config.autoFixRounds):
     // past it the verdict goes to him, and one round is his to ask for. A design loop keeps its own count.
     const auto = Math.min(config.autoFixRounds, MAX_FIX_ROUNDS);
-    if (!reviewed.designLoop && round > auto && auto < MAX_FIX_ROUNDS) {
+    // A plan's pull requests are the exception (Paul, 22 Nov 2026): a plan is not to stall on a
+    // blocking review, so its steps get PLAN_FIX_ROUNDS on their own when the setting gives fewer
+    // (src/plans.ts). Still never past MAX_FIX_ROUNDS.
+    const allowed = reviewed.plan ? Math.max(auto, Math.min(PLAN_FIX_ROUNDS, MAX_FIX_ROUNDS)) : auto;
+    if (!reviewed.designLoop && round > allowed && allowed < MAX_FIX_ROUNDS) {
       return {
         chained: "",
-        escalation: `The maintainer asked for changes on ${url}${verdict.detail ? `: ${shortText(verdict.detail, 300)}` : "."}${verdict.detail && !/[.!?]$/.test(shortText(verdict.detail, 300)) ? "." : ""} No fix round was started, because ${auto === 0 ? "automatic fix rounds are off" : `${auto === 1 ? "the one automatic fix round has" : `the ${auto} automatic fix rounds have`} been used`}. Reply "one more fix round on ${url}" to have an engineer fix it once, or merge or close it as it is. The whole review: show job ${review.id}.`,
+        escalation: `The maintainer asked for changes on ${url}${verdict.detail ? `: ${shortText(verdict.detail, 300)}` : "."}${verdict.detail && !/[.!?]$/.test(shortText(verdict.detail, 300)) ? "." : ""} No fix round was started, because ${allowed === 0 ? "automatic fix rounds are off" : `${allowed === 1 ? "the one automatic fix round has" : `the ${allowed} automatic fix rounds have`} been used`}. Reply "one more fix round on ${url}" to have an engineer fix it once, or merge or close it as it is. The whole review: show job ${review.id}.`,
       };
     }
     if (round > MAX_FIX_ROUNDS) {
@@ -1942,7 +1982,7 @@ export class JobRunner {
       asked?.by ?? reviewed.requestedBy,
       target,
       asked?.replyTo ?? reviewed.replyTo,
-      { title: fixTitle(jobTitle(reviewed), round), pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound },
+      { title: fixTitle(jobTitle(reviewed), round), pr: url, fixRound: round, designLoop: reviewed.designLoop, designRound: reviewed.designRound, ...(reviewed.plan ? { plan: reviewed.plan } : {}) },
     );
   }
 
