@@ -104,27 +104,62 @@ export interface PlanJobs {
   verdictOf(review: Job, pr: string | undefined): { outcome: "merged" | "changes_requested" | "needs_founder"; detail?: string } | undefined;
 }
 
+/** A plan as the board shows it: where it is, and what the driver saw the last time it looked. */
+export interface PlanView {
+  id: string;
+  title: string;
+  target: JobTarget;
+  /** "waiting" is a running plan the daily cap is holding. */
+  state: "running" | "waiting" | "stopped" | "done";
+  done: number;
+  skipped: number;
+  total: number;
+  /** The step it is at, counted from one, with its title and the job it runs as. */
+  at?: { n: number; title: string; jobId?: string };
+  /** Why it stopped. */
+  why?: string;
+  /** The open pull request a stopped plan carries on from once it is merged. */
+  watch?: string;
+  /** What the driver found the last time it looked, in plain words. */
+  note?: string;
+  /** When the driver last looked. Absent when it has not looked since the service started. */
+  lookedAt?: string;
+  /** A running plan the driver has not looked at for PLAN_STALE_MS: its driver is not turning, and that is a fault. */
+  stale?: true;
+  finishedAt?: string;
+}
+
+/** A running plan the driver has not looked at for this long has a driver that is not turning. */
+export const PLAN_STALE_MS = 5 * 60_000;
+
 type StepStatus =
-  | { kind: "working" }
+  | { kind: "working"; note: string }
   | { kind: "done"; pr?: string }
   | { kind: "failed"; job: Job }
   | { kind: "blocked"; why: string; pr?: string; verdict?: "changes_requested" | "needs_founder" }
   | { kind: "unreviewed"; pr: string; job: Job };
 
 const byCreated = (a: Job, b: Job) => a.createdAt.localeCompare(b.createdAt);
+const CAP_NOTE = "Waiting: today's spending cap is reached. It carries on tomorrow, or sooner on /resume.";
 const stepWords = (plan: Plan, i: number) => `step ${i + 1} of ${plan.steps.length} (${plan.steps[i]!.title})`;
 
 export class PlanRunner {
   private ticking = false;
   /** When each stopped plan's pull request was last looked up, so GitHub is asked every few minutes and not every turn. */
   private readonly looked = new Map<string, number>();
+  /** What each plan's last turn found, and when: shown on the board so a plan that is not moving says why. Memory only. */
+  private readonly seen = new Map<string, { at: number; note: string }>();
+  /** When this driver came into being, so a plan is not called neglected in the first minutes after a restart. */
+  private readonly bornAt: number;
 
   constructor(
     private readonly store: Store,
     private readonly jobs: PlanJobs,
     private readonly messenger: Messenger,
     private readonly now: () => number = () => Date.now(),
-  ) {}
+  ) {
+    this.bornAt = this.now();
+  }
 
   all(): Plan[] {
     return this.store.settings().plans ?? [];
@@ -185,10 +220,13 @@ export class PlanRunner {
         const plan = this.get(id);
         if (!plan) continue;
         try {
-          if (plan.state === "running") await this.advance(plan);
-          else if (plan.state === "stopped" && plan.watch) await this.watch(plan);
+          const note = plan.state === "running" ? await this.advance(plan) : plan.state === "stopped" && plan.watch ? await this.watch(plan) : undefined;
+          if (note !== undefined) this.seen.set(plan.id, { at: this.now(), note });
         } catch (err) {
-          console.warn(`plan ${plan.id} could not be advanced: ${err instanceof Error ? err.message : err}`);
+          // Said on the board, not only in the log: a plan that cannot be advanced must not look like one that is working.
+          const why = err instanceof Error ? err.message : String(err);
+          this.seen.set(plan.id, { at: this.now(), note: `The driver could not work out where this plan is: ${why.slice(0, 200)}` });
+          console.warn(`plan ${plan.id} could not be advanced: ${why}`);
         }
       }
     } finally {
@@ -203,7 +241,8 @@ export class PlanRunner {
     if (!engineers.length) return { kind: "blocked", why: "its job is no longer on record" };
     const ids = new Set(engineers.map((j) => j.id));
     const chain = [...engineers, ...all.filter((j) => j.kind === "maintain" && !!j.reviewOf && ids.has(j.reviewOf))].sort(byCreated);
-    if (chain.some((j) => j.status === "queued" || j.status === "running")) return { kind: "working" };
+    const busy = chain.filter((j) => j.status === "queued" || j.status === "running");
+    if (busy.length) return { kind: "working", note: busy.map((j) => `${j.title ?? j.kind} (${j.id}) is ${j.status === "running" ? "running" : "queued"}`).join("; ") + "." };
     const last = chain[chain.length - 1]!;
     const pr = [...engineers].reverse().find((j) => j.pr)?.pr;
     if (last.status === "failed") return { kind: "failed", job: last };
@@ -212,13 +251,13 @@ export class PlanRunner {
       const verdict = this.jobs.verdictOf(last, pr);
       if (verdict?.outcome === "merged") return { kind: "done", ...(pr ? { pr } : {}) };
       // A fix round is started a moment after its review finishes: give it that moment.
-      if (!settled) return { kind: "working" };
+      if (!settled) return { kind: "working", note: `Review ${last.id} has just finished; looking again in a minute.` };
       if (verdict?.outcome === "needs_founder") return { kind: "blocked", why: `it needs you${verdict.detail ? `: ${verdict.detail.slice(0, 300)}` : ` (show job ${last.id} has why)`}`, ...(pr ? { pr } : {}), verdict: "needs_founder" };
       if (verdict?.outcome === "changes_requested") return { kind: "blocked", why: `the maintainer still asks for changes after the automatic fix rounds (show job ${last.id})`, ...(pr ? { pr } : {}), verdict: "changes_requested" };
       return { kind: "blocked", why: pr ? `its review gave no verdict (show job ${last.id})` : `it opened no pull request (show job ${engineers[engineers.length - 1]!.id})`, ...(pr ? { pr } : {}) };
     }
     // The last job is an engineer's and it is done: its review starts a moment later.
-    if (!settled) return { kind: "working" };
+    if (!settled) return { kind: "working", note: `Job ${last.id} has just finished; its review follows.` };
     if (!pr) return { kind: "blocked", why: `it opened no pull request and nothing reviewed it (show job ${last.id})` };
     return { kind: "unreviewed", pr, job: last };
   }
@@ -254,8 +293,8 @@ export class PlanRunner {
     this.save(plan);
   }
 
-  /** Moves a running plan as far as it can go right now. */
-  private async advance(plan: Plan): Promise<void> {
+  /** Moves a running plan as far as it can go right now. Returns what it found, in plain words, for the board. */
+  private async advance(plan: Plan): Promise<string> {
     for (;;) {
       const i = plan.steps.findIndex((s) => s.state === "todo" || s.state === "working");
       if (i < 0) {
@@ -265,33 +304,31 @@ export class PlanRunner {
         this.save(plan);
         const skipped = plan.steps.filter((s) => s.state === "skipped").length;
         this.tell(plan, `The plan "${plan.title}" is finished: ${plan.steps.length - skipped} of its ${plan.steps.length} steps are merged${skipped ? ` and ${skipped} ${skipped === 1 ? "was" : "were"} skipped` : ""}.`);
-        return;
+        return "Finished.";
       }
       const step = plan.steps[i]!;
       if (step.state === "todo") {
-        if (this.waitingForCap(plan, i)) return;
+        if (this.waitingForCap(plan, i)) return CAP_NOTE;
         let job: Job;
         try {
           job = this.jobs.start("engineer", step.brief, plan.requestedBy, plan.target, plan.replyTo, { title: step.title, doneWhen: step.doneWhen, plan: { id: plan.id, step: i } });
         } catch (err) {
-          this.stop(plan, i, `its job could not be started (${err instanceof Error ? err.message : String(err)})`);
-          return;
+          const why = `its job could not be started (${err instanceof Error ? err.message : String(err)})`;
+          this.stop(plan, i, why);
+          return `Stopped: ${why}.`;
         }
         step.state = "working";
         step.jobId = job.id;
         this.save(plan);
-        return;
+        return `Started this step as job ${job.id}.`;
       }
       const status = this.status(plan, i);
-      if (status.kind === "working") return;
+      if (status.kind === "working") return status.note;
       if (status.kind === "done") {
         this.doneStep(plan, i, status.pr);
         continue;
       }
-      if (status.kind === "failed") {
-        if (!(await this.afterFailure(plan, i, status.job))) return;
-        continue;
-      }
+      if (status.kind === "failed") return this.afterFailure(plan, i, status.job);
       if (status.kind === "unreviewed") {
         // A pull request nothing reviewed after its last push: merged or closed in the meantime, or the review never started.
         const state = await this.jobs.pullState(status.pr);
@@ -299,51 +336,57 @@ export class PlanRunner {
           this.doneStep(plan, i, status.pr);
           continue;
         }
-        this.stop(plan, i, state === "closed" ? `${status.pr} was closed without being merged` : `nothing reviewed ${status.pr} after its last push (show job ${status.job.id})`, state === "closed" ? undefined : status.pr);
-        return;
+        const why = state === "closed" ? `${status.pr} was closed without being merged` : `nothing reviewed ${status.pr} after its last push (show job ${status.job.id})`;
+        this.stop(plan, i, why, state === "closed" ? undefined : status.pr);
+        return `Stopped: ${why}.`;
       }
       this.stop(plan, i, status.why, status.pr);
-      return;
+      return `Stopped: ${status.why}.`;
     }
   }
 
-  /** A step's job failed. Returns true when the loop should look at the step again at once. */
-  private async afterFailure(plan: Plan, i: number, job: Job): Promise<boolean> {
+  /** A step's job failed: retry it, wait, or stop. Returns what was done, in plain words, for the board. */
+  private afterFailure(plan: Plan, i: number, job: Job): string {
     const step = plan.steps[i]!;
     const kind = (job.failure ?? "error") as FailureKind;
+    const because = failureReason({ kind, detail: job.error ?? "" });
     if (kind === "cancelled") {
-      this.stop(plan, i, `its job was stopped (${job.id})`);
-      return false;
+      const why = `its job was stopped (${job.id})`;
+      this.stop(plan, i, why);
+      return `Stopped: ${why}.`;
     }
     // Credit or a rejected key holds the whole engineering queue, and /resume reruns what failed: the plan waits with it.
-    if (HOLD_KINDS.includes(kind)) return false;
+    if (HOLD_KINDS.includes(kind)) return `Job ${job.id} failed because ${because}. The queues are held until /resume, which runs it again.`;
     if ((step.retries ?? 0) >= PLAN_RETRIES) {
-      this.stop(plan, i, `its job failed ${PLAN_RETRIES + 1} times, the last because ${failureReason({ kind, detail: job.error ?? "" })} (show job ${job.id})`);
-      return false;
+      const why = `its job failed ${PLAN_RETRIES + 1} times, the last because ${because} (show job ${job.id})`;
+      this.stop(plan, i, why);
+      return `Stopped: ${why}.`;
     }
-    if (this.waitingForCap(plan, i)) return false;
-    if (this.store.queueHold()) return false;
-    if (this.now() - Date.parse(job.finishedAt ?? job.createdAt) < PLAN_RETRY_WAIT_MS) return false;
+    if (this.waitingForCap(plan, i)) return CAP_NOTE;
+    if (this.store.queueHold()) return `Job ${job.id} failed because ${because}. The queues are held until /resume; it is retried after that.`;
+    const retryAt = Date.parse(job.finishedAt ?? job.createdAt) + PLAN_RETRY_WAIT_MS;
+    if (this.now() < retryAt) return `Job ${job.id} failed because ${because}. It is retried in ${Math.max(1, Math.ceil((retryAt - this.now()) / 60_000))} min (try ${(step.retries ?? 0) + 2} of ${PLAN_RETRIES + 1}).`;
     step.retries = (step.retries ?? 0) + 1;
     this.save(plan);
     this.jobs.retry(job.id);
-    return false;
+    return `Job ${job.id} failed because ${because}, and is being retried (try ${step.retries + 1} of ${PLAN_RETRIES + 1}).`;
   }
 
   /** A stopped plan waiting on an open pull request: carries on when it has been merged. */
-  private async watch(plan: Plan): Promise<void> {
-    if (!plan.watch || this.now() - Date.parse(plan.stoppedAt ?? plan.createdAt) > PLAN_WATCH_MS) return;
+  private async watch(plan: Plan): Promise<string | undefined> {
+    if (!plan.watch || this.now() - Date.parse(plan.stoppedAt ?? plan.createdAt) > PLAN_WATCH_MS) return undefined;
     const i = plan.steps.findIndex((s) => s.state === "working");
-    if (i < 0) return;
-    if (this.now() - (this.looked.get(plan.id) ?? 0) < PLAN_WATCH_EVERY_MS) return;
+    if (i < 0) return undefined;
+    if (this.now() - (this.looked.get(plan.id) ?? 0) < PLAN_WATCH_EVERY_MS) return undefined;
     this.looked.set(plan.id, this.now());
-    if ((await this.jobs.pullState(plan.watch)) !== "merged") return;
+    const state = await this.jobs.pullState(plan.watch);
+    if (state !== "merged") return `Stopped, and watching ${plan.watch}: ${state === undefined ? "GitHub did not say what state it is in" : `it is ${state}`}.`;
     const pr = plan.watch;
     plan.state = "running";
     delete plan.why;
     delete plan.watch;
     this.doneStep(plan, i, pr);
-    await this.advance(plan);
+    return this.advance(plan);
   }
 
   /** Paul stops a plan. Its running job, if any, is left to finish: stopping a job is its own command. */
@@ -420,6 +463,39 @@ export class PlanRunner {
     return go(`The plan "${plan.title}" carries on: ${pr} is being reviewed again (${review.id}).`);
   }
 
+  /**
+   * The plans as the board shows them: every open one, and those that finished in the last day. Each
+   * says what the driver found the last time it looked and when, so a plan that is not moving says
+   * why, and one the driver has stopped looking at says that.
+   */
+  view(): PlanView[] {
+    const now = this.now();
+    return [...this.all()]
+      .reverse()
+      .filter((p) => p.state !== "done" || now - Date.parse(p.steps.map((s) => s.finishedAt ?? "").sort().at(-1) || p.createdAt) < 24 * 60 * 60_000)
+      .map((p) => {
+        const i = p.steps.findIndex((s) => s.state === "todo" || s.state === "working");
+        const seen = this.seen.get(p.id);
+        const capped = p.state === "running" && seen?.note === CAP_NOTE;
+        const last = p.steps.map((s) => s.finishedAt ?? "").sort().at(-1);
+        return {
+          id: p.id,
+          title: p.title,
+          target: p.target,
+          state: capped ? ("waiting" as const) : p.state,
+          done: p.steps.filter((s) => s.state === "done").length,
+          skipped: p.steps.filter((s) => s.state === "skipped").length,
+          total: p.steps.length,
+          ...(i >= 0 ? { at: { n: i + 1, title: p.steps[i]!.title, ...(p.steps[i]!.jobId ? { jobId: p.steps[i]!.jobId } : {}) } } : {}),
+          ...(p.state === "stopped" && p.why ? { why: p.why } : {}),
+          ...(p.state === "stopped" && p.watch ? { watch: p.watch } : {}),
+          ...(seen ? { note: seen.note, lookedAt: new Date(seen.at).toISOString() } : {}),
+          ...(p.state === "running" && now - (seen?.at ?? this.bornAt) > PLAN_STALE_MS ? { stale: true as const } : {}),
+          ...(p.state === "done" && last ? { finishedAt: last } : {}),
+        };
+      });
+  }
+
   /** The plans as the chief reports them: open ones first, each with where it is. */
   describe(): string {
     const plans = [...this.all()].reverse();
@@ -431,7 +507,9 @@ export class PlanRunner {
         const i = p.steps.findIndex((s) => s.state === "todo" || s.state === "working");
         const head = `Plan ${p.id} "${p.title}" on ${p.target}: ${p.state}${p.state === "stopped" && p.why ? ` (${p.why})` : ""}. ${done} of ${p.steps.length} steps merged${skipped ? `, ${skipped} skipped` : ""}${i >= 0 ? `; now at ${stepWords(p, i)}` : ""}.`;
         const lines = p.steps.map((s, n) => `  ${n + 1}. ${s.title}: ${s.state}${s.jobId ? ` (job ${s.jobId})` : ""}${s.pr ? ` ${s.pr}` : ""}`);
-        return [head, ...lines].join("\n");
+        const seen = this.seen.get(p.id);
+        const looked = p.state === "done" ? [] : [seen ? `  The driver last looked ${Math.max(0, Math.round((this.now() - seen.at) / 60_000))} min ago and found: ${seen.note}` : "  The driver has not looked at this plan since the service started."];
+        return [head, ...looked, ...lines].join("\n");
       })
       .join("\n\n");
   }

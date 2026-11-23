@@ -869,6 +869,55 @@ function searchResults() {
   return out.length ? out : [h("div", { class: "empty" }, `Nothing found for "${data.q}".`)];
 }
 
+/* ---------- Plans: a build the service runs to completion (src/plans.ts) ---------- */
+
+/** What a plan card says first: where the plan is, in a few words. */
+const planState = (p) =>
+  p.state === "stopped" ? "Stopped" : p.state === "waiting" ? "Waiting for tomorrow's budget" : p.state === "done" ? "Finished" : p.stale ? "Not moving" : "Running";
+
+/**
+ * One plan. A stopped one says why and offers the two things Paul can say about it, as messages to
+ * Marlo: the buttons write the words for him and approve nothing. A running one says what the driver
+ * found the last time it looked, so "running" is never the whole answer when nothing is running.
+ */
+function planCard(p, now) {
+  const where = p.at ? `Step ${p.at.n} of ${p.total}: ${p.at.title}` : `${p.done} of ${p.total} steps merged${p.skipped ? `, ${p.skipped} skipped` : ""}`;
+  const tone = p.state === "stopped" || p.stale ? "bad" : p.state === "waiting" ? "wait" : p.state === "done" ? "good" : "now";
+  // The same way the "Try again" button asks: a message to Marlo in the chat, where his answer lands.
+  const ask = (text) => () => {
+    say("Asked Marlo. His answer is in the chat.");
+    void send(text);
+    draw();
+  };
+  return h(
+    "div",
+    { class: `card plan${p.state === "stopped" || p.stale ? " wait" : ""}` },
+    h("div", { class: "card-main" }, h("div", { class: "card-title" }, p.title), h("div", { class: "card-sub" }, `Plan · ${p.repositoryName} · ${p.done} of ${p.total} merged${p.skipped ? ` · ${p.skipped} skipped` : ""}`)),
+    h("div", { class: `card-line ${tone}` }, `${planState(p)}. ${where}`),
+    p.why ? h("div", { class: "card-sub" }, `Why: ${p.why}.`) : null,
+    p.watch ? h("div", { class: "card-sub" }, `It carries on by itself once ${p.watch} is merged.`) : null,
+    p.stale ? h("div", { class: "card-sub" }, p.lookedAt ? `The service last looked at this plan ${ago(p.lookedAt, now)}. It should look every minute, so something is wrong with the driver.` : "The service has not looked at this plan since it started. It should look every minute, so something is wrong with the driver.") : null,
+    p.note && p.state !== "done" && p.state !== "stopped" ? h("div", { class: "card-sub" }, p.lookedAt ? `${p.note} (${ago(p.lookedAt, now)})` : p.note) : null,
+    h(
+      "div",
+      { class: "links" },
+      p.at?.jobId ? h("a", { class: "btn", href: `#/job/${p.at.jobId}` }, "See this step's job") : null,
+      p.state === "stopped" ? h("button", { class: "btn primary", type: "button", onclick: ask(`Resume plan ${p.id}.`) }, "Resume") : null,
+      p.state === "stopped" ? h("button", { class: "btn", type: "button", onclick: ask(`Skip the step plan ${p.id} stopped at, and carry on.`) }, "Skip this step") : null,
+      p.state === "running" || p.state === "waiting" ? h("button", { class: "btn", type: "button", onclick: ask(`Stop plan ${p.id}.`) }, "Stop") : null,
+    ),
+  );
+}
+
+/** The plans column: open plans first, then any that finished in the last day. Absent when there are none. */
+function plansColumn(board, now) {
+  const sp = spaceOf();
+  const mine = (board.plans ?? []).filter((p) => !sp || (sp.own ? sp.repos.includes(p.repository) : p.repository === sp.id));
+  if (!mine.length) return null;
+  const needs = mine.some((p) => p.state === "stopped" || p.stale);
+  return column(needs ? "wait" : "run", "Plans", mine.map((p) => planCard(p, now)), "");
+}
+
 /* ---------- Board views ---------- */
 
 function statusView(board, now) {
@@ -883,6 +932,7 @@ function statusView(board, now) {
   return h(
     "div",
     { class: "cols" },
+    plansColumn(board, now),
     column("wait", "Waiting on me", [...board.waiting.map((w) => waitingCard(w, now)), ...by("waiting").map((j) => jobCard(j, now))], "Nothing needs you."),
     pullsColumn(board, now),
     column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),
@@ -1913,6 +1963,7 @@ function besideBoard() {
     noticeBar(),
     board.paused ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "The queues are held.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Resume")) : null,
     board.spend.capReached ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Today's cap is reached.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
+    plansColumn(board, now),
     column("wait", "Waiting on me", [...board.waiting.map((w) => waitingCard(w, now)), ...by("waiting").map((j) => jobCard(j, now))], "Nothing needs you."),
     pullsColumn(board, now, DONE_SHOWN_BESIDE),
     column("run", "Running", by("running").map((j) => jobCard(j, now)), "Nobody is working right now."),

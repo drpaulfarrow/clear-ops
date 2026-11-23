@@ -359,3 +359,66 @@ test("the chief is told to use a plan for a build carried through, and not to st
   assert.match(plans.PLAN_NOTE, /use plan_start with the steps in build order, one pull request each, and do not start_job them yourself or queue them/);
   assert.match(plans.PLAN_NOTE, /waits on the daily cap and carries on the next day, and tells Paul only when it stops or finishes/);
 });
+
+test("the board is told where every plan is, and what the driver found the last time it looked", async () => {
+  const { appBoard } = await import("../src/app-data.js");
+  const w = world([`REVIEW ${pr(1)}: needs Paul: add the DEPLOY_TOKEN secret to the repository`]);
+  const plan = start(w);
+  // Before the driver has had a turn there is nothing it found, and nothing is called neglected yet.
+  assert.deepEqual(w.plans.view().map((p) => [p.state, p.done, p.total, p.at?.n, p.at?.title, p.note, p.stale]), [["running", 0, 3, 1, "Project skeleton", undefined, undefined]]);
+  await w.plans.tick();
+  const started = w.plans.view()[0]!;
+  assert.match(started.note!, /^Started this step as job \w+\.$/);
+  assert.equal(started.at!.jobId, w.stepJobs(plan.id, 0)[0]!.id);
+  assert.ok(started.lookedAt);
+  // While its job runs the note names it, so "running" is never the whole answer.
+  await w.plans.tick();
+  assert.match(w.plans.view()[0]!.note!, /^Project skeleton \(\w+\) is (?:running|queued)\.|has just finished/);
+  // Stopped: the reason and the pull request it is waiting on are there for the board to show.
+  await w.turn();
+  const stopped = w.plans.view()[0]!;
+  assert.deepEqual([stopped.state, stopped.watch], ["stopped", pr(1)]);
+  assert.match(stopped.why!, /it needs you: add the DEPLOY_TOKEN secret/);
+  assert.equal(stopped.stale, undefined, "a stopped plan is not a neglected one");
+  // The same through the app's own board, with the repository named as the board names it.
+  const board = appBoard({ store: w.store, queue: Object.assign(Object.create(w.jobs), { plans: w.plans }) });
+  assert.deepEqual(board.plans.map((p) => [p.id, p.state, p.repository, typeof p.repositoryName]), [[plan.id, "stopped", "product", "string"]]);
+  // And in what Marlo reports.
+  assert.match(w.plans.describe(), /The driver last looked \d+ min ago and found: Stopped: it needs you/);
+});
+
+test("a plan the cap is holding says so, and a running plan nobody has looked at says that instead of looking busy", async () => {
+  const w = world();
+  w.state.capped = true;
+  start(w);
+  await w.plans.tick();
+  const waiting = w.plans.view()[0]!;
+  assert.equal(waiting.state, "waiting");
+  assert.match(waiting.note!, /today's spending cap is reached/);
+  // The driver stops turning (the fault this is for). After five minutes the plan is marked, not left saying "running".
+  w.state.clock += plans.PLAN_STALE_MS + 1000;
+  assert.equal(w.plans.view()[0]!.stale, true);
+  // One turn and it is no longer neglected.
+  w.state.capped = false;
+  await w.plans.tick();
+  assert.equal(w.plans.view()[0]!.stale, undefined);
+  // A driver that could not work out where a plan is says so on the board, not only in the log.
+  const broken = world();
+  start(broken);
+  await broken.plans.tick();
+  await waitFor(broken.settled);
+  (broken.store as unknown as { allJobs: () => never }).allJobs = () => {
+    throw new Error("the job records could not be read");
+  };
+  await broken.plans.tick();
+  assert.match(broken.plans.view()[0]!.note!, /The driver could not work out where this plan is: the job records could not be read/);
+});
+
+test("the app draws the plans first on the board, in both of its layouts, and its buttons only write a message to Marlo", () => {
+  const app = fs.readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
+  assert.equal(app.match(/^    plansColumn\(board, now\),\n    column\("wait", "Waiting on me"/gm)?.length, 2, "above Waiting on me, wherever the board is drawn");
+  const card = app.slice(app.indexOf("function planCard("), app.indexOf("function plansColumn("));
+  for (const said of ["`Resume plan ${p.id}.`", "`Skip the step plan ${p.id} stopped at, and carry on.`", "`Stop plan ${p.id}.`"]) assert.ok(card.includes(`ask(${said})`), said);
+  assert.ok(!/postJson|\/approvals|act\(/.test(card), "a plan card decides nothing itself: no route, no approval, only words sent to the chief");
+  assert.match(card, /something is wrong with the driver/);
+});
