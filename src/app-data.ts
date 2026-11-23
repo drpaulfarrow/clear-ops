@@ -61,7 +61,7 @@ export const CLEO = "Cleo";
 
 export interface AppSource {
   store: Store;
-  queue: Pick<JobRunner, "isHeld" | "queuePosition" | "latestStep" | "liveness" | "spendState" | "capReached">;
+  queue: Pick<JobRunner, "isHeld" | "queuePosition" | "latestStep" | "liveness" | "spendState" | "capReached"> & { plans?: Pick<JobRunner["plans"], "view"> };
   uptime?: { report: () => UptimeReport };
   probes?: { snapshot: () => ProbeResult[] };
   activeWorkers?: () => number;
@@ -216,7 +216,12 @@ export interface AppBoard {
   spaces: AppSpace[];
   /** Who is on shift and what each is doing this minute. */
   roster: AppRosterEntry[];
+  /** The plans the service is running to completion (src/plans.ts): every open one and those that finished in the last day. */
+  plans: AppPlan[];
 }
+
+/** A plan on the board: where it is, why it is not moving if it is not, and the repository it builds in. */
+export type AppPlan = import("./plans.js").PlanView & { repository: string; repositoryName: string };
 
 /**
  * A project space. For now a space is a managed repository and nothing more: its id is the alias its
@@ -773,6 +778,7 @@ export function appBoard(source: AppSource): AppBoard {
     }),
     pullsUnread: open.unread,
     pullsLoading: open.loading,
+    plans: (source.queue.plans?.view() ?? []).map((p) => ({ ...p, repository: p.target, repositoryName: repoLabel(p.target) })),
   };
 }
 
