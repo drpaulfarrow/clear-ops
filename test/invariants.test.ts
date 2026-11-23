@@ -76,6 +76,39 @@ test("only the maintainer merges: engineers cannot merge or push the default bra
   assert.match(jobs, /job\.kind === "engineer" && \(job\.commission \|\| job\.reviewOnly\)\)/, "a review-only or commissioned engineer opens its pull request for review and starts no maintainer");
 });
 
+// The Paul merge gate (23 Nov 2026): every managed repository other than the product defaults to it,
+// so a repository registered at any time is gated without anyone remembering to gate it. The only
+// escape hatch is AUTONOMOUS_MERGE_REPOS, and it is Paul who names a repository there.
+test("the Paul merge gate covers every managed repository except the product, and only AUTONOMOUS_MERGE_REPOS lifts it", async () => {
+  const { workerSpec, SELF_MERGE_DENY } = await import("../src/agents.js");
+  const { config } = await import("../src/config.js");
+  const { repoRegistry } = await import("../src/repos.js");
+  const saved = config.autonomousMergeRepos;
+  try {
+    for (const r of repoRegistry.list()) {
+      const s = workerSpec("maintain", r.alias);
+      if (r.alias === "product") {
+        assert.ok(!s.disallowedTools?.includes("Bash(gh pr merge*)"), "the product's maintainer merges as before");
+      } else {
+        for (const d of SELF_MERGE_DENY) assert.ok(s.disallowedTools?.includes(d), `${r.alias} is gated: ${d}`);
+        assert.match(s.prompt, /never merge here/, `${r.alias} is told never to merge`);
+      }
+    }
+    // A repository registered at runtime is gated the same way: nothing is hardcoded to today's list.
+    repoRegistry.add({ alias: "invariant-late", slug: "drpaulfarrow/invariant-late" });
+    const late = workerSpec("maintain", "invariant-late");
+    for (const d of SELF_MERGE_DENY) assert.ok(late.disallowedTools?.includes(d), `a runtime-registered repository is gated: ${d}`);
+    // And the escape hatch frees exactly the repository it names, nothing else.
+    const named = repoRegistry.list().find((r) => r.alias !== "product" && r.alias !== "self")!;
+    config.autonomousMergeRepos = [named.slug ?? named.alias];
+    const freed = workerSpec("maintain", named.alias);
+    assert.ok(!freed.disallowedTools?.includes("Bash(gh pr merge*)"), "the named repository merges again");
+    assert.match(workerSpec("maintain", "self").prompt, /never merge here/, "the workforce repository is never freed by another repository's grant");
+  } finally {
+    config.autonomousMergeRepos = saved;
+  }
+});
+
 test("agents run headless: nothing waits on an interactive permission prompt", () => {
   assert.match(src("agents.ts"), /permissionMode: "dontAsk"/);
 });
