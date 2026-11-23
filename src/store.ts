@@ -446,6 +446,11 @@ export interface Settings {
    * engineer job on their repository (src/carry.ts). Written only by the job runner.
    */
   carried?: import("./carry.js").CarriedFinding[];
+  /**
+   * Models learned to take no images, by the id a run was sent to (src/image-input.ts): a run on one
+   * cannot open an image file. Written only by the job runner, from a provider's own refusal.
+   */
+  textOnlyModels?: string[];
   /** The plans the service runs to completion (src/plans.ts). Written only by the plan driver. */
   plans?: import("./plans.js").Plan[];
   /** Sites Paul unlocked with "act as me on <site>" (src/site-policy.ts): only his own chat message sets this. */
