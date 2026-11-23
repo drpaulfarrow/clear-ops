@@ -51,6 +51,7 @@ import { FILE_CSP, PAGE_CSP, REPORTS_PATH, renderReportPage, renderReportsIndex,
 import { beatFor } from "./beats.js";
 import { UptimeLog } from "./uptime.js";
 import { AppAuth, appAuth as serviceAppAuth, APP_AUTH_CALLBACK_PATH, APP_AUTH_START_PATH, APP_PATH, APP_SIGN_IN_PATH, APP_SIGN_OUT_PATH, REFUSAL_TEXT, type AppAuthRefusal } from "./app-auth.js";
+import { OpsMcpAuth, opsMcpRouter, type OpsMcpTool } from "./ops-mcp.js";
 import { appAgent, appBoard, appPullWatch, appSpace, appSpend, appChat, appHistory, appJob, appWaiting, rerunRefusal, type AppSource } from "./app-data.js";
 import { mintAppApproval } from "./app-approver.js";
 import { PrStates } from "./pr-state.js";
@@ -111,6 +112,8 @@ export interface AppDeps {
   /** The board's heartbeat log. Built from the data directory by default; a test injects one. */
   /** The web app's GitHub sign-in (src/app-auth.ts). Tests inject one with a fake GitHub. */
   appAuth?: AppAuth;
+  /** Whether the read-only MCP window is on (src/ops-mcp.ts). Tests set it; otherwise OPS_MCP_ENABLED. */
+  opsMcpEnabled?: boolean;
   /** What GitHub says of pull requests (src/pr-state.ts). Tests inject one with a fake GitHub. */
   prStates?: PrStates;
   /** A job's pull request shown in the app, and merged on Paul's own tap (src/app-pulls.ts). Tests inject one with a fake GitHub. */
@@ -1179,6 +1182,21 @@ export function buildApp(given: AppDeps) {
     if (!detail) return void res.status(404).json({ error: "no such job" });
     res.json(detail);
   });
+  // A read-only window on all this for Claude (src/ops-mcp.ts): the same reads as the routes above, over
+  // MCP, connected only by Paul's own tap on its consent page (/mcp/connect), which checks this same sign-in. Off unless
+  // OPS_MCP_ENABLED is "true" and the sign-in is set up.
+  const mcpOn = () => (deps.opsMcpEnabled ?? config.opsMcpEnabled) && appAuthz.enabled();
+  const mcpAuth = new OpsMcpAuth(deps.store);
+  // Switched off: whatever was connected is forgotten, so switching it on again needs Paul's tap again.
+  if (!(deps.opsMcpEnabled ?? config.opsMcpEnabled) && deps.store.settings().opsMcp) mcpAuth.revokeAll();
+  const mcpTools = (): OpsMcpTool[] => [
+    { name: "board", description: "The web app's board: jobs running, queued and recently finished, plans, what waits on Paul, open pull requests, spend and health.", inputSchema: { type: "object", properties: {} }, read: () => appBoard(appSource()) },
+    { name: "history", description: "Older finished jobs, newest first, fifty at a time.", inputSchema: { type: "object", properties: { before: { type: "string", description: "A job id: list the jobs older than it." }, space: { type: "string", description: "Only this space (a repository alias)." } } }, read: (a) => appHistory(appSource(), a.before, undefined, a.space) },
+    { name: "job", description: "One job as its page in the app shows it: its card, limits, related jobs, its trace and its report.", inputSchema: { type: "object", properties: { id: { type: "string", description: "The job's id, for example 4ce5cd." } }, required: ["id"] }, read: (a) => appJob(appSource(), a.id) },
+    { name: "spend", description: "The app's Spend page: today's spend against the cap, and what recent jobs cost.", inputSchema: { type: "object", properties: {} }, read: () => appSpend(appSource()) },
+    { name: "chat", description: "A conversation in the web app, as it shows it: Paul's messages and Marlo's answers. With no thread, the main chat.", inputSchema: { type: "object", properties: { thread: { type: "string", description: "A thread as the app names it (space:<alias>, chat:<id>, a job id); empty for the main chat." } } }, read: (a) => { const where = a.thread ? appThread(a.thread) : WEB_CONVERSATION; return where ? appChat(appSource(), chat, where) : undefined; } },
+  ];
+  app.use(opsMcpRouter({ enabled: mcpOn, auth: mcpAuth, publicUrl: config.publicUrl, tools: mcpTools, signedIn: (cookie) => appAuthz.sessionValid(deps.store, cookie), signInPath: APP_SIGN_IN_PATH, headers: appHeaders }));
   // Cleo's own conversation: what was said aloud, his words and hers, apart from the chief's feeds. Read-only.
   app.get(`${APP_PATH}/api/cleo`, (_req, res) => {
     appHeaders(res);
