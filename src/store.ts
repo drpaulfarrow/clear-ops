@@ -486,6 +486,11 @@ export interface Settings {
    */
   appGithubUser?: { login: string; id: number };
   /**
+   * The read-only MCP connection (src/ops-mcp.ts): clients registered for Claude's callback, and live
+   * tokens kept only as their sha256. Never a token itself.
+   */
+  opsMcp?: import("./ops-mcp.js").OpsMcpState;
+  /**
    * The reports view's long-lived token (src/reports.ts), minted on first use and printed in chat by
    * /reports. It is its own token, not the board's, because it opens saved outputs rather than job
    * metadata; the same rules apply (compared in constant time, never logged, read-only pages only).

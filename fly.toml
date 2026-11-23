@@ -11,6 +11,8 @@ primary_region = "lhr"
   PORT = "8080"
   CHANNELS = "telegram,discord"
   DATA_DIR = "/data"
+  # The read-only MCP window for Claude (src/ops-mcp.ts), connected only by Paul's tap at /app/connect.
+  OPS_MCP_ENABLED = "true"
   REPO_DIR = "/data/workspace"
   SELF_REPO_DIR = "/data/self"
   SELF_REPO = "drpaulfarrow/clear-ops"
