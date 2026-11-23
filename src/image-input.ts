@@ -17,9 +17,18 @@
  *     way has its model remembered (settings.textOnlyModels) and is run again at once with the guard
  *     on, so no model costs more than one such run, and none costs a job.
  * Learning from the refusal needs no list of what each model accepts and cannot go stale with one.
+ *
+ * Refusing the picture means nobody looks at the page. So where a larger tier runs on a model not
+ * known to be text only, a run that needs to look switches to it instead (Paul, 23 Nov 2026: "if it
+ * NEEDS to use images, it should switch"): the Read of an image stops the cheap run where it stands,
+ * and the job carries on at once on that tier, fresh, with the work so far in its folder. Only the
+ * runs that open a picture pay for the larger model. With no such tier, the refusal above stands.
  */
 import type { HookCallback } from "@anthropic-ai/claude-agent-sdk";
 import type { Store } from "./store.js";
+
+/** The tiers a run switches to when it needs to look at an image, in order of preference. */
+export const VISION_ALIASES = ["opus", "fable"] as const;
 
 /** A file the Read tool would hand to the model as a picture. */
 export const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp|bmp|tiff?|avif|heic|ico)$/i;
@@ -63,3 +72,39 @@ export const refuseImageRead: HookCallback = async (input) => {
   if (typeof file !== "string" || !IMAGE_FILE.test(file.trim())) return {};
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: IMAGE_READ_REFUSAL } };
 };
+
+/**
+ * The tier a run on a text-only model switches to when it needs to see an image: the first of
+ * VISION_ALIASES that runs on another model not known to be text only. Undefined when there is none.
+ */
+export function visionAlias(store: Pick<Store, "settings">, current: string, resolve: (alias: string) => string): string | undefined {
+  return VISION_ALIASES.find((alias) => {
+    const model = resolve(alias);
+    return model !== current && !isTextOnly(store, model);
+  });
+}
+
+/** What the stopped run is told by the refused Read (it ends there, so it reads this only in its record). */
+export const IMAGE_SWITCH_STOP = "This model cannot take images, so the run stops here and the job carries on at once on a model that can, with the work so far in its folder.";
+
+/**
+ * The PreToolUse hook for a run that may switch: a Read of an image file is refused and the run is
+ * stopped where it stands, and onNeed is told which file, so the service can carry the job on with a
+ * model that can see it. Every other call is untouched.
+ */
+export function stopForImage(onNeed: (file: string) => void): HookCallback {
+  return async (input) => {
+    const call = input as { hook_event_name?: string; tool_name?: string; tool_input?: unknown };
+    if (call.hook_event_name !== "PreToolUse" || call.tool_name !== "Read") return {};
+    const file = (call.tool_input as { file_path?: unknown } | undefined)?.file_path;
+    if (typeof file !== "string" || !IMAGE_FILE.test(file.trim())) return {};
+    onNeed(file.trim());
+    return { continue: false, stopReason: IMAGE_SWITCH_STOP, hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: IMAGE_SWITCH_STOP } };
+  };
+}
+
+/** What the run that carries the job on is told, at the end of its task. */
+export function switchedNote(file: string | undefined, from: string): string {
+  const what = file ? `when it needed to look at ${file.split("/").pop()}` : "when it opened an image";
+  return `\n\nThis job started on ${from}, which cannot take images, and that run stopped ${what}. You are carrying it on, on a model that can see images. The work so far is in your working folder (check git status and the branch): pick up from there rather than starting again, and look at the picture yourself.`;
+}

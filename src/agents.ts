@@ -1,6 +1,6 @@
 import { query, type AgentDefinition, type McpServerConfig, type SDKAssistantMessage, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { MERGE_AND_CARRY_RULE } from "./carry.js";
-import { refuseImageRead } from "./image-input.js";
+import { refuseImageRead, stopForImage } from "./image-input.js";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
@@ -31,6 +31,8 @@ export interface RunOptions {
   images?: Array<{ mediaType: string; data: string }>;
   /** The run's model takes no images (src/image-input.ts): a Read of an image file is refused before it happens. */
   denyImages?: boolean;
+  /** With denyImages: instead of refusing a Read of an image file and carrying on, stop the run and say which file (the job then switches to a model that can see it). */
+  onImageNeeded?: (file: string) => void;
   systemPrompt: string;
   model: string;
   /**
@@ -224,7 +226,7 @@ export const sdkRunner: AgentRunner = async (o) => {
         permissionMode: "dontAsk",
         // A model that takes no images: opening an image file would end the run, so that one call is
         // refused before it is made (src/image-input.ts). Every other call is untouched.
-        ...(o.denyImages ? { hooks: { PreToolUse: [{ matcher: "Read", hooks: [refuseImageRead] }] } } : {}),
+        ...(o.denyImages ? { hooks: { PreToolUse: [{ matcher: "Read", hooks: [o.onImageNeeded ? stopForImage(o.onImageNeeded) : refuseImageRead] }] } } : {}),
         // OpenRouter mode: price its models so total_cost_usd and maxBudgetUsd stay meaningful.
         ...(!direct && llmManagedSettings() ? { managedSettings: llmManagedSettings() } : {}),
         env: {

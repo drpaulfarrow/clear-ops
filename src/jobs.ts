@@ -33,7 +33,7 @@ import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { PLAN_FIX_ROUNDS, PlanRunner } from "./plans.js";
-import { isImageInputFailure, isTextOnly, rememberTextOnly, TEXT_ONLY_NOTE } from "./image-input.js";
+import { isImageInputFailure, isTextOnly, rememberTextOnly, switchedNote, TEXT_ONLY_NOTE, visionAlias } from "./image-input.js";
 import { CARRY_MAX_PER_REPO, CARRY_PER_JOB, carriedFree, carriedSection, parseCarryLines, type CarriedFinding } from "./carry.js";
 import { randomBytes } from "node:crypto";
 import { JobTrace, tracesDir, type RawTraceEvent } from "./trace.js";
@@ -1229,9 +1229,14 @@ export class JobRunner {
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
       // A model already known to take no images (src/image-input.ts): this run cannot open an image
       // file, and is told so, before it can end itself on one.
-      const textOnly = isTextOnly(this.store, onAnthropic ? route.model : resolveModel(route.model));
+      // Where a larger tier can see, a run that needs to look stops instead and the job switches to it.
+      const runModel = onAnthropic ? route.model : resolveModel(route.model);
+      const textOnly = isTextOnly(this.store, runModel);
+      const needsImage: { file?: string } = {};
+      const canSwitch = textOnly && !onAnthropic && visionAlias(this.store, runModel, resolveModel) !== undefined;
       const opts = {
         denyImages: textOnly,
+        onImageNeeded: canSwitch ? (file: string) => { needsImage.file = file; } : undefined,
         prompt: `${evidencePrefix}${job.brief}${carried}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${beatNote}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
@@ -1316,24 +1321,39 @@ export class JobRunner {
         }
       }
       // The other failure the service cures by itself (23 Nov 2026, src/image-input.ts): the worker
-      // opened an image file on a model that takes no images, and the provider ended the run. The
-      // model is remembered, so no later run on it can open one, and this run happens again at once
-      // with that guard on and the worker told. Fresh, never resumed: the ended conversation holds
-      // the picture and would be refused again. Once only: a second such refusal fails the job.
-      if (!live.stop && !opts.denyImages && result?.error && isImageInputFailure(result.error)) {
-        const model = onAnthropic ? route.model : resolveModel(route.model);
-        rememberTextOnly(this.store, model);
-        trace.note(`model ${model} takes no images and the run ended on an image file; retried with image files refused`);
-        shown.note("This model cannot take images; carrying on without opening image files");
-        result = undefined;
+      // needed to look at an image on a model that takes no images. Either the provider ended the run
+      // when it opened one (the model is then remembered as text only), or the run was already known to
+      // be on such a model and stopped itself at the Read. Where a larger tier runs on a model that can
+      // see, the job switches to it and carries on at once, so only the runs that look pay for it. With
+      // none, the run happens again with image files refused and the worker told. Fresh, never resumed:
+      // the ended conversation holds the picture and would be refused again. Once only.
+      const imageFailed = !live.stop && !opts.denyImages && !!result?.error && isImageInputFailure(result.error);
+      if (imageFailed) {
+        rememberTextOnly(this.store, runModel);
+        trace.note(`model ${runModel} takes no images and the run ended on an image file`);
+      }
+      if (!live.stop && (imageFailed || needsImage.file)) {
+        const to = onAnthropic ? undefined : visionAlias(this.store, runModel, resolveModel);
+        const basePrompt = textOnly ? opts.prompt.slice(0, -TEXT_ONLY_NOTE.length) : opts.prompt;
         try {
-          result = await this.run({ ...opts, resume: undefined, denyImages: true, prompt: `${opts.prompt}${TEXT_ONLY_NOTE}` });
+          if (to) {
+            const toModel = resolveModel(to);
+            trace.note(`switched from ${runModel} to ${toModel} (${to}) to look at ${needsImage.file ?? "an image file"}`);
+            shown.note(`Switching to ${toModel} to look at an image`);
+            result = await this.run({ ...opts, model: to, resume: undefined, denyImages: false, onImageNeeded: undefined, prompt: `${basePrompt}${switchedNote(needsImage.file, runModel)}` });
+            if (!runFailure(result)) result.text = addToReport(result.text, `This job started on ${runModel}, which cannot take images. It switched to ${toModel} when it needed to look at one, and finished there.`);
+          } else if (imageFailed) {
+            trace.note("no tier that can see images; retried with image files refused");
+            shown.note("This model cannot take images; carrying on without opening image files");
+            result = await this.run({ ...opts, resume: undefined, denyImages: true, onImageNeeded: undefined, prompt: `${basePrompt}${TEXT_ONLY_NOTE}` });
+            if (!runFailure(result)) result.text = addToReport(result.text, `This job's model (${runModel}) cannot take images. Its first run ended when it opened an image file, so it was run again with image files refused: anything it says about how a page looks was not checked by eye.`);
+          }
         } catch (err) {
           if (live.stop) throw err;
           result = { text: "", error: failureFromError(err) };
         }
-        if (!runFailure(result)) result.text = addToReport(result.text, `This job's model (${model}) cannot take images. Its first run ended when it opened an image file, so it was run again with image files refused: anything it says about how a page looks was not checked by eye.`);
       }
+      if (!result) result = { text: "", error: failureFromError(new Error("the run ended with no result")) };
       // Out of turns before it wrote anything up (the SDK's error_max_turns). The reading is done and
       // paid for; only the report is missing. So it gets one short turn more, on the same conversation,
       // to write up what it has and say what it did not reach. Until 20 Nov 2026 such a run was recorded

@@ -58,7 +58,7 @@ test("on such a model a Read of an image file is refused before it happens, and 
   assert.deepEqual(await hook("Read", undefined), {});
   // The runner wires it in for a run marked as taking no images, and for no other.
   const agents = fs.readFileSync(new URL("../src/agents.ts", import.meta.url), "utf8");
-  assert.match(agents, /\.\.\.\(o\.denyImages \? \{ hooks: \{ PreToolUse: \[\{ matcher: "Read", hooks: \[refuseImageRead\] \}\] \} \} : \{\}\),/);
+  assert.match(agents, /\.\.\.\(o\.denyImages \? \{ hooks: \{ PreToolUse: \[\{ matcher: "Read", hooks: \[o\.onImageNeeded \? stopForImage\(o\.onImageNeeded\) : refuseImageRead\] \}\] \} \} : \{\}\),/);
 });
 
 /** A workforce whose engineer answers what `engineer` says for each of its runs, and whose maintainer merges. */
