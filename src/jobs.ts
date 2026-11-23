@@ -6,7 +6,7 @@ import { EVIDENCE_RULE, retrieve } from "./retrieval.js";
 import { SIGNUP_NOTE, SIGNUP_TOOLS } from "./signup-gate.js";
 import { PURCHASE_NOTE, PURCHASE_SERVER, PURCHASE_TOOLS, purchaseServer, type PurchaseGate } from "./purchase.js";
 import { BEAT_NOTE, BEAT_SERVER, BEAT_TOOLS, beatServer } from "./beats.js";
-import { perJobModelError, provider, runRoute } from "./llm.js";
+import { perJobModelError, provider, resolveModel, runRoute } from "./llm.js";
 import { engageRunFallback, isWithdrawnModelFailure } from "./model-ops.js";
 import { isAliasName, type CatalogueRole } from "./catalogue.js";
 import type { OtpRelay } from "./otp.js";
@@ -33,6 +33,7 @@ import { CREATE_REPO_NOTE, REPO_SERVER } from "./repo-tools.js";
 import { spendDisplay, storeMeter, type RealSpend, type SpendMeter } from "./spend.js";
 import { repoRegistry } from "./repos.js";
 import { PLAN_FIX_ROUNDS, PlanRunner } from "./plans.js";
+import { isImageInputFailure, isTextOnly, rememberTextOnly, switchedNote, TEXT_ONLY_NOTE, visionAlias } from "./image-input.js";
 import { CARRY_MAX_PER_REPO, CARRY_PER_JOB, carriedFree, carriedSection, parseCarryLines, type CarriedFinding } from "./carry.js";
 import { randomBytes } from "node:crypto";
 import { JobTrace, tracesDir, type RawTraceEvent } from "./trace.js";
@@ -1226,7 +1227,16 @@ export class JobRunner {
         evidence = outcome.evidence;
       }
       const evidencePrefix = evidence ? `${evidence}\n\n` : "";
+      // A model already known to take no images (src/image-input.ts): this run cannot open an image
+      // file, and is told so, before it can end itself on one.
+      // Where a larger tier can see, a run that needs to look stops instead and the job switches to it.
+      const runModel = onAnthropic ? route.model : resolveModel(route.model);
+      const textOnly = isTextOnly(this.store, runModel);
+      const needsImage: { file?: string } = {};
+      const canSwitch = textOnly && !onAnthropic && visionAlias(this.store, runModel, resolveModel) !== undefined;
       const opts = {
+        denyImages: textOnly,
+        onImageNeeded: canSwitch ? (file: string) => { needsImage.file = file; } : undefined,
         prompt: `${evidencePrefix}${job.brief}${carried}${focus ? `\n\n${focus}` : ""}${permits}${dnsPermit}${createRepo}${signupPermit}${purchasePermit}${beatNote}${depth}${web.note}${standing}${resume}${carryOn}${docNote}`,
         systemPrompt: SEARCH_KINDS.includes(job.kind) ? `${spec.prompt}\n\n${EVIDENCE_RULE}` : spec.prompt,
         ...route,
@@ -1262,6 +1272,7 @@ export class JobRunner {
           this.persistUsage(id, job, live, usage, this.realCostFor(costMeter));
         },
       };
+      if (textOnly) opts.prompt += TEXT_ONLY_NOTE;
       // Interrupted by a restart: carry on the same conversation, so the worker keeps everything it had
       // read and decided instead of starting again. If that cannot work (the session is gone or broken),
       // fall back to a fresh run with the usual note to check the working folder.
@@ -1294,7 +1305,7 @@ export class JobRunner {
       // started on what it ran on before. Once only: engaging spends the fallback, so a second
       // refusal fails the job honestly. A run pinned to a model by its id (never an alias) and every
       // run on Anthropic have no fallback and fail as before.
-      if (!live.stop && !onAnthropic && isAliasName(route.model) && result?.error && isWithdrawnModelFailure(result.error)) {
+      if (!live.stop && !onAnthropic && isAliasName(route.model) && result?.error && isWithdrawnModelFailure(result.error) && !isImageInputFailure(result.error)) {
         const withdrew = engageRunFallback(route.model, undefined, result.error.detail, catalogueRole(job.kind), this.store);
         if (withdrew) {
           trace.note(`model ${withdrew.from} was refused by OpenRouter mid-run; retried on its recorded previous ${withdrew.role ? `tier for ${withdrew.role}` : "model"} ${withdrew.to}`);
@@ -1309,6 +1320,40 @@ export class JobRunner {
           if (!runFailure(result)) result.text = addToReport(result.text, `The model this job started on (${withdrew.from}) had been withdrawn from OpenRouter, so the run was retried once on its recorded previous model (${withdrew.to}).`);
         }
       }
+      // The other failure the service cures by itself (23 Nov 2026, src/image-input.ts): the worker
+      // needed to look at an image on a model that takes no images. Either the provider ended the run
+      // when it opened one (the model is then remembered as text only), or the run was already known to
+      // be on such a model and stopped itself at the Read. Where a larger tier runs on a model that can
+      // see, the job switches to it and carries on at once, so only the runs that look pay for it. With
+      // none, the run happens again with image files refused and the worker told. Fresh, never resumed:
+      // the ended conversation holds the picture and would be refused again. Once only.
+      const imageFailed = !live.stop && !opts.denyImages && !!result?.error && isImageInputFailure(result.error);
+      if (imageFailed) {
+        rememberTextOnly(this.store, runModel);
+        trace.note(`model ${runModel} takes no images and the run ended on an image file`);
+      }
+      if (!live.stop && (imageFailed || needsImage.file)) {
+        const to = onAnthropic ? undefined : visionAlias(this.store, runModel, resolveModel);
+        const basePrompt = textOnly ? opts.prompt.slice(0, -TEXT_ONLY_NOTE.length) : opts.prompt;
+        try {
+          if (to) {
+            const toModel = resolveModel(to);
+            trace.note(`switched from ${runModel} to ${toModel} (${to}) to look at ${needsImage.file ?? "an image file"}`);
+            shown.note(`Switching to ${toModel} to look at an image`);
+            result = await this.run({ ...opts, model: to, resume: undefined, denyImages: false, onImageNeeded: undefined, prompt: `${basePrompt}${switchedNote(needsImage.file, runModel)}` });
+            if (!runFailure(result)) result.text = addToReport(result.text, `This job started on ${runModel}, which cannot take images. It switched to ${toModel} when it needed to look at one, and finished there.`);
+          } else if (imageFailed) {
+            trace.note("no tier that can see images; retried with image files refused");
+            shown.note("This model cannot take images; carrying on without opening image files");
+            result = await this.run({ ...opts, resume: undefined, denyImages: true, onImageNeeded: undefined, prompt: `${basePrompt}${TEXT_ONLY_NOTE}` });
+            if (!runFailure(result)) result.text = addToReport(result.text, `This job's model (${runModel}) cannot take images. Its first run ended when it opened an image file, so it was run again with image files refused: anything it says about how a page looks was not checked by eye.`);
+          }
+        } catch (err) {
+          if (live.stop) throw err;
+          result = { text: "", error: failureFromError(err) };
+        }
+      }
+      if (!result) result = { text: "", error: failureFromError(new Error("the run ended with no result")) };
       // Out of turns before it wrote anything up (the SDK's error_max_turns). The reading is done and
       // paid for; only the report is missing. So it gets one short turn more, on the same conversation,
       // to write up what it has and say what it did not reach. Until 20 Nov 2026 such a run was recorded
