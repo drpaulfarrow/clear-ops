@@ -1317,7 +1317,10 @@ export class JobRunner {
       if (job.resumed && job.sessionId && !job.savedWork) {
         result = await this.run({ ...opts, prompt: continueNote(job.resumed + 1), resume: job.sessionId }).catch((err) => ({ text: "", error: failureFromError(err) }));
         const broken = runFailure(result);
-        if (broken && !live.stop && !HOLD_KINDS.includes(broken.kind)) {
+        // A resumed run that ended on an image its model cannot take is not a broken session: it is left
+        // for the image cure below, which switches to a model that can see (23 Nov 2026, job a0655b, which
+        // was instead started fresh on the same model and opened the same picture again).
+        if (broken && !live.stop && !HOLD_KINDS.includes(broken.kind) && !isImageInputFailure(broken)) {
           console.warn(`job ${id}: resuming its session failed (${broken.detail.slice(0, 200)}); starting a fresh run`);
           this.store.updateJob(id, { sessionId: undefined });
           result = undefined;

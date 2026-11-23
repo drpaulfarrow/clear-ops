@@ -130,3 +130,28 @@ test("with no tier that can see, the old refusal stands", async () => {
   assert.equal(second.onImageNeeded, undefined);
   assert.ok(second.prompt.endsWith(img.TEXT_ONLY_NOTE));
 });
+
+test("a run resumed after a restart that ends on an image switches too, rather than starting again on the same model", async () => {
+  // Job a0655b, 23 Nov 2026: interrupted by a deploy, resumed on its own conversation, opened a
+  // screenshot and was refused. The resume fallback took that for a broken session and started it
+  // fresh on the same model, which opened the same picture again.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clear-ops-image-resume-"));
+  const seed = new Store(dir);
+  const a = seed.createJob("engineer", "Build the task detail pane", FOUNDER, "product");
+  seed.updateJob(a.id, { status: "running", sessionId: "s-before-deploy" });
+  const store = new Store(dir);
+  const runs: RunOptions[] = [];
+  const runner: AgentRunner = async (o) => {
+    if (o.systemPrompt.startsWith("You are the maintainer")) return { text: `REVIEW ${pr(1)}: merged` };
+    runs.push(o);
+    return o.resume ? { text: "", error: { kind: "api", detail: REFUSED } } : { text: `Opened ${pr(1)}. Looked at the pane.` };
+  };
+  const jobs = new JobRunner(store, new ConsoleMessenger(), runner);
+  await jobs.resumeInterrupted();
+  await waitFor(() => store.getJob(a.id)!.status === "done");
+  assert.equal(runs.length, 2, "the resumed run, then the switch: never a third");
+  assert.equal(runs[0]!.resume, "s-before-deploy");
+  assert.equal(runs[1]!.model, "opus");
+  assert.equal(runs[1]!.resume, undefined);
+  assert.deepEqual(img.textOnlyModels(store), [ENGINEER()]);
+});
