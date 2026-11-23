@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { assertProductionConfig, bookingLink, config, engineerSlotsLine } from "./config.js";
@@ -114,6 +114,8 @@ export interface AppDeps {
   appAuth?: AppAuth;
   /** Whether the read-only MCP window is on (src/ops-mcp.ts). Tests set it; otherwise OPS_MCP_ENABLED. */
   opsMcpEnabled?: boolean;
+  /** The deploy's drain key. Tests set it; otherwise DEPLOY_DRAIN_TOKEN. */
+  deployDrainToken?: string;
   /** What GitHub says of pull requests (src/pr-state.ts). Tests inject one with a fake GitHub. */
   prStates?: PrStates;
   /** A job's pull request shown in the app, and merged on Paul's own tap (src/app-pulls.ts). Tests inject one with a fake GitHub. */
@@ -368,6 +370,20 @@ export function buildApp(given: AppDeps) {
   // What the deploy waits on (.github/workflows/deploy.yml): how many workers are running right now.
   // A count only, nothing about the jobs themselves.
   app.get("/busy", (_req, res) => res.json({ running: jobs.activeCount() }));
+  // The deploy's drain (.github/workflows/deploy.yml): before it restarts the service, CI asks for new jobs
+  // to be held for a while, so nothing starts only to be cut off, and then waits a short grace for the
+  // running ones. Only with the deploy's own key (DEPLOY_DRAIN_TOKEN, compared in constant time); 404
+  // without one. It holds and releases jobs and does nothing else: no job is stopped, nothing is read out.
+  app.post("/deploy/drain", express.json({ limit: "1kb" }), (req, res) => {
+    const key = deps.deployDrainToken ?? config.deployDrainToken;
+    if (!key) return void res.status(404).type("text/plain").send("Not found");
+    const given = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
+    const a = createHash("sha256").update(given).digest();
+    const b = createHash("sha256").update(key).digest();
+    if (!timingSafeEqual(a, b)) return void res.status(401).json({ error: "unauthorized" });
+    const minutes = Number((req.body as { minutes?: unknown } | undefined)?.minutes ?? 25);
+    res.json(jobs.drain(minutes));
+  });
 
   // Paul's assistant (src/instinct-bridge.ts, src/instinct-chat.ts): an authenticated door for status and for
   // a labelled conversation with the chief. Off (404) unless INSTINCT_BRIDGE_TOKEN is set. It cannot reach

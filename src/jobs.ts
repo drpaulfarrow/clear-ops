@@ -341,6 +341,37 @@ export class JobRunner {
   private readonly costWatch: CostWatchFactory;
   /** Reused dependency installs for the working copies coding jobs run in (src/setup.ts). */
   private readonly setup: PreparedCopies;
+  /**
+   * Draining for a deploy (23 Nov 2026, Paul: "Can we pause jobs for deploy elegantly?"). While it lasts,
+   * no job starts: a new or queued one is held exactly as the spend cap holds it (`capBlocked`) and
+   * starts when the drain ends, which is when it lapses or when the service restarts (it lives in
+   * memory only, so a new process always starts undrained). Running jobs carry on; whatever is still
+   * running when the deploy goes ahead resumes its own conversation after the restart, with its
+   * working folder as it was on the data volume.
+   */
+  private drainUntil = 0;
+  /** The longest a drain may last, so a deploy that never comes cannot hold the queues for long. */
+  static readonly DRAIN_MAX_MINUTES = 30;
+
+  /** Starts (or extends) a drain for `minutes`, capped. What is running and what is held now. */
+  drain(minutes: number): { until: string; running: number; held: number } {
+    const m = Math.min(Math.max(1, Math.round(Number.isFinite(minutes) ? minutes : 0)), JobRunner.DRAIN_MAX_MINUTES);
+    this.drainUntil = Math.max(this.drainUntil, this.now() + m * MINUTE);
+    return { until: new Date(this.drainUntil).toISOString(), running: this.activeCount(), held: this.store.allJobs().filter((j) => j.status === "queued").length };
+  }
+
+  /** When the drain ends, while one is on. */
+  draining(): string | undefined {
+    return this.now() < this.drainUntil ? new Date(this.drainUntil).toISOString() : undefined;
+  }
+
+  /** Holds a job for the deploy: queued, behind its repository's holder if it has one, started when the drain ends. No message: it is minutes. */
+  private blockForDeploy(job: Job): Job {
+    const key = lockKey(job);
+    const holder = key ? this.holder(key) : undefined;
+    return this.store.updateJob(job.id, { status: "queued", capBlocked: true, ...(key ? { waitingFor: holder ?? job.id, queuePos: this.nextQueuePos() } : {}) });
+  }
+
   /** How many workers are running right now (not waiting for a deploy or a working copy): what the deploy waits on. */
   activeCount(): number {
     return [...this.live.values()].filter((l) => !l.waiting && !l.waitingForCopy && !l.stop).length;
@@ -531,6 +562,8 @@ export class JobRunner {
     // Keep the spend figure current without waiting for it: cached, so at most one call a minute.
     void this.refreshSpend().catch(() => undefined);
     if (!ignoreHold && this.capReached()) return this.blockForCap(job);
+    // A deploy is about to restart the service: nothing starts now, so nothing new is cut off.
+    if (this.draining()) return this.blockForDeploy(job);
     if (key) {
       const holder = this.holder(key);
       if (holder) return this.store.updateJob(job.id, { waitingFor: holder, queuePos: this.nextQueuePos() });
@@ -626,7 +659,7 @@ export class JobRunner {
 
   /** Starts jobs the cap was holding that are free to run, once it no longer applies. */
   private async releaseCapped(): Promise<void> {
-    if (this.capReached()) return;
+    if (this.capReached() || this.draining()) return;
     for (const job of this.store.allJobs()) {
       if (job.status !== "queued" || !job.capBlocked) continue;
       this.store.updateJob(job.id, { capBlocked: undefined });
@@ -937,6 +970,10 @@ export class JobRunner {
     if (this.store.queueHold()) return false;
     const [next, ...rest] = this.waiting(key);
     if (!next) return false;
+    if (this.draining()) {
+      this.store.updateJob(next.id, { capBlocked: true });
+      return false;
+    }
     if (this.capReached()) {
       this.store.updateJob(next.id, { capBlocked: true });
       // Same path as a job blocked as it arrives: read the provider's own figure (cached, so at most
@@ -1075,7 +1112,7 @@ export class JobRunner {
     this.live.set(id, live);
     this.running.add(id);
     const at = new Date(now).toISOString();
-    this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at });
+    this.store.updateJob(id, { status: "running", startedAt: at, lastActivityAt: at, capBlocked: undefined });
     let web: WebTools | undefined;
     // A bridge job's throwaway source copy (src/bridge-snapshot.ts), removed when the job ends.
     let snapshot: string | undefined;

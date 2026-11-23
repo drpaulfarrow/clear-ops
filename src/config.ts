@@ -285,6 +285,8 @@ export const config = {
   uploadsDir: path.resolve(process.env.UPLOADS_DIR ?? path.join(process.env.DATA_DIR ?? "./data", "uploads")),
   /** Shared secret for the Instinct bridge (src/instinct-bridge.ts). Empty means the bridge is off. */
   instinctBridgeToken: process.env.INSTINCT_BRIDGE_TOKEN ?? "",
+  /** The deploy's own key for POST /deploy/drain (src/index.ts): CI holds new jobs before it restarts the service. Off when empty. */
+  deployDrainToken: process.env.DEPLOY_DRAIN_TOKEN ?? "",
   /** The read-only MCP window for Claude (src/ops-mcp.ts): off unless exactly "true", and only with the web app's sign-in set up. */
   opsMcpEnabled: process.env.OPS_MCP_ENABLED === "true",
   /** Exact sender ids (as stored on a job, e.g. "tg:123", "dc:u:123" or a number) whose jobs the bridge's read routes may show. Empty (the default) shows only the bridge's own jobs. */

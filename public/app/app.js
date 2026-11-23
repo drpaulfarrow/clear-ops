@@ -1026,6 +1026,7 @@ function boardPage() {
     ),
     state.problem ? h("div", { class: "banner" }, h("b", {}, "Not up to date. "), state.problem) : null,
     noticeBar(),
+    board.deploying ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Deploying. "), "New jobs wait until the service restarts; running ones carry on.")) : null,
     board.paused ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "The queues are held. "), "A credit or key failure stopped new engineering jobs."), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Resume")) : null,
     board.spend.capReached ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Today's cap is reached. "), "New jobs wait until tomorrow."), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
     view,
@@ -1961,6 +1962,7 @@ function besideBoard() {
   return [
     h("div", { class: "page-head" }, h("h2", { class: "pane-title" }, spaceOf() ? `Board · ${spaceOf().name}` : "Board"), h("button", { class: "btn", type: "button", onclick: () => setLayout("board") }, "Open the board")),
     noticeBar(),
+    board.deploying ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Deploying. "), "New jobs wait until the service restarts; running ones carry on.")) : null,
     board.paused ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "The queues are held.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Resume")) : null,
     board.spend.capReached ? h("div", { class: "banner row-banner" }, h("span", {}, h("b", {}, "Today's cap is reached.")), h("button", { class: "btn", type: "button", onclick: () => void send("/resume") }, "Lift it for today")) : null,
     plansColumn(board, now),
