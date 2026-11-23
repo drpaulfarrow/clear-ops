@@ -127,6 +127,12 @@ test("only Paul, signed in, on this page's own form, issues a code, and only to 
   // A post from another site (or none named) is refused.
   assert.equal((await form(on.base, mcp.MCP_CONNECT_PATH, fields, { cookie: session })).status, 403);
   assert.equal((await form(on.base, mcp.MCP_CONNECT_PATH, fields, { cookie: session, origin: "https://evil.example" })).status, 403);
+  // Chrome withholds the origin ("null") under a no-referrer policy; its own Sec-Fetch-Site still says where the post came from.
+  assert.equal((await form(on.base, mcp.MCP_CONNECT_PATH, fields, { cookie: session, origin: "null" })).status, 403, "null alone is not enough");
+  assert.equal((await form(on.base, mcp.MCP_CONNECT_PATH, fields, { cookie: session, origin: "null", "sec-fetch-site": "cross-site" })).status, 403);
+  assert.equal((await form(on.base, mcp.MCP_CONNECT_PATH, fields, { cookie: session, origin: "https://evil.example", "sec-fetch-site": "same-origin" })).status, 403, "a named other origin is never overridden");
+  assert.equal((await form(on.base, mcp.MCP_CONNECT_PATH, fields, { cookie: session, origin: "null", "sec-fetch-site": "same-origin" })).status, 303);
+  assert.equal((await fetch(`${on.base}${mcp.MCP_CONNECT_PATH}?${q}`, { headers: { cookie: session } })).headers.get("referrer-policy"), "same-origin", "the page sends its origin to itself");
   const ok = await form(on.base, mcp.MCP_CONNECT_PATH, fields, { cookie: session, origin: ORIGIN });
   const to = new URL(ok.headers.get("location")!);
   assert.equal(`${to.origin}${to.pathname}`, CALLBACK);

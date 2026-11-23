@@ -228,6 +228,17 @@ export function handleRpc(tools: OpsMcpTool[], msg: unknown): unknown {
   }
 }
 
+/**
+ * True for a post from this site's own page: its Origin is this site, or (where the browser withheld it
+ * and sent "null" or nothing) the browser's own Sec-Fetch-Site says same-origin. Both are headers a page
+ * cannot set, so a form on another site fails either way.
+ */
+export function sameSite(req: { headers: Record<string, string | string[] | undefined> }, publicUrl: string): boolean {
+  const origin = req.headers.origin;
+  if (origin === new URL(publicUrl).origin) return true;
+  return (origin === undefined || origin === "null") && req.headers["sec-fetch-site"] === "same-origin";
+}
+
 const CONNECT_FIELDS = ["client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state"] as const;
 
 /** The routes outside /app: discovery, registration, tokens and the endpoint. All 404 when off. */
@@ -271,6 +282,9 @@ export function opsMcpRouter(o: { enabled: () => boolean; auth: OpsMcpAuth; publ
   const fieldsOf = (src: Record<string, unknown>) => Object.fromEntries(CONNECT_FIELDS.map((k) => [k, typeof src[k] === "string" ? (src[k] as string) : ""])) as Record<(typeof CONNECT_FIELDS)[number], string>;
   r.get(MCP_CONNECT_PATH, (req, res) => {
     o.headers?.(res);
+    // The app's pages send no referrer at all, and with that policy Chrome sends this page's own form
+    // post with "Origin: null". This page sends its origin to itself only, so the check below can read it.
+    res.set("Referrer-Policy", "same-origin");
     if (!o.signedIn(req.headers.cookie)) return res.redirect(303, o.signInPath);
     const q = fieldsOf(req.query as Record<string, unknown>);
     const error = o.auth.check(q);
@@ -280,7 +294,7 @@ export function opsMcpRouter(o: { enabled: () => boolean; auth: OpsMcpAuth; publ
     o.headers?.(res);
     if (!o.signedIn(req.headers.cookie)) return res.redirect(303, o.signInPath);
     // Only this page's own form: a post from any other site, or one that names none, issues nothing.
-    if (req.headers.origin !== new URL(o.publicUrl).origin) return void res.status(403).type("text/plain").send("Refused");
+    if (!sameSite(req, o.publicUrl)) return void res.status(403).type("text/plain").send("Refused");
     const q = fieldsOf((req.body ?? {}) as Record<string, unknown>);
     const error = o.auth.check(q);
     if (error) return void res.type("html").send(connectPage({ error }));
