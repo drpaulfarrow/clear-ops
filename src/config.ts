@@ -237,6 +237,14 @@ export const config = {
    */
   selfMerge: (process.env.SELF_MERGE ?? "paul").toLowerCase() === "maintainer" ? ("maintainer" as const) : ("paul" as const),
   /**
+   * Managed repositories (alias or owner/name, comma separated) that Paul has granted autonomous
+   * merging (23 Nov 2026). By default a maintainer job on every managed repository other than the
+   * product hands a mergeable pull request to Paul rather than merging, exactly as it already does
+   * on the workforce's own repository. This setting is the one escape hatch, and it is empty by
+   * default: only Paul names a repository here.
+   */
+  autonomousMergeRepos: (process.env.AUTONOMOUS_MERGE_REPOS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+  /**
    * The daily model check (src/model-ops.ts): once a day, past the given London hour, the service
    * reads OpenRouter's public model list, verifies every model the workforce runs on and writes a
    * report of offers and cheaper alternatives. For the cheapest tier in use it moves the tier to a
