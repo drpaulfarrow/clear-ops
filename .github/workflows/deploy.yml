@@ -17,9 +17,12 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-  # A deploy restarts the service and interrupts every running job, so it waits until no worker is
-  # running (up to 45 minutes; after that it goes ahead and the jobs resume their own conversations).
-  # A newer merge cancels an older run that is still waiting, so merges close together go out as one deploy.
+  # A deploy restarts the service and interrupts every running job. With the DEPLOY_DRAIN_TOKEN secret
+  # set, it first drains: the service holds every new and queued job (POST /deploy/drain), and the
+  # running ones get up to 10 minutes to finish before the deploy goes ahead; anything still running
+  # resumes its own conversation after the restart, and the held jobs start then. Without the secret, or
+  # if the service does not answer the drain, it waits until no worker is running, up to 45 minutes, as
+  # before. A newer merge cancels an older run that is still waiting, so merges close together go out as one deploy.
   wait-for-quiet:
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -30,14 +33,25 @@ jobs:
       cancel-in-progress: true
     env:
       FLY_APP: ${{ vars.FLY_APP || 'clear-ops' }}
+      DRAIN_TOKEN: ${{ secrets.DEPLOY_DRAIN_TOKEN }}
     steps:
       - name: Wait until no job is running
         run: |
           url="https://${FLY_APP}.fly.dev/busy"
+          # Drain first: no new job starts, so only what is running now is waited for, and not for long.
+          rounds=90
+          if [ -n "$DRAIN_TOKEN" ]; then
+            if curl -fsS --max-time 20 -X POST -H "Authorization: Bearer $DRAIN_TOKEN" -H "content-type: application/json" -d '{"minutes":25}' "https://${FLY_APP}.fly.dev/deploy/drain" >/dev/null 2>&1; then
+              echo "Draining: new jobs are held until the deploy restarts the service; waiting up to 10 minutes for the running ones."
+              rounds=20
+            else
+              echo "The service did not take the drain (an older version, or no key there yet); waiting for quiet as before."
+            fi
+          fi
           # A busy machine can be slow to answer, so one missed answer is not "down": only six in a row
           # (about three minutes) means the service really is not running, and then deploying is the fix.
           misses=0
-          for i in $(seq 1 90); do
+          for i in $(seq 1 "$rounds"); do
             n=$(curl -fsS --max-time 20 "$url" 2>/dev/null | sed -n 's/.*"running":\([0-9]*\).*/\1/p')
             if [ -z "$n" ]; then
               misses=$((misses + 1))
@@ -48,10 +62,10 @@ jobs:
             fi
             misses=0
             if [ "$n" = "0" ]; then echo "No jobs running; deploying."; exit 0; fi
-            echo "$n job(s) running; checking again in 30 seconds ($i/90)."
+            echo "$n job(s) running; checking again in 30 seconds ($i/$rounds)."
             sleep 30
           done
-          echo "Still busy after 45 minutes; deploying anyway. Interrupted jobs resume where they were."
+          echo "Still busy after $((rounds / 2)) minutes; deploying anyway. Interrupted jobs resume where they were."
   deploy:
     needs: wait-for-quiet
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -135,6 +149,7 @@ jobs:
             GODADDY_DOMAINS="${{ vars.GODADDY_DOMAINS }}" \
             SIGNUP_EMAILS="${{ secrets.SIGNUP_EMAILS }}" \
             INSTINCT_BRIDGE_TOKEN="${{ secrets.INSTINCT_BRIDGE_TOKEN }}" \
+            DEPLOY_DRAIN_TOKEN="${{ secrets.DEPLOY_DRAIN_TOKEN }}" \
             BRIDGE_CHAT_ENABLED="${{ vars.BRIDGE_CHAT_ENABLED }}" \
             BRIDGE_CHAT_BUDGET_USD="${{ vars.BRIDGE_CHAT_BUDGET_USD }}" \
             BRIDGE_RETRY_ALLOW="${{ vars.BRIDGE_RETRY_ALLOW }}" \

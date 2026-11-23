@@ -61,7 +61,7 @@ export const CLEO = "Cleo";
 
 export interface AppSource {
   store: Store;
-  queue: Pick<JobRunner, "isHeld" | "queuePosition" | "latestStep" | "liveness" | "spendState" | "capReached"> & { plans?: Pick<JobRunner["plans"], "view"> };
+  queue: Pick<JobRunner, "isHeld" | "queuePosition" | "latestStep" | "liveness" | "spendState" | "capReached"> & Partial<Pick<JobRunner, "draining">> & { plans?: Pick<JobRunner["plans"], "view"> };
   uptime?: { report: () => UptimeReport };
   probes?: { snapshot: () => ProbeResult[] };
   activeWorkers?: () => number;
@@ -199,6 +199,8 @@ export interface AppBoard {
   health: { level: "ok" | "warn"; headline: string; live: string };
   /** The engineering queues are held after a credit or key failure, until /resume. */
   paused: boolean;
+  /** A deploy is draining the queues: new jobs wait until it has restarted the service. When the drain ends. */
+  deploying?: string;
   waiting: AppWaiting[];
   /** Running and queued jobs, then the recently finished, newest first. */
   jobs: AppJob[];
@@ -765,6 +767,7 @@ export function appBoard(source: AppSource): AppBoard {
     spend,
     health: { level: health.level, headline: health.headline, live: health.live },
     paused: !!source.store.queueHold(),
+    ...(source.queue.draining?.() ? { deploying: source.queue.draining!() } : {}),
     waiting: appWaiting(source.store, source.gates, now),
     jobs,
     voice: !!source.voice?.(),
