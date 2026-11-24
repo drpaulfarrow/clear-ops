@@ -140,3 +140,49 @@ test("the drain key never reaches a worker", async () => {
   const env = await workerGithubEnv({ PATH: "/usr/bin", DEPLOY_DRAIN_TOKEN: "the-deploys-own-key" }, new GithubAuth(), undefined, []);
   assert.equal(env.DEPLOY_DRAIN_TOKEN, undefined);
 });
+
+test("the drain key is absent from the environment every launch path constructs, even when the live process.env holds it", async () => {
+  const { workerGithubEnv, GithubAuth } = await import("../src/github-auth.js");
+  const { installerEnv, workerBuildEnv } = await import("../src/setup.js");
+  const { llmEnv } = await import("../src/llm.js");
+  // The live base, not a stand-in: workerEnv (src/agents.ts) builds every worker's environment
+  // from workerGithubEnv(process.env, githubAuth, ...), so the base that matters is process.env.
+  const saved = process.env.DEPLOY_DRAIN_TOKEN;
+  process.env.DEPLOY_DRAIN_TOKEN = "the-deploys-own-key-0123456789";
+  try {
+    // Every launch path is one funnel: sdkRunner (the only query() caller) composes its
+    // environment from workerEnv, which is workerGithubEnv(process.env, ...) plus further
+    // deletions (LLM, search, transcription keys), never an addition.
+    const env = await workerGithubEnv(process.env, new GithubAuth(), undefined, []);
+    assert.equal(env.DEPLOY_DRAIN_TOKEN, undefined);
+    // After workerEnv, the composition only adds fixed keys: the npm development-mode settings a
+    // kind that builds gets (the only RunOptions env, src/jobs.ts), the model keys, and the
+    // SDK's own settings (src/agents.ts).
+    const composed = {
+      ...env,
+      ...workerBuildEnv("/tmp/npm-cache"),
+      ...llmEnv("an-openrouter-key"),
+      CLAUDE_CONFIG_DIR: "/tmp/claude",
+      CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
+      CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "4",
+    };
+    assert.equal(composed.DEPLOY_DRAIN_TOKEN, undefined);
+    assert.equal(workerBuildEnv(undefined).DEPLOY_DRAIN_TOKEN, undefined);
+    assert.equal(llmEnv("an-openrouter-key").DEPLOY_DRAIN_TOKEN, undefined);
+    // The npm child an engineer's own setup runs: an allowlist, so it never sees the key either.
+    assert.equal(installerEnv(process.env, "/tmp/npm-cache").DEPLOY_DRAIN_TOKEN, undefined);
+  } finally {
+    if (saved === undefined) delete process.env.DEPLOY_DRAIN_TOKEN;
+    else process.env.DEPLOY_DRAIN_TOKEN = saved;
+  }
+});
+
+test("the runner's environment cannot be rebuilt around the strip", () => {
+  const agents = fs.readFileSync(new URL("../src/agents.ts", import.meta.url), "utf8");
+  // sdkRunner still builds the SDK's env from workerEnv, and workerEnv still builds on
+  // workerGithubEnv(process.env, ...): a move of the construction cannot sidestep the strip.
+  assert.match(agents, /env:\s*\{\s*\.\.\.\(await workerEnv\(/);
+  assert.match(agents, /await workerGithubEnv\(process\.env, githubAuth/);
+  // One query() caller, so no other path hands an environment to a run.
+  assert.equal((agents.match(/query\(\{/g) ?? []).length, 1);
+});
